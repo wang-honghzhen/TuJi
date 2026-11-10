@@ -1,0 +1,53 @@
+{
+  "name": "tuji",
+  "version": "0.1.0",
+  "description": "图记：使用图文档、节点和关系组织笔记的本地桌面应用",
+  "private": true,
+  "type": "module",
+  "main": "desktop/main.mjs",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/wang-honghzhen/TuJi.git"
+  },
+  "engines": {
+    "node": ">=24.13.0"
+  },
+  "scripts": {
+    "dev": "node scripts/dev.mjs",
+    "dev:desktop": "node scripts/dev.mjs --desktop",
+    "build": "tsc && vite build && node scripts/build-ai.mjs",
+    "preview": "node scripts/ai-server.mjs",
+    "serve": "node scripts/ai-server.mjs",
+    "desktop": "node desktop/launch.mjs",
+    "package:win": "npm run build && node scripts/prepare-desktop.mjs && electron-builder --config electron-builder.config.cjs --win nsis --x64 --publish never",
+    "package:dir": "npm run build && node scripts/prepare-desktop.mjs && electron-builder --config electron-builder.config.cjs --win --x64 --dir --publish never",
+    "package:source": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/package-source.ps1",
+    "test:desktop": "node scripts/smoke-desktop.mjs",
+    "ocr:setup": "node scripts/ocr-setup.mjs",
+    "start": "npm run dev"
+  },
+  "dependencies": {
+    "@napi-rs/canvas": "1.0.10",
+    "dagre": "^0.8.5",
+    "lucide-react": "^0.300.0",
+    "nanoid": "^5.0.4",
+    "pdfjs-dist": "6.3.289",
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0",
+    "tesseract.js": "7.0.0",
+    "zustand": "^4.4.7"
+  },
+  "devDependencies": {
+    "@types/dagre": "^0.7.52",
+    "@types/react": "^18.2.45",
+    "@types/react-dom": "^18.2.18",
+    "@vitejs/plugin-react": "^4.2.1",
+    "autoprefixer": "^10.4.16",
+    "electron": "44.5.1",
+    "electron-builder": "26.18.0",
+    "postcss": "^8.4.32",
+    "tailwindcss": "^3.4.0",
+    "typescript": "^5.3.3",
+    "vite": "^5.0.8"
+  }
+}

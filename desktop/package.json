@@ -1,0 +1,7 @@
+{
+  "name": "tuji-desktop",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "main.mjs"
+}

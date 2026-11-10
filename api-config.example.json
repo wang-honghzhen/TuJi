@@ -1,0 +1,44 @@
+{
+  "version": 1,
+  "execution": {
+    "apiFamily": "deepseek",
+    "protocol": "chat-completions",
+    "baseUrl": "https://api.deepseek.com",
+    "model": "deepseek-flash",
+    "contextWindow": 500000,
+    "maxOutputTokens": 16384,
+    "supportsTools": true,
+    "timeoutMs": 300000,
+    "thinkingEffort": "high",
+    "supportsVision": false,
+    "visionModels": []
+  },
+  "summary": null,
+  "webSearch": {
+    "enabled": false,
+    "provider": "deepseek",
+    "baseUrl": "https://api.deepseek.com/v1/tools",
+    "apiKey": "",
+    "timeoutMs": 60000
+  },
+  "attachments": {
+    "perMessage": 8,
+    "fileBytes": 31457280,
+    "messageBytes": 104857600,
+    "inlineTokens": 4096,
+    "regionShare": 0.05,
+    "regionTokens": 16384,
+    "catalogTokens": 2048,
+    "catalogEntries": 32,
+    "readTokens": 4000,
+    "maxReadTokens": 8000,
+    "textPages": 20,
+    "imagePages": 4,
+    "pdfPages": 1000,
+    "extractedBytes": 67108864,
+    "imagePixels": 40000000,
+    "previewEdge": 1600,
+    "cropEdge": 2048,
+    "chunkCharacters": 4000
+  }
+}

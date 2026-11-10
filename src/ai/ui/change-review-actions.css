@@ -1,0 +1,28 @@
+.change-review-actions{font-size:12px;color:#dce6f7;line-height:1.5;user-select:text}
+.change-review-buttons{display:flex;gap:6px;align-items:center;flex-wrap:wrap}
+.change-review-buttons button{display:inline-flex;align-items:center;justify-content:center;gap:5px;border:1px solid #475569;border-radius:6px;padding:6px 10px;background:#1e293b;color:#e2e8f0;white-space:nowrap;cursor:pointer}
+.change-review-buttons button:hover:not(:disabled){background:#334155;border-color:#94a3b8}
+.change-review-buttons button:focus-visible,.change-review-scope summary:focus-visible{outline:2px solid #93c5fd;outline-offset:2px}
+.change-review-buttons button:disabled{opacity:.5;cursor:default}
+.change-review-buttons [data-review-keep]{color:#bbf7d0;border-color:#3c715b}
+.change-review-buttons [data-review-revert]{color:#fecdd3;border-color:#84525c}
+.change-review-buttons button span{font-variant-numeric:tabular-nums;opacity:.75;margin-left:3px}
+.change-review-buttons .change-review-close{margin-left:auto;padding:6px}
+.change-review-actions p{margin:6px 0;overflow-wrap:anywhere}
+.change-review-scope{margin-top:8px;font-size:11px;color:#a7b7cd}
+.change-review-scope summary{cursor:pointer;width:fit-content;overflow-wrap:anywhere}
+.change-review-scope ul{max-height:160px;overflow:auto;padding-left:18px;margin:6px 0;list-style:disc;overflow-wrap:anywhere}
+.change-review-scope li{margin:4px 0}.change-review-scope li span{color:#e7c88e}
+.change-review-muted{font-size:11px;color:#a7b7cd}
+.change-review-warning{font-size:11px;color:#e7c88e}
+.change-review-confirm{margin-top:10px;padding-top:8px;border-top:1px solid #475569}
+.change-review-confirm>.change-review-buttons{margin-top:10px}
+.change-review-error{color:#fda4af}.change-review-error button{margin-left:8px;text-decoration:underline}
+.change-review-all>p{font-size:11px;color:#a7b7cd;margin:0 0 8px}
+.change-review-all-chat{display:flex;align-items:center;gap:10px 16px;flex-wrap:wrap;flex-shrink:0;padding:10px 16px;border-bottom:1px solid #334155;background:#0f172ae6;max-height:45vh;overflow:auto}
+.change-review-all-chat>p{margin:0}
+.change-review-all-chat>.change-review-actions{display:flex;align-items:center;flex-wrap:wrap;gap:8px 12px;flex:1;min-width:0}
+.change-review-all-chat .change-review-scope{margin:0}
+.change-review-all-chat .change-review-scope[open],.change-review-all-chat .change-review-confirm,.change-review-all-chat .change-review-warning,.change-review-all-chat .change-review-error{flex-basis:100%}
+.canvas-review-local{position:absolute;z-index:130;width:285px;max-width:calc(100% - 24px);max-height:calc(100% - 80px);overflow:auto;padding:12px;background:#0f172af5;border:1px solid #64748b;border-radius:10px;box-shadow:0 8px 26px #0006;pointer-events:auto}
+.canvas-review-local-title{color:#dce6f7;font-size:12px;font-weight:500;margin-bottom:10px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}

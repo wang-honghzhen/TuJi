@@ -1,0 +1,358 @@
+/* 应用深色主题，入口：src/main.tsx。 */
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Regions are quiet surfaces with a title tab; geometry remains rectangular. */
+.canvas-region {
+  position: absolute;
+  border-radius: 22px;
+  border: 1px solid rgba(var(--region-rgb), .14);
+  background: linear-gradient(145deg, rgba(var(--region-rgb), .045), rgba(var(--region-rgb), .012) 52%, rgba(8, 14, 27, .12));
+  box-shadow: inset 0 1px 0 rgba(var(--region-rgb), .07), 0 10px 28px -24px rgba(0, 0, 0, .7);
+  pointer-events: none;
+  transition: border-color .15s, box-shadow .15s;
+}
+.canvas-region::before {
+  content: ''; position: absolute; left: 20px; top: -1px; width: 38px; height: 1px;
+  background: rgba(var(--region-rgb), .45);
+}
+.canvas-region.is-active {
+  border-color: rgba(var(--region-rgb), .5);
+  box-shadow: 0 0 0 2px rgba(var(--region-rgb), .08), inset 0 1px 28px rgba(var(--region-rgb), .04);
+}
+.canvas-region[data-region-selected='true'] { border-color: rgba(147, 197, 253, .75); }
+.canvas-region-header {
+  position: absolute; top: 10px; left: 12px; display: flex; align-items: center; gap: 8px;
+  max-width: calc(100% - 26px); width: max-content; height: 32px; padding: 0 10px 0 5px;
+  border-radius: 9px; color: rgb(220, 228, 238); background: rgba(13, 22, 37, .5);
+  pointer-events: auto; cursor: grab; touch-action: none; user-select: none;
+}
+.canvas-region-toggle { display: grid; place-items: center; flex-shrink: 0; padding: 3px; border-radius: 6px; }
+.canvas-region-toggle:hover { background: rgba(255, 255, 255, .1); }
+.canvas-region-toggle:disabled { opacity: .4; }
+.canvas-region-header:active,.canvas-region-summary:active { cursor: grabbing; }
+.canvas-region-count { font-size: 10px; padding-left: 4px; color: rgba(var(--region-rgb), .6); font-variant-numeric: tabular-nums; }
+.canvas-region.is-folded { border-radius: 22px; background: linear-gradient(135deg, rgba(var(--region-rgb), .14), rgba(12, 21, 38, .86)); }
+.canvas-region.is-folded::before { border-radius: 22px 0 0 0; }
+.canvas-region-summary { position: absolute; inset: 46px 12px 10px 17px; display: flex; align-items: center; justify-content: space-between; pointer-events: auto; cursor: grab; touch-action: none; user-select: none; }
+.canvas-region-metrics { display: flex; flex-direction: column; gap: 5px; color: rgb(220, 228, 238); font-size: 18px; font-variant-numeric: tabular-nums; }
+.canvas-region-metrics small { color: rgb(148, 163, 184); font-size: 10px; white-space: nowrap; }
+.canvas-region-preview { color: rgb(var(--region-rgb)); flex-shrink: 0; }
+
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+html,
+body,
+#new-root {
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+}
+
+body {
+  background-color: #080d17; /* 深空底色，避免加载瞬间白闪 */
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', 'Oxygen',
+    'Ubuntu', 'Cantarell', 'Fira Sans', 'Droid Sans', 'Helvetica Neue',
+    sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+.canvas-workspace { width: 100%; height: 100%; }
+.canvas-background { position: absolute; inset: 0; overflow: hidden; background: #030b17; pointer-events: none; }
+.canvas-background > img { display: block; width: 100%; height: 100%; object-fit: cover; object-position: center; }
+.canvas-white-grid { background-color: #fff; background-image: radial-gradient(circle, #c6ccd5 1px, transparent 1px); background-size: 24px 24px; }
+.canvas-background-warning { position: absolute; top: 12px; left: 50%; transform: translateX(-50%); z-index: 50; max-width: min(560px, 75vw); padding: 9px 14px; border-radius: 10px; background: #172338ed; color: #e2e8f0; font-size: 12px; pointer-events: none; }
+
+/* ============================================================
+ * 会话列表的星团标记：缓慢自转 + hover / 选中激活态
+ *
+ * DOM 结构（自外向内）：
+ *   span 定位
+ *     └ span .new-mark-spin-slow     常驻 60s 自转（每项错开相位）
+ *         └ span .new-mark-spin-hover  同速自转，默认 paused
+ *             ├ img 默认版（紫/蓝亮斑 + 淡蓝光带）
+ *             └ img 金色版（同样几何，亮斑与光带全金）
+ *
+ * 转速叠加：hover 时让第二层也转起来，60s 与 60s 叠加 = 30s/圈。
+ * 为什么不直接把 animation-duration 从 60s 改成 30s：
+ *   动画进度 = (已播放时间 % 时长) / 时长，改时长会让进度按新周期重新折算，
+ *   角度会瞬间跳一大截。叠加一层则是从静止平滑起步，全程没有跳变。
+ *
+ * 注意：旋转的 transform 会覆盖掉调用处的 -translate-y-1/2，
+ * 所以定位必须由最外层负责，旋转放在内层。
+ * ============================================================ */
+
+.new-mark-spin-slow {
+  animation: new-mark-spin 60s linear infinite;
+  will-change: transform;
+}
+
+.new-mark-spin-hover {
+  animation: new-mark-spin 60s linear infinite;
+  animation-play-state: paused;
+  will-change: transform;
+}
+
+@keyframes new-mark-spin {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* 两层图完全重叠，默认只显示紫/蓝版 */
+.new-mark-layer {
+  position: absolute;
+  inset: 0;
+  transition: opacity 0.4s ease;
+}
+
+/* 激活态金色图层：淡外晕 + 亮核心，并做缓慢呼吸脉动。
+ *
+ * 「显得核心更亮」不是单纯加亮，而是重新分配光晕：
+ *   近处那层收得更紧更亮（4px→3px、0.9→0.95）  → 核心周围集中发光
+ *   远处那层明显减弱收窄（11px→8px、0.55→0.28）→ 外圈不再糊成一片
+ * 核心与外围的亮度差拉开，核心自然就突出来了。
+ *
+ * 性能要点：滤镜挂在 <img> 上、旋转在父层完成，
+ * 所以滤镜光栅化一次即可，不随旋转每帧重算。 */
+.new-mark-layer-active {
+  opacity: 0;
+  filter: brightness(1.48) saturate(1.3)
+    drop-shadow(0 0 3px rgba(255, 222, 145, 1))
+    drop-shadow(0 0 8px rgba(255, 172, 62, 0.26));
+}
+
+/* 呼吸脉动：2.4s 一轮，在「紧而暗」与「松而亮」之间缓动。
+ * 0% 的取值与上面的静态 filter 完全一致，
+ * 所以进出激活态时不会有跳变。
+ *
+ * 幅度刻意拉大：亮度在 1.48 ~ 1.72 之间走，外晕在 8px/0.26 ~ 16px/0.62 之间张缩，
+ * 明暗差足够大才有「搏动」的观感，差太小只会像画面在抖。 */
+@keyframes new-mark-breathe {
+  0%,
+  100% {
+    filter: brightness(1.48) saturate(1.3)
+      drop-shadow(0 0 3px rgba(255, 222, 145, 1))
+      drop-shadow(0 0 8px rgba(255, 172, 62, 0.26));
+  }
+  50% {
+    filter: brightness(1.72) saturate(1.42)
+      drop-shadow(0 0 5px rgba(255, 234, 170, 1))
+      drop-shadow(0 0 16px rgba(255, 182, 75, 0.62));
+  }
+}
+
+/* ---------- hover / 选中：亮斑与光带全部转金 + 转速翻倍 + 光晕呼吸 ---------- */
+.new-session-btn:hover .new-mark-layer-active,
+.new-session-btn[data-active='true'] .new-mark-layer-active {
+  opacity: 1;
+  animation: new-mark-breathe 2.4s ease-in-out infinite;
+}
+
+.new-session-btn:hover .new-mark-layer-base,
+.new-session-btn[data-active='true'] .new-mark-layer-base {
+  opacity: 0;
+}
+
+.new-session-btn:hover .new-mark-spin-hover,
+.new-session-btn[data-active='true'] .new-mark-spin-hover {
+  animation-play-state: running;
+}
+
+/* 无障碍：系统偏好「减少动态效果」时，星空、自转、光晕呼吸全部静止。
+   这里必须重复完整的 hover / data-active 选择器 —— 只写
+   .new-mark-layer-active 的话权重不够，压不过上面的 hover 规则 */
+@media (prefers-reduced-motion: reduce) {
+  .new-mark-spin-slow,
+  .new-mark-spin-hover {
+    animation: none;
+  }
+
+  .new-session-btn:hover .new-mark-layer-active,
+  .new-session-btn[data-active='true'] .new-mark-layer-active {
+    animation: none;
+  }
+
+}
+
+/* ============================================================
+ * 会话图浮层（悬停左侧画布时浮出）
+ * ============================================================ */
+
+/* ============================================================
+ * React Flow 深色化
+ * React Flow 自带的样式表是浅色的（白色控件按钮、白色小地图底）。
+ * 这里统一改成深空配色，否则一块亮白会压在星空上非常跳。
+ * ============================================================ */
+
+.react-flow__controls-button {
+  background: #101728;
+  border: none;
+  border-bottom: 1px solid #1e2a44;
+  color: #94a3b8;
+  transition: background-color 0.15s ease, color 0.15s ease;
+}
+
+.react-flow__controls-button:hover {
+  background: #16203a;
+  color: #e2e8f0;
+}
+
+.react-flow__controls-button svg {
+  fill: currentColor;
+}
+
+.react-flow__controls-button:last-child {
+  border-bottom: none;
+}
+
+/* 小地图：容器本身由组件传入圆形/描边，这里兜底内部元素的配色 */
+.react-flow__minimap {
+  background-color: rgba(10, 15, 28, 0.9);
+}
+
+.react-flow__minimap-mask {
+  fill: rgba(4, 6, 13, 0.72);
+}
+
+/* 连接线拖拽时的手柄颜色，默认是浅蓝 */
+.react-flow__handle {
+  background: #3b82f6;
+  border-color: #0a0f1c;
+}
+
+/* ============================================================
+ * 边的连接点指示环
+ *   悬停在一条边「靠近某一端连接点的那一段」上时，环出现在**那个连接点上**；
+ *   按住鼠标后环跟到鼠标位置，这条边从另一端连到环上，松手才真正改连接点。
+ *
+ *   pointer-events: none —— 它只是指示器，起拖靠的是「按住边本身」。
+ *   这点很关键：环画在边层里，而节点层画在边层之上，
+ *   压在节点边框上的环本来就点不到；做成纯指示器就不再有这个矛盾，
+ *   也就能老老实实画在真正的连接点上，不用像上一版那样偏移出去。
+ *
+ *   尺寸由组件按 1/zoom 反向缩放保证屏幕恒定，这里只管配色。
+ * ============================================================ */
+.new-edge-anchor-dot {
+  fill: #0b1220;
+  stroke: #60a5fa;
+  pointer-events: none;
+  transition: stroke 120ms ease, fill 120ms ease;
+}
+
+/* 这一端的连接点被用户固定过（不再由函数自动计算）时用金色标出来 */
+.new-edge-anchor-dot.is-pinned {
+  stroke: #fbbf24;
+}
+
+/* 正在拖动：跟着鼠标走 */
+.new-edge-anchor-dot.is-dragging {
+  fill: #1d4ed8;
+  stroke: #ffffff;
+}
+
+/* 已经吸附到某个合法连接点上（松手就会落在那里） */
+.new-edge-anchor-dot.is-snapped {
+  fill: #2563eb;
+  stroke: #ffffff;
+}
+
+/* ============================================================
+ * 会话按钮的分界线
+ * 取代原来的描边（ring）：不横跨整个侧边栏，居中、比按钮短、两端渐隐
+ *
+ * 只定义「长什么样」，不定义位置 —— 定位交给调用处的 Tailwind 类：
+ *   按钮下边界：absolute bottom-0 left-1/2 -translate-x-1/2
+ *   列表上边界：mx-auto
+ *
+ * 每条边界只渲染一次（按钮只画下边界 + 列表顶部单独一条），
+ * 避免两条半透明线叠在同一像素上导致 alpha 复合、比别处更亮
+ * ============================================================ */
+
+.new-session-rule {
+  width: 78%;
+  height: 1px;
+  /* 两端用「同色 + alpha 0」而不是 transparent：
+     后者是 rgba(0,0,0,0)，部分插值实现下会经过灰色，暗底上会露出脏边 */
+  background-image: linear-gradient(
+    90deg,
+    rgba(37, 99, 235, 0) 0%,
+    rgba(37, 99, 235, 0.9) 50%,
+    rgba(37, 99, 235, 0) 100%
+  );
+}
+
+/* ============================================================
+ * 细滚动条（深色）
+ * ============================================================ */
+
+.new-scroll {
+  scrollbar-width: thin;
+  scrollbar-color: #334155 transparent;
+}
+
+.new-scroll::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+.new-scroll::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.new-scroll::-webkit-scrollbar-thumb {
+  background: #334155;
+  border-radius: 9999px;
+}
+
+.new-scroll::-webkit-scrollbar-thumb:hover {
+  background: #475569;
+}
+
+.canvas-text-editing { box-shadow: inset 0 -1px rgba(147, 197, 253, .65); }
+.canvas-mirror-caret { display: inline-block; height: 1.1em; width: 0; border-left: 1.5px solid #e0f2fe; vertical-align: -.15em; }
+.new-session-graph-overlay{position:fixed;top:0;bottom:0;z-index:190;background:rgba(0,0,0,.66);overflow:hidden;touch-action:none;user-select:none}
+.new-session-graph-space{position:absolute;left:0;top:0;width:0;height:0;will-change:transform}.new-session-graph-lines{filter:drop-shadow(0 0 2px rgba(247,201,72,.35));position:absolute;left:0;top:0;width:1px;height:1px;overflow:visible;pointer-events:none}
+.new-session-graph-node{position:absolute;display:flex;flex-direction:column;align-items:center;padding:0;background:transparent;border:0;box-shadow:none;color:#cbd5e1;text-align:center;cursor:pointer;outline:none;border-radius:0}
+.new-session-graph-node:focus-visible .new-session-graph-name{color:#f9dc9d;text-decoration:underline;text-underline-offset:5px}
+.new-session-graph-galaxy{width:48px;height:48px;flex-shrink:0;display:block;margin-bottom:6px}
+.new-session-graph-name,.new-session-graph-first,.new-session-graph-node time{width:100%;flex-shrink:0;overflow:hidden;text-overflow:ellipsis}
+.new-session-graph-name{display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:2;overflow-wrap:anywhere;text-wrap:balance;font-size:14px;line-height:21px;font-weight:500}
+.new-session-graph-first{display:block;white-space:nowrap;font-size:11px;line-height:20px;color:#9aa7bb}
+.new-session-graph-node time{display:block;white-space:nowrap;font-size:10px;line-height:18px;color:#8190a6}
+.new-session-graph-node:hover .new-session-graph-name,.new-session-graph-node[data-active=true] .new-session-graph-name{color:#f3d390}
+.new-session-graph-lines path{opacity:.34;transition:opacity .18s ease}
+.new-session-graph-lines path[data-active=true]{opacity:.9;stroke-width:1.15}
+.new-session-graph-empty{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;padding:30px;text-align:center;color:#b4bac6;font-size:14px;pointer-events:none}.new-session-name-tooltip{position:fixed;z-index:2;max-width:300px;padding:8px 11px;background:#111827f5;border:1px solid #54462e;border-radius:9px;box-shadow:0 8px 22px #0006;color:#f1dfbd;font-size:12px;line-height:1.7;overflow-wrap:anywhere;transform:translateX(-50%);pointer-events:none}.new-session-graph-menu{position:fixed;z-index:3;padding:5px;width:170px;background:#101827;border:1px solid #475569;border-radius:9px;box-shadow:0 10px 30px #0007}.new-session-graph-menu button{display:block;width:100%;padding:9px;text-align:left;font-size:12px;color:#e2e8f0;border-radius:5px}.new-session-graph-menu button:hover{background:#ffffff0c}
+
+body:has([data-ai-session-graph]) [data-canvas-detail],body:has([data-ai-session-graph]) [data-canvas-popup]{visibility:hidden}
+
+/* Nested wireframe cubes: only transforms animate; the central glow is static.
+   Offscreen icons pause through a shared IntersectionObserver. */
+.new-design-mark{display:block;position:relative}
+.new-design-cube{--cube-half:calc(var(--cube-size) / 2);position:absolute;left:50%;top:50%;width:var(--cube-size);height:var(--cube-size);margin-left:calc(var(--cube-half) * -1);margin-top:calc(var(--cube-half) * -1);transform-style:preserve-3d;animation-play-state:paused}
+.new-design-cube-outer{--cube-size:var(--cube-outer-size);--cube-color:rgba(151,192,221,.8);transform:rotateX(-24deg) rotateY(36deg) rotateZ(8deg);animation:new-design-outer-orbit 52s linear infinite paused;animation-delay:var(--cube-outer-delay)}
+.new-design-cube-inner{--cube-size:var(--cube-inner-size);--cube-color:rgba(195,215,236,.9);transform:rotateX(26deg) rotateY(-34deg) rotateZ(-12deg);animation:new-design-inner-orbit 38s linear infinite paused;animation-delay:var(--cube-inner-delay)}
+.new-design-cube-plane{position:absolute;inset:0;border:1px solid var(--cube-color);transition:border-color .2s ease}
+.new-design-cube-top{transform:rotateX(90deg) translateZ(var(--cube-half))}
+.new-design-cube-bottom{transform:rotateX(90deg) translateZ(calc(var(--cube-half) * -1))}
+.new-design-cube-front{border-top:0;border-bottom:0;transform:translateZ(var(--cube-half))}
+.new-design-cube-back{border-top:0;border-bottom:0;transform:translateZ(calc(var(--cube-half) * -1))}
+.new-design-mark[data-in-view=true] .new-design-cube{animation-play-state:running;will-change:transform}
+.new-design-core{position:absolute;inset:28%;border-radius:50%;background:radial-gradient(circle,#fff3c8 0%,#ffdf94 8%,#efb64d80 23%,#edb14c24 45%,#edb14c00 72%);opacity:.9;transition:opacity .2s ease;pointer-events:none}
+.new-session-btn:hover .new-design-cube,.new-session-btn[data-active=true] .new-design-cube{--cube-color:rgba(248,211,139,.98)}
+.new-session-btn:hover .new-design-core,.new-session-btn[data-active=true] .new-design-core{opacity:1}
+@keyframes new-design-outer-orbit{from{transform:rotateX(-24deg) rotateY(36deg) rotateZ(8deg)}to{transform:rotateX(-24deg) rotateY(396deg) rotateZ(8deg)}}
+@keyframes new-design-inner-orbit{from{transform:rotateX(26deg) rotateY(-34deg) rotateZ(-12deg)}to{transform:rotateX(26deg) rotateY(-394deg) rotateZ(-12deg)}}
+@media(prefers-reduced-motion:reduce){.new-design-mark .new-design-cube,.new-design-mark[data-in-view] .new-design-cube{animation:none;will-change:auto}.new-design-cube-plane,.new-design-core,.new-session-graph-lines path{transition:none}}
+

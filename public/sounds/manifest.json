@@ -1,0 +1,98 @@
+[
+  {
+    "input": "kenney-impactGlass_light_000.ogg",
+    "output": "gem-1.wav",
+    "duration": 0.11,
+    "rate": 1.4,
+    "peak": 0.44,
+    "highPass": 1400,
+    "lowPass": 8200,
+    "decay": 0.045,
+    "bytes": 7084,
+    "originalDuration": 0.2075
+  },
+  {
+    "input": "kenney-impactGlass_light_001.ogg",
+    "output": "gem-2.wav",
+    "duration": 0.11,
+    "rate": 1.4,
+    "peak": 0.44,
+    "highPass": 1400,
+    "lowPass": 8200,
+    "decay": 0.045,
+    "bytes": 7084,
+    "originalDuration": 0.2066875
+  },
+  {
+    "input": "kenney-impactGlass_light_002.ogg",
+    "output": "gem-3.wav",
+    "duration": 0.11,
+    "rate": 1.4,
+    "peak": 0.44,
+    "highPass": 1400,
+    "lowPass": 8200,
+    "decay": 0.045,
+    "bytes": 7084,
+    "originalDuration": 0.2066875
+  },
+  {
+    "input": "gem-1.wav + synthesized resonances",
+    "output": "gem-note-C5.wav",
+    "note": "C5",
+    "frequency": 523.2511306011972,
+    "duration": 0.38,
+    "peak": 0.6,
+    "bytes": 24364,
+    "generator": "scripts/prepare-gem-notes.mjs"
+  },
+  {
+    "input": "gem-2.wav + synthesized resonances",
+    "output": "gem-note-D5.wav",
+    "note": "D5",
+    "frequency": 587.3295358348151,
+    "duration": 0.38,
+    "peak": 0.6,
+    "bytes": 24364,
+    "generator": "scripts/prepare-gem-notes.mjs"
+  },
+  {
+    "input": "gem-3.wav + synthesized resonances",
+    "output": "gem-note-E5.wav",
+    "note": "E5",
+    "frequency": 659.2551138257398,
+    "duration": 0.38,
+    "peak": 0.6,
+    "bytes": 24364,
+    "generator": "scripts/prepare-gem-notes.mjs"
+  },
+  {
+    "input": "gem-1.wav + synthesized resonances",
+    "output": "gem-note-G5.wav",
+    "note": "G5",
+    "frequency": 783.9908719634985,
+    "duration": 0.38,
+    "peak": 0.6,
+    "bytes": 24364,
+    "generator": "scripts/prepare-gem-notes.mjs"
+  },
+  {
+    "input": "gem-2.wav + synthesized resonances",
+    "output": "gem-note-A5.wav",
+    "note": "A5",
+    "frequency": 880,
+    "duration": 0.38,
+    "peak": 0.6,
+    "bytes": 24364,
+    "generator": "scripts/prepare-gem-notes.mjs"
+  },
+  {
+    "input": "gem-3.wav + synthesized resonances",
+    "output": "gem-note-C6.wav",
+    "note": "C6",
+    "frequency": 1046.5022612023945,
+    "duration": 0.38,
+    "peak": 0.6,
+    "bytes": 24364,
+    "generator": "scripts/prepare-gem-notes.mjs"
+  }
+]
