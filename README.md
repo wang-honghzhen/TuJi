@@ -4,11 +4,23 @@
 
 ## 下载 Windows 桌面版
 
-从 [GitHub Releases](https://github.com/wang-honghzhen/TuJi/releases) 下载 `Tuji-版本号-win-x64-setup.exe`，双击安装后从桌面或开始菜单启动“图记”。支持 Windows 10/11 64 位，无需另行安装 Node.js。软件图标使用项目中的蓝白色树图。
+从 [GitHub Releases](https://github.com/wang-honghzhen/TuJi/releases) 下载 `Tuji-版本号-win-x64-setup.exe`，双击安装后从桌面或开始菜单启动“图记”。支持 Windows 10/11 64 位，无需另行安装 Node.js。软件图标使用保留星空背景的白色树图，桌面窗口不显示默认英文菜单栏。
 
 安装包内置简体中文、英文 OCR 模型。AI 功能仍需在首次启动时填写自己的服务地址、模型和 API 密钥。
 
-安装版的数据位于 `%APPDATA%\QIXUE-v2`；与开发版本的 `.local/data` 分开，不自动带入开发环境中的笔记、附件和密钥。升级和卸载默认保留用户数据。当前安装包未配置代码签名，Windows 会将发布者显示为未知发布者。
+安装时分别选择程序安装目录和“数据存储位置”，例如程序放在 `F:\Apps\Tuji`，数据放在 `F:\TujiData`。笔记、聊天记录、附件、连接配置及桌面缓存写入所选数据目录，两个目录不能互相包含。
+
+首次安装的数据目录默认是 `%APPDATA%\QIXUE-v2`。升级默认沿用此前选择；此前使用默认位置的安装版也继续使用原数据目录。选择其他空目录会从空白数据开始，旧数据保留在原位置，不自动搬迁或合并。卸载默认保留数据。
+
+目录设置保存在当前 Windows 用户的 `%APPDATA%\Tuji\data-directory.txt`（UTF-16LE），无需修改环境变量。若选定磁盘不可用，软件会提示恢复磁盘或重新选择目录，不会自动改用另一处空数据库。`QIXUE_DATA_DIR` 仍可用于临时覆盖。开发版本使用独立的 `.local/data`。
+
+当前安装包未配置代码签名，Windows 会将发布者显示为未知发布者。
+
+需要静默安装时，也可以指定数据目录（`/D=` 必须放在最后）：
+
+```powershell
+.\Tuji-0.1.0-win-x64-setup.exe /S /currentuser /DATA_DIR="F:\TujiData" /D=F:\Apps\Tuji
+```
 
 ## 启动
 
@@ -55,6 +67,8 @@ npm run package:source
 
 `npm run test:desktop` 使用 `.cache/` 内的独立空数据目录验证打包后的桌面页面、本地服务、SQLite、PDF、OCR 和布局线程，不读取现有笔记或调用 AI。验证时窗口保持隐藏。
 
+`npm run test:storage` 验证目录读取及失效处理；`npm run test:installer` 编译独立的 NSIS 测试程序，验证中文及空格路径、升级保留和错误路径处理，不修改真实安装配置。图标裁剪区域保存在 `scripts/prepare-app-icon.mjs`，打包前自动生成 PNG 和多尺寸 ICO。
+
 安装包使用文件白名单；源码包也按明确的文件列表生成。两者均不携带 `.local`、个人数据库、聊天附件、真实 `api-config.json` 或加密凭据。`node_modules`、构建产物及 `release/` 不提交到 Git。
 
 ## 发布到 GitHub
@@ -73,7 +87,7 @@ git commit -m "Release next version"
 git push origin main
 ```
 
-然后进入仓库的 **Releases → Draft a new release**，使用与 `package.json` 一致的版本标签（例如 `v0.1.1`），目标选择 `main`，填写说明并上传对应 `.exe` 和 `-source.zip`，最后发布。GitHub 也会按标签自动提供源码下载。不要将安装包作为普通源码提交到 Code。
+然后进入仓库的 **Releases → Draft a new release**，使用与 `package.json` 一致的版本标签（例如 `v0.1.0`），目标选择 `main`，填写说明并上传对应 `.exe` 和 `-source.zip`，最后发布。GitHub 也会按标签自动提供源码下载。不要将安装包作为普通源码提交到 Code。
 
 参考：[GitHub 发布版本说明](https://docs.github.com/en/repositories/releasing-projects-on-github/managing-releases-in-a-repository)、[electron-builder Windows 安装器](https://www.electron.build/nsis/)。
 

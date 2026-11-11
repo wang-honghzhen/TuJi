@@ -7,6 +7,7 @@ module.exports = {
   files: [
     'package.json',
     'desktop/main.mjs',
+    'desktop/data-directory.mjs',
     'scripts/credential-storage.mjs',
     'dist/**/*',
     'dist-ai/*.cjs',
@@ -19,12 +20,13 @@ module.exports = {
   npmRebuild: false,
   win: {
     executableName: 'Tuji',
-    icon: 'public/brand/tree.png',
+    icon: 'desktop/assets/app-icon.ico',
     target: [{ target: 'nsis', arch: ['x64'] }],
     artifactName: 'Tuji-${version}-win-${arch}-setup.${ext}',
   },
   nsis: {
     oneClick: false,
+    include: 'desktop/installer.nsh',
     perMachine: false,
     allowToChangeInstallationDirectory: true,
     createDesktopShortcut: true,

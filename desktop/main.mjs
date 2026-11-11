@@ -1,13 +1,21 @@
-import { app, BrowserWindow, safeStorage, shell } from 'electron';
+import { app, BrowserWindow, dialog, Menu, safeStorage, shell } from 'electron';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { createCredentialStorage } from '../scripts/credential-storage.mjs';
+import { resolveDataDirectory } from './data-directory.mjs';
 
 const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 app.setName('图记');
 app.setAppUserModelId('io.github.wang-honghzhen.tuji');
-const directory = path.resolve(process.env.QIXUE_DATA_DIR ?? (app.isPackaged
-  ? path.join(app.getPath('appData'), 'QIXUE-v2') : path.join(projectRoot, '.local', 'data')));
+Menu.setApplicationMenu(null);
+let directory;
+try {
+  directory = resolveDataDirectory({ appData: app.getPath('appData'), installDirectory: path.dirname(process.execPath),
+    projectRoot, packaged: app.isPackaged, override: process.env.QIXUE_DATA_DIR });
+} catch (error) {
+  dialog.showErrorBox('无法打开图记数据目录', error instanceof Error ? error.message : '请重新运行安装程序选择可用的数据目录。');
+  app.exit(1);
+}
 app.setPath('userData', path.join(directory, 'desktop-profile'));
 if (!app.requestSingleInstanceLock()) { app.quit(); }
 else {
@@ -52,9 +60,10 @@ else {
       host.setMiddleware(vite.middlewares);
     }
     window = new BrowserWindow({ width: 1450, height: 920, minWidth: 960, minHeight: 620,
-      title: '图记', icon: path.join(projectRoot, 'dist', 'brand', 'tree.png'), backgroundColor: '#020617', show: false,
+      title: '图记', icon: path.join(projectRoot, 'dist', 'brand', 'app-icon.png'), backgroundColor: '#020617', show: false,
       webPreferences: { contextIsolation: true, sandbox: true, nodeIntegration: false, nodeIntegrationInWorker: false,
         webSecurity: true, allowRunningInsecureContent: false, webviewTag: false, spellcheck: false } });
+    window.removeMenu(); window.setMenuBarVisibility(false);
     window.webContents.setWindowOpenHandler(({ url }) => {
       // Source links open in the system browser, never inside the local workspace.
       try {
@@ -67,7 +76,10 @@ else {
     window.webContents.on('will-attach-webview', event => event.preventDefault());
     window.webContents.session.setPermissionRequestHandler((_contents, _permission, callback) => callback(false));
     await window.loadURL(host.url);
-    if (process.argv.includes('--smoke-test')) console.log(`QIXUE_SMOKE_READY ${host.url}`);
+    if (process.argv.includes('--smoke-test')) {
+      console.log(`QIXUE_SMOKE_STATE ${JSON.stringify({ menuVisible: window.isMenuBarVisible(), applicationMenu: Menu.getApplicationMenu() !== null, dataDirectory: directory })}`);
+      console.log(`QIXUE_SMOKE_READY ${host.url}`);
+    }
     else { window.show(); window.focus(); }
   } catch (error) {
     console.error(`图记桌面启动失败：${error instanceof Error ? error.message : '未知错误'}`);

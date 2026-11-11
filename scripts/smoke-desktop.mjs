@@ -85,6 +85,12 @@ async function desktopCheck(executable) {
       await delay(200);
     }
     assert.ok(url, `Desktop startup timeout: ${errorOutput}`);
+    const stateLine = /^QIXUE_SMOKE_STATE (.+)$/m.exec(output);
+    assert.ok(stateLine, 'Desktop did not report native window state');
+    const windowState = JSON.parse(stateLine[1]);
+    assert.equal(windowState.menuVisible, false, 'Native menu bar should be removed');
+    assert.equal(windowState.applicationMenu, false, 'Default application menu should be removed');
+    assert.equal(path.resolve(windowState.dataDirectory), path.resolve(dataDirectory));
     const page = await fetch(url); assert.equal(page.status, 200); assert.match(await page.text(), /id="root"/);
     const { token } = await (await fetch(`${url}/api/qixue/connection`)).json();
     const snapshot = await (await fetch(`${url}/api/qixue/snapshot`, { headers: { 'x-qixue-token': token } })).json();
@@ -102,7 +108,7 @@ async function desktopCheck(executable) {
     const result = await evaluated; assert.ok(!result.exceptionDetails, JSON.stringify(result.exceptionDetails));
     assert.ok(result.result.value.text.length > 20, 'Renderer is empty');
     assert.match(result.result.value.text, /图记|连接|服务/);
-    console.log('PASS: packaged desktop startup, renderer, authenticated local API and fresh user database');
+    console.log('PASS: packaged desktop startup, no native menu, renderer, local API and isolated data directory');
   } finally {
     if (!exited && socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ id: 2, method: 'Page.close' }));
     else if (!exited) child.stdin.end('QIXUE_SHUTDOWN\n');
