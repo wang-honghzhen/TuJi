@@ -192,9 +192,17 @@ FunctionEnd
     SetErrorLevel 2
     Abort
   ${EndIf}
-  System::Call 'kernel32::MoveFileExW(w "${TUJI_STORAGE_DIRECTORY}\data-directory.tmp", w "${TUJI_STORAGE_DIRECTORY}\data-directory.txt", i 9) i.r0'
+  System::Call 'kernel32::MoveFileExW(w "${TUJI_STORAGE_DIRECTORY}\data-directory.tmp", w "${TUJI_STORAGE_DIRECTORY}\data-directory.txt", i 9) i.r0 ?e'
+  Pop $1
   ${If} $0 == 0
-    MessageBox MB_OK|MB_ICONSTOP "保存数据目录设置失败；此前设置已保留，请重新运行安装程序。" /SD IDOK
+    ${If} $1 == 17
+      # Some redirected profile folders report different devices for sibling files.
+      # MOVEFILE_COPY_ALLOWED keeps these profiles usable; WRITE_THROUGH waits for the copy.
+      System::Call 'kernel32::MoveFileExW(w "${TUJI_STORAGE_DIRECTORY}\data-directory.tmp", w "${TUJI_STORAGE_DIRECTORY}\data-directory.txt", i 11) i.r0'
+    ${EndIf}
+  ${EndIf}
+  ${If} $0 == 0
+    MessageBox MB_OK|MB_ICONSTOP "保存数据目录设置失败，请检查用户配置目录权限后重新运行安装程序。" /SD IDOK
     SetErrorLevel 2
     Abort
   ${EndIf}

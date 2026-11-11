@@ -2,6 +2,7 @@
 $projectRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 $testRoot = Join-Path $projectRoot ('.cache\installer-storage-' + [guid]::NewGuid().ToString('N'))
 [IO.Directory]::CreateDirectory($testRoot) | Out-Null
+$settingsRoot = Join-Path ([IO.Path]::GetTempPath()) ('tuji-installer-settings-' + [guid]::NewGuid().ToString('N'))
 $compiler = Get-ChildItem -LiteralPath (Join-Path $env:LOCALAPPDATA 'electron-builder\Cache') -Recurse -Filter makensis.exe -File |
   Where-Object { Test-Path -LiteralPath (Join-Path $_.DirectoryName 'Include\MUI2.nsh') } | Select-Object -First 1
 if (-not $compiler) { throw 'Run npm run package:win once to prepare the NSIS compiler.' }
@@ -12,7 +13,7 @@ Name "Tuji storage test"
 OutFile "@ROOT@\storage-test.exe"
 InstallDir "@ROOT@\program"
 !include MUI2.nsh
-!define TUJI_STORAGE_DIRECTORY "@ROOT@\config\Tuji"
+!define TUJI_STORAGE_DIRECTORY "@SETTINGS@"
 !define TUJI_LEGACY_DATA_DIRECTORY "@ROOT@\legacy"
 !macro setInstallModePerUser
   SetShellVarContext current
@@ -28,13 +29,13 @@ Section
   !insertmacro customInstall
 SectionEnd
 '@
-$source = $template.Replace('@ROOT@', $testRoot).Replace('@PROJECT@', $projectRoot)
+$source = $template.Replace('@ROOT@', $testRoot).Replace('@PROJECT@', $projectRoot).Replace('@SETTINGS@', $settingsRoot)
 $scriptFile = Join-Path $testRoot 'storage-test.nsi'
 [IO.File]::WriteAllText($scriptFile, $source, [Text.UTF8Encoding]::new($true))
 & $compiler.FullName '/V2' $scriptFile
 if ($LASTEXITCODE -ne 0) { throw 'NSIS test harness compilation failed' }
 $executable = Join-Path $testRoot 'storage-test.exe'
-$settings = Join-Path $testRoot 'config\Tuji\data-directory.txt'
+$settings = Join-Path $settingsRoot 'data-directory.txt'
 $selected = Join-Path $testRoot '中文 数据目录'
 $legacy = Join-Path $testRoot 'legacy'
 [IO.Directory]::CreateDirectory($legacy) | Out-Null
