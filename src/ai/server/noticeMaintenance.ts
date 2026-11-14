@@ -1,8 +1,9 @@
 import type { AppSnapshot, Task } from '../domain';
 import { AUTO_CONTEXT, type ContextStage } from '../contextState';
 import { inputCapacity } from '../memory';
-import { noteNoticeFacts } from './noteFreshness';
-import { pendingCanvasChanges,canvasNoticeLabels } from './contextFreshness';
+import { noteNoticeFacts, noteNoticeLabels } from './noteFreshness';
+import { pendingCanvasChanges,canvasNoticeLabels,visibleCanvasEvidence } from './contextFreshness';
+import { summarySourceEvidence } from './summaryFreshness';
 import { digest } from './directGraph';
 import { contextProtection, eligibleRead } from './contextProtection';
 import { allRetainedCalls, originResultId, receiptFamily } from './readVisibility';
@@ -27,7 +28,9 @@ export function captureNoticeState(state:AppSnapshot,task:Task,stage:ContextStag
     version:digest(change),callIds:[...new Set(observations.flatMap(o=>o.callId?[o.callId]:[]))].sort(),
     ...canvasNoticeLabels(state,task,change,observation,encode,readContext),nonCallSource:observations.some(o=>!o.callId)});
   for(const fact of noteNoticeFacts(state,task,stage))facts.push({key:fact.key,version:digest(fact.state),callIds:fact.callIds,
-    kind:fact.kind,labels:[`${encode(fact.id)}${fact.deleted?'（已删除）':''}`],nonCallSource:!fact.callIds.length});
+    ...noteNoticeLabels(fact,encode),nonCallSource:!fact.callIds.length});
+  for(const fact of summarySourceEvidence(state,task,stage,visibleCanvasEvidence(state,task,stage),encode).facts)
+    facts.push({...fact,version:digest(fact.state),nonCallSource:true});
   const noteNotices=contextNoteNoticeIds(state,task.workspaceId);
   const timelineNotices=stage.entries.filter(e=>e.representation!=='receipt'&&e.contextUpdate?.kind!=='note'&&!noteNotices.has(e.noticeId??'')
     &&(e.category==='review'||e.noticeId));

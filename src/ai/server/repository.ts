@@ -13,7 +13,7 @@ import { capturePresentation } from './presentationLog';
 import { installContextStorage } from './storageV3';
 
 const collections = ['sessions', 'workspaces', 'inheritanceEdges', 'snapshots', 'tasks', 'messages', 'steps',
-  'changes', 'reviewChanges', 'toolCalls', 'artifacts', 'contextManifests', 'events', 'presentationParts', 'userNotePages', 'chatTurnBookmarks'] as const;
+  'changes', 'reviewChanges', 'toolCalls', 'artifacts', 'contextManifests', 'events', 'presentationParts', 'userNotePages', 'userNoteDirectories', 'chatTurnBookmarks'] as const;
 export const now = () => new Date().toISOString();
 export const id = (prefix = '') => prefix + randomUUID();
 export const hash = (value: unknown) => createHash('sha256').update(typeof value === 'string' ? value : JSON.stringify(value)).digest('hex');
@@ -39,7 +39,7 @@ export function storableManifest(manifest: ContextManifest): ContextManifest {
 }
 export function emptyState(): AppSnapshot {
   return { schemaVersion: 3, canvasVersionProtocol:{version:1},graph: null, graphRevision: 0, canvasGraphReferences: {}, sessionReferences: {}, sessions: [], workspaces: [], inheritanceEdges: [], snapshots: [],
-    tasks: [], messages: [], steps: [], changes: [], reviewChanges: [], toolCalls: [], artifacts: [], contextManifests: [], events: [], presentationParts: [], userNotePages: [], chatTurnBookmarks: [],
+    tasks: [], messages: [], steps: [], changes: [], reviewChanges: [], toolCalls: [], artifacts: [], contextManifests: [], events: [], presentationParts: [], userNotePages: [], userNoteDirectories: [], chatTurnBookmarks: [],
     provider: { ...DEFAULT_PROVIDER }, soundSettings: { ...DEFAULT_SOUND_SETTINGS }, personalizationSettings: { ...DEFAULT_PERSONALIZATION }, credentialConfigured: false, setupCompleted: false, lastSeq: 0 };
 }
 
@@ -106,7 +106,7 @@ export class Repository {
     this.state = emptyState();
     for (const row of this.db.prepare('SELECT key,body FROM metadata').all()) {
       const key = String(row.key); this.stored.set(`meta:${key}`, String(row.body));
-      if (['schemaVersion', 'canvasVersionProtocol', 'graph', 'graphRevision', 'directoryVersions', 'canvasGraphReferences', 'canvasReviewStates', 'sessionReferences', 'contextRetention', 'provider', 'attachmentLimits', 'soundSettings', 'personalizationSettings', 'setupCompleted', 'lastSeq'].includes(key)) (this.state as unknown as Record<string, unknown>)[key] = JSON.parse(String(row.body));
+      if (['schemaVersion', 'canvasVersionProtocol', 'graph', 'graphRevision', 'directoryVersions', 'canvasGraphReferences', 'canvasReviewStates', 'sessionReferences', 'contextRetention', 'provider', 'attachmentLimits', 'soundSettings', 'personalizationSettings', 'setupCompleted', 'lastSeq', 'desktopTemporarySequence'].includes(key)) (this.state as unknown as Record<string, unknown>)[key] = JSON.parse(String(row.body));
     }
     this.state.personalizationSettings = normalizePersonalizationSettings(this.state.personalizationSettings);
     // Existing configured profiles retain their setup; a former empty default receives DeepSeek defaults.
@@ -143,7 +143,7 @@ export class Repository {
       updateDirectoryVersions(before,this.state);
       capturePresentation(before,this.state);
       const putMeta = this.db.prepare('INSERT INTO metadata(key,body) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET body=excluded.body');
-      for (const key of ['schemaVersion', 'canvasVersionProtocol', 'graph', 'graphRevision', 'directoryVersions', 'canvasGraphReferences', 'canvasReviewStates', 'sessionReferences', 'contextRetention', 'provider', 'attachmentLimits', 'soundSettings', 'personalizationSettings', 'setupCompleted', 'lastSeq'] as const) {
+      for (const key of ['schemaVersion', 'canvasVersionProtocol', 'graph', 'graphRevision', 'directoryVersions', 'canvasGraphReferences', 'canvasReviewStates', 'sessionReferences', 'contextRetention', 'provider', 'attachmentLimits', 'soundSettings', 'personalizationSettings', 'setupCompleted', 'lastSeq', 'desktopTemporarySequence'] as const) {
         const body = JSON.stringify(this.state[key] ?? (key === 'soundSettings' ? DEFAULT_SOUND_SETTINGS : null));
         if (body !== this.stored.get(`meta:${key}`)) { putMeta.run(key, body); this.stored.set(`meta:${key}`, body); meta.set(key, this.state[key]); }
       }

@@ -1,4 +1,4 @@
-import { useEffect, useMemo } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { Info, Scan, Sparkles } from 'lucide-react';
 import { useAiStore } from '@/ai/client';
 import { reviewEntries, expandReviewSelection } from '@/ai/changeReview';
@@ -7,6 +7,8 @@ import type { ReviewDelta } from '@/ai/reviewTypes';
 import { ChangeReviewActions, ReviewAllActions } from '@/ai/ui/ChangeReviewActions';
 import { reviewObjectName, reviewObjectRefs } from '@/ai/ui/reviewPresentation';
 import './canvas-review.css';
+import { SearchField } from './SearchField';
+import { searchPendingReviews } from '../graphSearch';
 
 const EMPTY: string[] = [];
 function displayDelta(delta: ReviewDelta, name: (ref: string) => string) {
@@ -31,6 +33,8 @@ function displayDelta(delta: ReviewDelta, name: (ref: string) => string) {
 }
 
 export function CanvasReviewPanel({ canvasId }: { canvasId: string }) {
+  const [query, setQuery] = useState('');
+  const section = useRef<HTMLElement>(null);
   const snapshot = useAiStore(s => s.snapshot);
   const canvasSelection = useAiStore(s => s.selectedRefsByCanvas[canvasId] ?? EMPTY);
   const selected = useReviewUi(s => s.selected[canvasId] ?? EMPTY), select = useReviewUi(s => s.select);
@@ -38,11 +42,13 @@ export function CanvasReviewPanel({ canvasId }: { canvasId: string }) {
   const link = useReviewUi(s => s.link), working = useReviewUi(s => !!s.working[canvasId]);
   const boxCanvasId = useReviewUi(s => s.boxCanvasId), box = useReviewUi(s => s.box);
   const panel = useReviewUi(s => s.panels[canvasId] ?? DEFAULT_REVIEW_PANEL), configure = useReviewUi(s => s.panel);
-  const entries = useMemo(() => snapshot ? reviewEntries(snapshot).filter(e => e.unit.state === 'pending' && e.change.review!.canvasId === canvasId) : [], [snapshot?.changes, canvasId]);
+  const entries = useMemo(() => snapshot ? reviewEntries(snapshot).filter(e => e.unit.state === 'pending' && e.change.review!.canvasId === canvasId) : [], [snapshot?.changes, snapshot?.reviewChanges, canvasId]);
   const taskIds = snapshot?.canvasReviewStates?.[canvasId]?.taskIds ?? EMPTY;
-  const roundTaskId = taskIds.at(-1 - panel.round), shown = entries.filter(e => e.change.taskId === roundTaskId);
+  const matchingChanges = new Set(snapshot ? searchPendingReviews(snapshot, canvasId, query).map(r => r.id) : []);
+  const matchingGroups = new Set(entries.filter(e => matchingChanges.has(e.change.id)).map(e => e.change.review?.groupId).filter(Boolean));
+  const roundTaskId = taskIds.at(-1 - panel.round), shown = entries.filter(e => query.trim() ? matchingChanges.has(e.change.id) || !!e.change.review?.groupId && matchingGroups.has(e.change.review.groupId) : e.change.taskId === roundTaskId);
   const roundTask = snapshot?.tasks.find(t => t.id === roundTaskId);
-  const archived=snapshot?.changes.find(c=>c.taskId===roundTaskId&&c.reviewArchive)?.reviewArchive;
+  const archived=[...snapshot?.reviewChanges ?? [], ...snapshot?.changes ?? []].find(c=>c.taskId===roundTaskId&&c.reviewArchive)?.reviewArchive;
   const roundRequest = snapshot?.messages.find(m => m.id === roundTask?.rootUserMessageId)?.text??archived?.request??archived?.title;
   const roundSession = snapshot?.sessions.find(s => s.id === (roundTask?.sessionId??archived?.sessionId));
   const ids = snapshot ? expandReviewSelection(snapshot, selected.filter(id => entries.some(e => e.unit.id === id))) : [];
@@ -58,6 +64,17 @@ export function CanvasReviewPanel({ canvasId }: { canvasId: string }) {
     }
   }, [canvasId, canvasSelectionKey, !!snapshot]);
   useEffect(() => { if (!entries.length && boxCanvasId === canvasId) box(undefined); }, [entries.length, boxCanvasId, canvasId]);
+  useEffect(() => setQuery(''), [canvasId]);
+  useEffect(() => {
+    const frame = requestAnimationFrame(() => {
+      const item = [...section.current?.querySelectorAll<HTMLElement>('[data-review-unit]') ?? []].find(el => selected.includes(el.dataset.reviewUnit!));
+      if (!item) return;
+      let parent = item.parentElement;
+      while (parent && parent !== section.current) { if (parent instanceof HTMLDetailsElement) parent.open = true; parent = parent.parentElement; }
+      item.scrollIntoView({ block:'nearest' });
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [selected.join('|'), panel.round]);
   if (!snapshot || !entries.length) return <div data-review-empty className="review-empty">
     <Sparkles size={23} aria-hidden="true" /><p>{snapshot ? '暂无待处理的 AI 修改' : '正在读取 AI 修改…'}</p>
     <p className="review-help">AI 修改后，点击画布上的标记即可保留或回退。</p>
@@ -79,23 +96,25 @@ export function CanvasReviewPanel({ canvasId }: { canvasId: string }) {
         <div className="review-before"><span>修改前</span><pre>{diff.before}</pre></div>
         <div className="review-after"><span>修改后</span><pre>{diff.after}</pre></div></div>;
     })}</details>;
-  return <section data-review-panel className="canvas-review-panel" aria-label="AI 修改">
+  return <section ref={section} data-review-panel className="canvas-review-panel" aria-label="AI 修改">
     <div className="review-heading"><span>修改已应用</span><span tabIndex={0} role="note" aria-label="审阅说明"
       title="保留会确认当前结果，回退会撤回相关修改。这里只保留最近两轮待处理修改；开始第三轮写入时，最早一轮会自动保留。"><Info size={14} /></span></div>
     <div className="review-body">
+      <SearchField label="搜索待审核修改" placeholder="搜索对象或修改摘要…" value={query} onChange={setQuery} onKeyDown={event => { if (event.key === 'Escape') setQuery(''); }} />
       <div className="review-toolbar">
         <div className="review-round-tabs" role="group" aria-label="修改轮次">
-          {[0, 1].map(n => <button key={n} disabled={!taskIds.at(-1 - n)} aria-pressed={panel.round === n}
+          {[0, 1].map(n => <button key={n} disabled={!!query.trim() || !taskIds.at(-1 - n)} aria-pressed={!query.trim() && panel.round === n}
             onClick={() => configure(canvasId, { round: n })}>{n ? '上轮' : '本轮'}</button>)}
         </div>
         <button className="review-text-button" disabled={working || !shown.length} onClick={() => { link(canvasId, []); select(canvasId, shown.map(e => e.unit.id)); }}
-          data-review-select-round>全选{panel.round ? '上轮' : '本轮'}</button>
+          data-review-select-round>全选{query.trim() ? '结果' : panel.round ? '上轮' : '本轮'}</button>
         <button className="review-box-button" aria-label="框选修改" title="在画布上框选修改" aria-pressed={boxCanvasId === canvasId}
           disabled={working} onClick={() => box(boxCanvasId === canvasId ? undefined : canvasId)}><Scan size={15} /></button>
       </div>
       <p className="review-help review-round" title={(roundSession?.title || '会话') + (roundRequest ? ' · ' + roundRequest : '')}>{roundRequest || roundSession?.title || '画布修改'}</p>
       <div className="review-list">
-        {!shown.length && <p className="review-help">这一轮已全部处理。</p>}
+        {query.trim() && <p className="review-help">搜索全部待审核轮次 · {shown.length} 项修改</p>}
+        {!shown.length && <p className="review-help">{query.trim() ? '没有匹配的待审核修改。' : '这一轮已全部处理。'}</p>}
         {[...groups].map(([key, group]) => {
           const groupIds = group.map(e => e.unit.id), count = groupIds.filter(id => ids.includes(id)).length;
           const grouped = group[0].change.review?.policy === 'group';

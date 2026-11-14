@@ -9,7 +9,9 @@ import { acknowledgedObservations, visibleWriteCalls } from './writeAcknowledgem
 import { currentDirectoryObservation } from './directoryObservations';
 import { renderNoticeFacts } from './contextUpdates';
 import { allRetainedCalls, originResultId, visibleCallResult } from './readVisibility';
-import { canvasField, canvasKey, canvasFactCovered, factKey, canvasReadTools, canvasResultHasBody, canvasDeliveryValid, canvasObservationDelivery, visibleCanvasCallIds, deliveredCanvasFacts, type CanvasFact } from './canvasReadEvidence';
+import { canvasField, canvasKey, canvasFactCovered, factKey, canvasReadTools, canvasResultHasBody, canvasDeliveryValid, canvasObservationDelivery, visibleCanvasCallIds, deliveredCanvasFacts, fullyObservedNodeIds, type CanvasFact } from './canvasReadEvidence';
+import { currentRelationHashes } from './graphRelationDependencies';
+import { semanticHashes } from './graph';
 import { graphQueryKey, graphQueryVersion } from './graphQueries';
 import { decodeGraphReference } from './graphReferences';
 import { mayHaveCanvasPage } from './readPageEvidence';
@@ -85,7 +87,18 @@ function covered(state: AppSnapshot, old: Observation, change: Change, observati
   const delivered=()=>deliveredCanvasFacts(index,observations);
   if(change.fact){const fact=change.fact as CanvasFact,current=canvasKey(canvasField(index,fact.refId,fact.field));
     return canvasFactCovered(fact,delivered().filter(f=>factKey(f)===factKey(fact)&&f.version===current));}
-  if(change.kind==='unknown')return false;
+  if(change.kind==='unknown'){
+    // Unknown is not a change assertion. Recover only from independent complete
+    // deliveries of the host-recorded footprint, never from the unverified bytes.
+    const facts=old.canvasFacts??[],keys=Object.keys(old.readHashes??{});
+    if(!facts.length)return false;
+    const current={...semanticHashes(index.graph),...currentRelationHashes(index.graph,keys,context)};
+    const latest=delivered();
+    return facts.every(f=>canvasFactCovered(f,latest.filter(n=>factKey(n)===factKey(f)&&n.version===canvasKey(canvasField(index,f.refId,f.field)))))
+      &&Object.keys(old.objects??{}).every(id=>!index.graph.nodes[id]||fullyObservedNodeIds(index,observations).includes(id))
+      &&keys.every(key=>current[key]!==undefined&&observations.some(o=>o.readHashes?.[key]===current[key]))
+      &&(!old.graphQuery||completeVisibleQuery(observations.filter(o=>o.graphQuery&&canvasKey(o.graphQuery)===canvasKey(old.graphQuery))));
+  }
   const dependencyKey=change.kind==='directory'?'directoryMembers:'+ref:change.kind==='path'?'paths:'+ref
     :change.kind==='directory_data'||change.kind==='direct_data'?subgraphKey(old.canvasId,ref,change.part as SubgraphPart)
     :change.kind===undefined?'directories:'+ref:undefined;
@@ -139,18 +152,27 @@ export function canvasObservationChanges(state:AppSnapshot,observation:Observati
       fact,...(value===undefined?{deleted:true}:{currentVersion:canvasKey(value)})});}
   return changes;
 }
-export function pendingCanvasChanges(state:AppSnapshot,task:Task,stage:ContextStage,context:GraphReadContext|undefined=state.graph?graphReadContext(state):undefined) {
+/** One evidence resolver for notifications and submitted execution guards. */
+export function visibleCanvasEvidence(state:AppSnapshot,task:Task,stage:ContextStage):Observation[] {
   const workspace=state.workspaces.find(w=>w.id===task.workspaceId)!;
   const calls=allRetainedCalls(state),observations=visibleObservations(stage,workspace.observations??[],task,calls,state);
-  const pending=new Map<string,{change:Change;observation:Observation;observations:Observation[]}>();
   const visible=visibleCanvasCallIds(stage);
   for(const c of calls)if((visible.has(c.id)||visible.has(originResultId(c)))&&canvasResultHasBody(c)
     &&(canvasReadTools.has(c.name)||c.name==='context_read_pages'&&mayHaveCanvasPage(state,c))
     &&!observations.some(o=>o.callId===c.id||o.callId===originResultId(c)))
     observations.push({id:`unknown:${c.id}`,taskId:task.id,canvasId:task.canvasId,callId:c.id,refs:[],directories:{},paths:{},completeDirectories:[],sources:[],evidenceUnknown:true});
+  return observations;
+}
+export function pendingCanvasChanges(state:AppSnapshot,task:Task,stage:ContextStage,context:GraphReadContext|undefined=state.graph?graphReadContext(state):undefined,
+  observations=visibleCanvasEvidence(state,task,stage)) {
+  return unresolvedCanvasChanges(state,observations,observations,context);
+}
+/** Derived summaries retain checks, but only real deliveries may resolve them. */
+export function unresolvedCanvasChanges(state:AppSnapshot,observations:Observation[],delivered:Observation[],context?:GraphReadContext){
+  const pending=new Map<string,{change:Change;observation:Observation;observations:Observation[]}>();
   for(const observation of observations){
     for(const change of canvasObservationChanges(state,observation,context))
-    if(!covered(state,observation,change,observations,context)){
+    if(!covered(state,observation,change,delivered,context)){
       const key=changeKey(change,observation),prior=pending.get(key);
       pending.set(key,{change,observation,observations:[...(prior?.observations??[]),observation]});
     }
@@ -159,41 +181,43 @@ export function pendingCanvasChanges(state:AppSnapshot,task:Task,stage:ContextSt
 }
 
 export function canvasNoticeLabels(state:AppSnapshot,task:Task,change:Change,observation:Observation,encode:(id:string)=>string,context?:GraphReadContext){
-  if(change.kind==='unknown')return {kind:'版本无法确认',labels:[observation.refs.length?observation.refs.map(encode).join('/'):'画布读取'],detail:'交付证据缺失，不代表资料已变更；仅当前任务需要时按原读取范围补读'};
+  if(change.kind==='unknown')return {kind:'版本无法确认',labels:[observation.callId?encode(observation.callId):observation.refs.length?observation.refs.map(encode).join('/'):'画布读取'],detail:'证据不足；按原范围补读，非确认变化'};
   if(change.kind==='query'){
     const query=observation.graphQuery??change.readWith;
     const args=observation.graphQuery?.arguments;
     const scopes=args?.sourceRefId&&args.targetRefId?[String(args.sourceRefId),String(args.targetRefId)]:[String(args?.refId??observation.canvasId)];
     const scope=scopes.map(ref=>ref===task.canvasId?'画布根':encode(ref)).join('↔');
     const reference=observation.callId?encode(observation.callId):`Q${digest([observation.canvasId,query??[observation.query,observation.queryScope]]).slice(0,10)}`;
-    return {kind:'查询结果版本变动',labels:[`${reference}@${scope}`],detail:change.deleted
-      ?`${observation.graphQuery?.tool??'graph_search'}；原查询范围已删除或不可访问；旧结果仅供历史参考，仅当前任务需要时重新定位可访问范围`
-      :`${observation.graphQuery?.tool??'graph_search'}；结果集合已变更，新版未完整交付；仅当前任务需要该查询时重跑原查询`};
+    return {kind:'查询变动',labels:[`${reference}@${scope}${change.deleted?'·范围不可用':'·结果集合'}`],detail:change.deleted
+      ?'重新定位可访问范围':`重跑原查询 ${observation.graphQuery?.tool??'graph_search'}`};
   }
   const ref=String(change.refId??task.canvasId),index=graphIndex(state,task.canvasId,context),row=index.rows.get(ref),edge=graphTables(index).edges.get(ref);
   const field=String(change.part??(change.fact as CanvasFact|undefined)?.field??(change.kind==='path'?'path':'')).replace(/^field:/,'');
-  const names:Record<string,string>={content:'正文',name:'名称',design:'设计字段',pros:'优点',cons:'缺点',edge:'边数据',path:'路径',owner:'归属',members:'直接成员',directory:'直接子图目录',direct:'文件直接内容',existence:'存在状态'};
+  const names:Record<string,string>={content:'正文',name:'名称',design:'设计字段',pros:'优点',cons:'缺点',edge:'边',path:'路径',owner:'归属',members:'直接成员',node_members:'直属节点',directory_members:'直属子图',directory:'目录',direct:'直属内容',existence:'存在状态'};
   const structural=observation.structureOnly||['path','owner','directory','directory_members'].includes(field)||change.kind==='path';
-  const kind=structural?'目录版本变动':'详细数据版本变动';
+  const kind=structural?'目录变动':'画布变动';
   const label=ref===task.canvasId?'画布根':encode(ref);
-  if(change.deleted)return {kind,labels:[label],detail:'已删除或不在当前范围；旧内容仅供历史参考'};
+  if(change.deleted)return {kind,labels:[`${label}·不可用`],detail:'已删除或移出；旧内容仅供历史参考'};
   const scope=names[field]??(change.kind==='directory'?'直接成员':change.kind==='relations'?'关系集合':row?.kind==='node'?'节点数据':edge?'边数据':'子图信息');
   // Directory tools cannot take node references. Bound body/field/relation
   // readers need a fresh object entry before they can read a newer version.
   const tool=change.kind==='relations'?'graph_read_node_edges':edge||row?.kind==='node'&&['existence','members','path','owner'].includes(field)?'graph_read':structural?'graph_read_directory':row?.kind==='node'&&(!field||['content','pros','cons'].includes(field))?'graph_read_node_content':['name','path','design'].includes(field)?'graph_read_object_field':'graph_read_subgraph';
   const root=ref===task.canvasId;
   const readTool=field==='members'&&row?.kind!=='node'
-    ?`按需选graph_read_subgraph（直属节点）或graph_read_directory（直属子图）${root?'，均省略refId':''}`
+    ?`graph_read_subgraph/graph_read_directory${root?'（根，省略refId）':''}`
     :root?`${structural||tool==='graph_read_object_field'?'graph_read_directory':'graph_read_subgraph'}（省略refId）`
     :['graph_read_node_content','graph_read_object_field','graph_read_node_edges'].includes(tool)
-      ?`先用graph_read刷新该对象入口；仍缺内容时按返回入口补读（${tool}）`:tool;
-  return {kind,labels:[label],detail:`${scope}已变更；新版未完整交付；仅当前任务需要此范围时，${readTool}`};
+      ?'graph_read刷新；不足按入口补读':tool;
+  const fact=change.fact as CanvasFact|undefined;
+  const range=fact?.start!==undefined?`[${fact.start},${fact.end??'?'}）`:'';
+  return {kind,labels:[`${label}·${scope}${range}`],detail:readTool};
 }
 
 /** Each session compares its own visible read evidence with the current canvas. */
 export function appendCanvasFreshness(state: AppSnapshot, task: Task, stage: ContextStage,
-  encode:(id:string)=>string, context:GraphReadContext|undefined=state.graph?graphReadContext(state):undefined): string[] {
+  encode:(id:string)=>string, context:GraphReadContext|undefined=state.graph?graphReadContext(state):undefined,
+  observations?:Observation[]): string[] {
   if (!state.graph?.canvases.some(c => c.canvasId === task.canvasId)) return [];
-  return renderNoticeFacts([...pendingCanvasChanges(state,task,stage,context).values()].map(({change,observation})=>
+  return renderNoticeFacts([...pendingCanvasChanges(state,task,stage,context,observations).values()].map(({change,observation})=>
     canvasNoticeLabels(state,task,change,observation,encode,context)));
 }

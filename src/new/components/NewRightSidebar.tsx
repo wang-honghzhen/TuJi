@@ -2,7 +2,10 @@ import { FilePlus, MoreHorizontal } from 'lucide-react';
 import { SidebarToggle } from './SidebarToggle';
 import { DocumentMeta } from '@/types/document';
 import { useNewUiStore, beginSidebarResize } from '../newUiStore';
-import type { ReactNode } from 'react';
+import { useEffect, useState, type ReactNode } from 'react';
+import { SearchField, SearchHighlight } from './SearchField';
+import { PendingReviewSearch } from './PendingReviewSearch';
+import { searchContains } from '../graphSearch';
 import { DirectoryTab, ReviewTab } from './NewDirectoryDock';
 import { GraphNameLabel } from './GraphPathLabel';
 import { NewTreeIcon } from './NewTreeIcon';
@@ -43,6 +46,8 @@ export function NewRightSidebar({
   reviewPanel,
   canvasId,
 }: NewRightSidebarProps) {
+  const [query, setQuery] = useState(''), [searchKind, setSearchKind] = useState<'documents' | 'reviews'>('documents');
+  useEffect(() => { setQuery(''); }, [canvasId]);
   const isOpen = useNewUiStore((state) => state.isRightSidebarOpen);
   const toggle = useNewUiStore((state) => state.toggleRightSidebar);
   const width = useNewUiStore((state) => state.rightWidth);
@@ -64,7 +69,7 @@ export function NewRightSidebar({
     .filter((doc) => !activeDocumentIds.includes(doc.documentId))
     .sort(byUpdatedDesc);
   // 置顶组在前，其余按时间倒序 —— 两边各自排好，顺序是稳定的
-  const ordered = [...pinned, ...rest];
+  const ordered = [...pinned, ...rest].filter(doc => searchContains(query, doc.documentName, doc.description));
 
   return (
     <aside
@@ -110,7 +115,10 @@ export function NewRightSidebar({
               <FilePlus size={15} />新建
             </button>
           </div>
-          <div className="flex-1 min-h-0 overflow-y-auto new-scroll px-2.5 pb-2.5 space-y-2">
+          <div className="graph-search-inset"><SearchField label={searchKind === 'documents' ? '搜索图文档' : '搜索待审核提交'} value={query} onChange={setQuery} onKeyDown={event => { if (event.key === 'Escape') setQuery(''); }} /></div>
+          <div className="graph-search-filters" role="group" aria-label="文档栏搜索范围"><button type="button" aria-pressed={searchKind === 'documents'} onClick={() => setSearchKind('documents')}>图文档</button><button type="button" aria-pressed={searchKind === 'reviews'} onClick={() => setSearchKind('reviews')}>待审核提交</button></div>
+          {searchKind === 'reviews' ? <PendingReviewSearch canvasId={canvasId} query={query} /> : <div className="flex-1 min-h-0 overflow-y-auto new-scroll px-2.5 pb-2.5 space-y-2">
+          {!ordered.length && <p className="graph-search-empty">{query ? '没有匹配的图文档' : '还没有图文档'}</p>}
           {ordered.map((doc, index) => {
             const isOnCanvas = activeDocumentIds.includes(doc.documentId);
             // 置顶组与其余之间画一条分隔，让「为什么它在上面」一眼可读
@@ -157,7 +165,7 @@ export function NewRightSidebar({
                     {/* 信息 */}
                     <div className="flex-1 min-w-0">
                       <div className="flex items-center gap-1.5">
-                        <GraphNameLabel id={doc.documentId} name={doc.documentName} kind="document" className="flex-1 text-[13px] font-medium truncate" />
+                        {query ? <span className="flex-1 text-[13px] font-medium truncate"><SearchHighlight text={doc.documentName} query={query} /></span> : <GraphNameLabel id={doc.documentId} name={doc.documentName} kind="document" className="flex-1 text-[13px] font-medium truncate" />}
                         {rootDocumentIds.includes(doc.documentId) && <span data-tree-root={doc.documentId} title={`${doc.documentName}目录树`} className="shrink-0 rounded border border-amber-400/25 px-1 py-0.5 text-[9px] text-amber-200">目录树根</span>}
                         {/* 在画布上的加一个状态点 */}
                         {isOnCanvas && (
@@ -188,7 +196,7 @@ export function NewRightSidebar({
               </div>
             );
           })}
-          </div>
+          </div>}
         </div>}
       </div>
     </aside>

@@ -2,6 +2,10 @@ import type { AppSnapshot, Session, TemporaryMode } from './domain';
 
 export const TEMPORARY_IDLE_MS = 60 * 60 * 1000;
 export const TEMPORARY_LIMIT = 3;
+// A namespace, never a user-visible canvas. Desktop chats survive canvas changes.
+export const DESKTOP_TEMPORARY_CANVAS = 'desktop:temporary';
+export const isDesktopTemporary = (session: Session | undefined) =>
+  session?.mode === 'temporary' && session.temporaryContext?.scope === 'desktop';
 export const SHARED_NOTE_REMINDER = '本笔记与来源会话共享。不要轻易写入；仅将需要交回来源会话的结论、结果或必要注意事项写入共享笔记。';
 export const temporaryMode = (session: Session | undefined): TemporaryMode | undefined =>
   session?.mode === 'temporary' ? session.temporaryContext?.mode ?? 'custom' : undefined;

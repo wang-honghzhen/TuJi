@@ -5,6 +5,8 @@ import './notebook.css';
 export type PaperRevision = number | string;
 export interface PaperEditorHandle { flush: () => Promise<void>; remove: () => Promise<void> }
 export const PaperSaveScope = createContext<MutableRefObject<Map<symbol, () => Promise<void>>> | null>(null);
+const liveEditors = new Map<symbol, () => Promise<void>>();
+export async function flushPaperEditors() { await Promise.all([...liveEditors.values()].map(flush => flush())); }
 
 export function PaperContextMenu({ x, y, label, onDelete, onClose }: {
   x: number; y: number; label: string; onDelete: () => void; onClose: () => void;
@@ -74,8 +76,8 @@ export const PaperEditor = forwardRef<PaperEditorHandle, {
   api.current = { flush, remove };
   useImperativeHandle(ref, () => ({ flush: () => api.current.flush(), remove: () => api.current.remove() }), []);
   useEffect(() => {
-    const token = key.current; scope?.current.set(token, () => api.current.flush());
-    return () => { scope?.current.delete(token); clearTimer(); };
+    const token = key.current; scope?.current.set(token, () => api.current.flush()); liveEditors.set(token, () => api.current.flush());
+    return () => { scope?.current.delete(token); liveEditors.delete(token); clearTimer(); };
   }, [scope]);
   useEffect(() => {
     if (!pending.current && current.current === saved.current.text) {

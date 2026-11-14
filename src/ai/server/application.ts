@@ -11,7 +11,7 @@ import type { AppSnapshot,Artifact,ContextManifest,ProtocolMessage,ProviderConfi
 import { effectiveArtifacts } from '../memory';
 import { selectedProgressPayload, normalizeProgressSelection,registerSessionTask } from '../sessionContext';
 import { defaultTaskBudget } from '../taskBudget';
-import { isMinimalSession, touchTemporary } from '../temporaryModes';
+import { isDesktopTemporary, isMinimalSession, touchTemporary } from '../temporaryModes';
 import { ApiConfiguration } from './apiConfiguration';
 import { parseArtifact,type ParseArtifactOptions } from './artifacts';
 import { attachmentLimits, attachmentBatchError } from '../attachments';
@@ -25,6 +25,7 @@ import { Runtime } from './runtime';
 import { reconcileSessionRoots,SessionService } from './sessions';
 import { claimTaskNotices } from './taskNotices';
 import { userNotebookCommand } from './userNotebook';
+import { UserNoteImages } from './userNoteImages';
 
 export interface CredentialStorage {
   get(): string | null | Promise<string | null>;
@@ -58,6 +59,7 @@ export class Application {
   readonly sessions: SessionService;
   private readonly artifactDirectory: string;
   private readonly backgroundAssets: BackgroundAssets;
+  private readonly userNoteImages: UserNoteImages;
   private readonly jobs = new Map<string, UploadJob>();
   private readonly operations = new Set<Promise<unknown>>();
   private initialized: Promise<void>;
@@ -72,6 +74,7 @@ export class Application {
     this.artifactDirectory = path.resolve(text(options.artifactDirectory, '资料目录', 4000));
     repo.artifactDirectory = this.artifactDirectory;
     this.backgroundAssets = new BackgroundAssets(this.artifactDirectory);
+    this.userNoteImages = new UserNoteImages(this.artifactDirectory);
     this.runtime = new Runtime(repo);
     this.sessions = new SessionService(repo, (state, session) => this.runtime.assembleCreatedSession(state, session));
     repo.transaction(() => { reconcileSessionRoots(repo); this.compactStoredGraph(); });
@@ -107,6 +110,7 @@ export class Application {
   }
   ready(): Promise<void> { return this.initialized; }
   snapshot(): AppSnapshot { return this.repo.publicSnapshot(); }
+  async readUserNoteImage(filename: string) { await this.ready(); return this.userNoteImages.read(filename); }
   private userSession(sessionId: unknown) { return this.runtime.getSession(text(sessionId, '会话 ID', 1000)); }
 
   dispatch(action: string, raw: unknown = {}): Promise<unknown> {
@@ -128,6 +132,10 @@ export class Application {
         this.repo.transaction(state=>{touchTemporary(session);state.lastSeq++;});return {ok:true};
       }
       case 'session.ensure': return this.sessions.ensure(text(payload.canvasId, '画布 ID', 1000));
+      case 'temporary.createDesktop': {
+        await this.cleanupExpiredTemporary();
+        return this.sessions.createDesktopTemporary();
+      }
       case 'session.update': return this.sessions.update(payload as unknown as Parameters<SessionService['update']>[0]);
       case 'chat.bookmark': return this.sessions.bookmarkTurn(payload as unknown as Parameters<SessionService['bookmarkTurn']>[0]);
       case 'temporary.close': {
@@ -147,7 +155,9 @@ export class Application {
       case 'inheritance.preview': return this.sessions.inheritancePreview(payload as unknown as Parameters<SessionService['inheritancePreview']>[0]);
       case 'note.save': return this.sessions.noteSave(payload as unknown as Parameters<SessionService['noteSave']>[0]);
       case 'note.requirements': return this.sessions.replaceRequirements(payload as unknown as Parameters<SessionService['replaceRequirements']>[0]);
+      case 'userNote.image.upload': return this.userNoteImages.upload(payload.dataUrl);
       case 'userNote.ensure': case 'userNote.create': case 'userNote.save': case 'userNote.delete':
+      case 'userNote.assign': case 'userNote.directory.create': case 'userNote.directory.delete':
         return userNotebookCommand(this.repo, action, payload);
       case 'note.edit': return this.sessions.noteEdit(payload as unknown as Parameters<SessionService['noteEdit']>[0]);
       case 'note.delete': this.sessions.noteDelete(payload as unknown as Parameters<SessionService['noteDelete']>[0]); return { ok: true };
@@ -315,10 +325,10 @@ export class Application {
       return sanitizeManifest(manifest);
     }
     const session = this.userSession(payload.sessionId), state = structuredClone(this.repo.state);
-    requireValue(state.graph, '画布尚未迁移', 'NOT_READY');
+    requireValue(state.graph || isMinimalSession(session), '画布尚未迁移', 'NOT_READY');
     const body = text(payload.text ?? '', '草稿消息', 5000000).trim();
     const intent = payload.intent ?? 'new'; requireValue(['new', 'amend'].includes(intent as string), '预览发送意图无效');
-    const members = memberIds(state.graph, session.canvasId);
+    const members = isMinimalSession(session) ? new Set<string>() : memberIds(state.graph!, session.canvasId);
     const targets = isMinimalSession(session)?[]:strings(payload.targetIds ?? [], '目标').filter(ref => members.has(ref)), artifacts = strings(payload.artifactIds ?? [], '附件');
     const versions: Record<string, number> = {};
     for (const ref of artifacts) {
@@ -536,7 +546,7 @@ export class Application {
         if (state.graph) protectReviewWrites(state, state.graph, graph);
         state.graph = graph; state.graphRevision++;
         // Sessions live only as long as their canvas, and every cached projection is rebuilt.
-        for (const session of state.sessions) if (!graph.canvases.some(canvas => canvas.canvasId === session.canvasId) && session.lifecycle === 'active') session.lifecycle = 'archived';
+        for (const session of state.sessions) if (!isDesktopTemporary(session) && !graph.canvases.some(canvas => canvas.canvasId === session.canvasId) && session.lifecycle === 'active') session.lifecycle = 'archived';
         for (const canvasId of Object.keys(state.canvasGraphReferences)) if (!graph.canvases.some(canvas => canvas.canvasId === canvasId)) delete state.canvasGraphReferences[canvasId];
         for (const workspace of state.workspaces) { workspace.canvasView = undefined; }
         reconcileSessionRoots(this.repo);

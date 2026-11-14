@@ -10,7 +10,7 @@ import { Repository } from './repository';
 import { callModel, requestTokens, type ModelRequest } from './providers';
 import { summaryConnection } from './apiConfiguration';
 import { digest } from './directGraph';
-import { allEvidence } from './historyRepresentations';
+import { allEvidence, summaryArchive } from './historyRepresentations';
 import { previewReceipts } from './readVisibility';
 import { previewWriteReceipts } from './writeReceipts';
 import { noticeDue, noticeMaintenanceReasons } from './noticeMaintenance';
@@ -21,6 +21,21 @@ import { taskSummaryUnits, boundedSummaryInput, acceptTaskSummaries, TASK_SUMMAR
 
 interface PrepareOptions {repo:Repository;task:Task;caller:typeof callModel;signal:AbortSignal;guard:()=>void;
   build?:(options?:ContextBuildOptions)=>ContextManifest;preview?:(clean?:boolean)=>ContextManifest}
+
+/** Live graph/notebook versions do not change the historical bytes sent to the summary
+ * model. Keep their original source bindings; the rebuilt executor request checks them.
+ * Revocation, edited input records and changed summary children do invalidate the result. */
+function summaryInputFence(repo:Repository,task:Task,inputs:TaskSummaryInput[]):string {
+  const state=repo.state,workspace=state.workspaces.find(w=>w.id===task.workspaceId)!;
+  const session=state.sessions.find(s=>s.id===task.sessionId),records=allEvidence(state,task),archive=summaryArchive(state,task);
+  return digest([task.instructionRevision,state.provider,task.modelSelection,repo.summaryConnection?.provider,
+    task.inputBindings,[session?.canvasId,session?.mode,session?.lifecycle,session?.temporaryContext],
+    workspace.snapshotIds.map(id=>{const s=state.snapshots.find(s=>s.id===id);return [id,s?.contentHash,s?.revoked];}),
+    inputs.map(input=>[input.taskId,taskSummaryUnits(state,task,input.taskId).initialMessage,
+      input.units.map(unit=>[unit.id,unit.summaryId?archive.find(s=>s.id===unit.summaryId):undefined,
+        unit.coverage.map(span=>{const r=records.find(r=>r.id===span.recordId&&r.taskId===span.taskId);
+          return [span,r&&[r.version,r.text,r.sources,r.order]];})])])]);
+}
 
 export function progressRegionTokens(manifest:ContextManifest){
   const sums={history:0,progress:0};
@@ -54,7 +69,9 @@ export async function prepareAutomaticContext(options:PrepareOptions):Promise<Co
   const {repo,task,caller,signal,guard}=options,started=Date.now(),capacity=inputCapacity(repo.state);
   const reserve=Math.min(AUTO_CONTEXT.readTokens,capacity*AUTO_CONTEXT.recentShare)+Math.min(AUTO_CONTEXT.readTokens,capacity*.05);
   const trigger=capacity*AUTO_CONTEXT.trigger-reserve,target=Math.max(0,capacity*AUTO_CONTEXT.target-reserve),hard=capacity-reserve;
-  const directoryMaintenance=createDirectoryMaintenance(repo.state,task),summaryMaintenance=createSummaryMaintenance(),canvasMaintenance=createCanvasMaintenance();
+  let directoryMaintenance=createDirectoryMaintenance(repo.state,task),summaryMaintenance=createSummaryMaintenance(),canvasMaintenance=createCanvasMaintenance();
+  const resetMaintenance=()=>{directoryMaintenance=createDirectoryMaintenance(repo.state,task);
+    summaryMaintenance=createSummaryMaintenance();canvasMaintenance=createCanvasMaintenance();};
   let resident=residentSessionTaskIds(repo.state,task.sessionId,task.id),builds=0,calls=0;
   const build=(mode:ContextBuildOptions['mode']='append',intent:ContextBuildOptions['maintenanceIntent']='ordinary')=>{
     const result=options.build?options.build({mode,maintenanceIntent:intent,residentTaskIds:resident,directoryMaintenance,summaryMaintenance,canvasMaintenance})
@@ -119,8 +136,6 @@ export async function prepareAutomaticContext(options:PrepareOptions):Promise<Co
   const first=progressRegionTokens(candidate);
   if(first.history>budgets.high)active.add('history');if(first.progress>budgets.high)active.add('progress');
   const noBenefit=new Set<string>();
-  const fence=()=>digest([task.instructionRevision,repo.state.provider,task.modelSelection,repo.state.graphRevision,
-    allEvidence(repo.state,task).map(r=>[r.id,r.version]),repo.state.workspaces.map(w=>[w.id,w.pinnedNotes,w.workNotes,w.sessionContext?.historicalSummaryCounts])]);
   const evictOldest=()=>{
     const oldest=resident.find(id=>id!==task.id);if(!oldest)return false;
     resident=resident.filter(id=>id!==oldest);candidate=build('refactor','capacity');return true;
@@ -174,7 +189,8 @@ export async function prepareAutomaticContext(options:PrepareOptions):Promise<Co
       if(evictOldest())continue;
       return lowerBound(candidate,'摘要所需任务用量预算不足且必需内容仍无法容纳；任务与原文已保留。');
     }
-    const sourceFence=fence(),roundId=randomUUID();calls++;
+    const sourceFence=summaryInputFence(repo,task,inputs),roundId=randomUUID();calls++;
+    const inputSignatures=inputs.map(input=>digest(taskSummaryUnits(materialState,task,input.taskId).units.map(u=>[u.id,u.coverage])));
     repo.transaction(()=>{task.memoryCalls=(task.memoryCalls??0)+1;task.usedTokens+=tokens+provider.maxOutputTokens;
       repo.event(task.workspaceId,'context.compaction_started',{roundId,phase:'summary'},task.id);});
     let accepted:SummarySnapshot[]=[];
@@ -182,11 +198,14 @@ export async function prepareAutomaticContext(options:PrepareOptions):Promise<Co
     try{
       const response=await caller({...provider,timeoutMs:Math.max(1,Math.min(provider.timeoutMs,AUTO_CONTEXT.maxDurationMs-(Date.now()-started)))},connection.credential,request,{signal});
       guard();repo.transaction(()=>{task.usedTokens+=(response.outputTokens??estimateTokens(response.text))-provider.maxOutputTokens;});
-      if(sourceFence!==fence())return measured(build());
+      // The await can outlive any maintenance snapshot, even when the summary's
+      // immutable historical inputs are unchanged. Never reuse those memo tables.
+      resetMaintenance();candidate=build('refactor','capacity');trim();
+      if(sourceFence!==summaryInputFence(repo,task,inputs))continue;
       const output=JSON.parse(response.text.replace(/^```(?:json)?\s*/,'').replace(/\s*```$/,''));
       accepted=acceptTaskSummaries(materialState,task,inputs,output,roundId);
       if(accepted.length)repo.transaction(state=>{
-        if(sourceFence!==fence())throw new Error('摘要来源已变化');
+        if(sourceFence!==summaryInputFence(repo,task,inputs))throw new Error('摘要来源已变化');
         const owner=state.workspaces.find(w=>w.id===task.workspaceId)!,context=ensureSessionContext(state,owner);
         const prior=owner.summaries??[];
         owner.summaries=[...prior,...accepted];
@@ -208,12 +227,13 @@ export async function prepareAutomaticContext(options:PrepareOptions):Promise<Co
       summaryStatus=signal.aborted?'cancelled':'failed';
       accepted=[];
       guard();if(signal.aborted)throw error;
+      resetMaintenance();
       repo.transaction(()=>repo.event(task.workspaceId,'context.summary_failed',{message:error instanceof Error?error.message:String(error),calls},task.id));
     }finally{
       repo.transaction(()=>repo.event(task.workspaceId,'context.compaction_finished',{roundId,status:summaryStatus,summaries:accepted.length},task.id));
     }
-    for(const input of inputs)if(!accepted.some(s=>s.coverage.some(c=>c.taskId===input.taskId)))
-      noBenefit.add(digest(taskSummaryUnits(materialState,task,input.taskId).units.map(u=>[u.id,u.coverage])));
+    for(const [index,input] of inputs.entries())if(!accepted.some(s=>s.coverage.some(c=>c.taskId===input.taskId)))
+      noBenefit.add(inputSignatures[index]);
     candidate=build('compact','capacity');trim();
   }
   // The deadline bounds model work, not the deterministic capacity fallback.

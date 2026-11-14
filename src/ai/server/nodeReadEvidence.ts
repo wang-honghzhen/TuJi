@@ -7,6 +7,7 @@ import { canvasMemberResults } from './canvasRefresh';
 import { fullyObservedNodeIds } from './canvasReadEvidence';
 import { graphIndex } from './directGraph';
 import { visibleObservations } from './contextFreshness';
+import { allRetainedCalls } from './readVisibility';
 
 type Field = 'name' | 'content' | 'design';
 export interface NodeReadEvidence {version:string;fields:Partial<Record<Field,{length:number;ranges:Array<[number,number]>}>>}
@@ -23,7 +24,7 @@ export function hasCompleteNodeRead(task:Task,node:GraphState['nodes'][string]):
   });
 }
 export function assertCompleteNodeRead(task:Task,graph:GraphState,refId:string):void {
-  requireValue(graph.nodes[refId]&&hasCompleteNodeRead(task,graph.nodes[refId]),'局部修改前须完整读取当前版本节点的名称、正文及设计字段，卡片、摘要或部分页不足','READ_REQUIRED',
+  requireValue(graph.nodes[refId]&&hasCompleteNodeRead(task,graph.nodes[refId]),'修改节点前须完整读取当前版本的名称、正文及设计字段，卡片、摘要或部分页不足','READ_REQUIRED',
     {executed:false,failedRefs:[refId],readWith:{tool:'graph_read',arguments:{refs:[refId]}}});
 }
 export function prepareNodeReadAdvances(task:Task,before:GraphState,after:GraphState,refs:string[]):NodeReadAdvance[]{
@@ -61,7 +62,7 @@ export function recordNodeReadData(task:Task,graph:GraphState,data:unknown,sourc
 export function acknowledgeCompleteNodeReads(state:AppSnapshot,manifest:ContextManifest,task:Task):void {
   if(!state.graph)return;
   if(manifest.stageDraft){
-    const observations=visibleObservations(manifest.stageDraft,state.workspaces.find(w=>w.id===task.workspaceId)?.observations??[],task,state.toolCalls,state);
+    const observations=visibleObservations(manifest.stageDraft,state.workspaces.find(w=>w.id===task.workspaceId)?.observations??[],task,allRetainedCalls(state),state);
     for(const ref of fullyObservedNodeIds(graphIndex(state,task.canvasId),observations))(task.nodeReadEvidence??={})[ref]=completeNodeEvidence(state.graph.nodes[ref]);
   }
   for(const member of manifest.stageDraft?.canvasRefresh?.members??[]){

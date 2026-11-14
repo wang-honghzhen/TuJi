@@ -1,0 +1,60 @@
+/* Keep the canvas full-height; the invisible strip provides native window dragging. */
+.desktop-drag-region {
+  position: fixed;
+  inset: 0 52px auto 0;
+  height: 12px;
+  z-index: 2147483645;
+  background: transparent;
+  user-select: none;
+  -webkit-app-region: drag;
+}
+
+/* Only this narrow top edge catches the pointer while the controls are hidden. */
+.desktop-window-controls {
+  position: fixed;
+  top: 0;
+  right: 0;
+  width: 52px;
+  height: 12px;
+  z-index: 2147483646;
+  background: transparent;
+  outline: none;
+  user-select: none;
+  -webkit-app-region: no-drag;
+}
+.desktop-window-controls:is(:hover, :focus-visible, :has(:focus-visible)) { height: 40px; }
+.desktop-window-buttons {
+  position: absolute;
+  top: 4px;
+  right: 6px;
+  display: flex;
+  gap: 2px;
+  background: transparent;
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  transition: opacity 120ms ease;
+}
+.desktop-window-controls:is(:hover, :focus-visible, :has(:focus-visible)) .desktop-window-buttons {
+  opacity: 1;
+  visibility: visible;
+  pointer-events: auto;
+}
+.desktop-window-button {
+  display: grid;
+  place-items: center;
+  width: 40px;
+  height: 32px;
+  padding: 0;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  box-shadow: none;
+  color: #cbd5e1;
+  cursor: default;
+  -webkit-app-region: no-drag;
+}
+.desktop-window-button:hover, .desktop-window-button:active { background: transparent; color: #fff; }
+.desktop-window-button:focus-visible { outline: 2px solid #93c5fd; outline-offset: -3px; }
+.desktop-window-button svg { pointer-events: none; filter: drop-shadow(0 1px 2px #020617); }
+@media (prefers-reduced-motion: reduce) { .desktop-window-buttons { transition: none; } }

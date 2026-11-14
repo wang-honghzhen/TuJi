@@ -110,8 +110,10 @@ async function desktopCheck(executable) {
     assert.match(result.result.value.text, /图记|连接|服务/);
     console.log('PASS: packaged desktop startup, no native menu, renderer, local API and isolated data directory');
   } finally {
-    if (!exited && socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ id: 2, method: 'Page.close' }));
-    else if (!exited) child.stdin.end('QIXUE_SHUTDOWN\n');
+    if (!exited) {
+      const quit = spawn(executable, ['--quit'], { env, windowsHide: true, stdio: 'ignore' });
+      await once(quit, 'exit');
+    }
     const timer = setTimeout(() => child.kill(), 10000); timer.unref();
     const code = await exit; clearTimeout(timer); socket?.close(); assert.equal(code, 0, errorOutput);
   }

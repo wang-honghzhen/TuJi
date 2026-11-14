@@ -16,7 +16,6 @@ import { NewAiReplyPanel } from './components/NewAiReplyPanel';
 import { NewChatInput } from './components/NewChatInput';
 import { trackCanvasMutation } from './canvasEditFlush';
 import { AiTemporarySidebar } from '@/ai/ui/AiTemporarySidebar';
-import { UserNotebook } from '@/ai/ui/UserNotebook';
 import { openTemporarySession } from '@/ai/temporaryWindows';
 import { DraftCanvasLeaveDialog } from './components/DraftCanvasLeaveDialog';
 import { CanvasCreateDialog } from './components/CanvasCreateDialog';
@@ -277,8 +276,7 @@ export default function NewApp() {
       activeDocumentIds={[...visibleDocuments]}
       onAddDocument={add} onCreateDocument={() => setNaming('document')} directoryPanel={directoryPanel} reviewPanel={reviewPanel} canvasId={canvas.canvasId} /></div>
     <NewReviewDock canvasId={canvas.canvasId}>{reviewPanel}</NewReviewDock>
-    <UserNotebook />
-    {!canvas.isDraft && <AiTemporarySidebar canvasId={canvas.canvasId} />}
+    <AiTemporarySidebar canvasId={canvas.canvasId} />
     {previewCanvasId && !graphState.canvases.find(c=>c.canvasId===previewCanvasId)?.isDraft && <NewSessionGraphOverlay canvasId={previewCanvasId} currentCanvasId={activeCanvasId} onSelect={(canvasId,sessionId) => openCanvas(canvasId,false,sessionId)} />}
     {pendingNavigation && <DraftCanvasLeaveDialog onCancel={() => setPendingNavigation(null)} onKeep={async () => { await pendingNavigation.proceed(); setPendingNavigation(null); }}
       onSave={async name => { const result = await executeGraph({ type: 'saveCanvas', name }, pendingNavigation.draftCanvasId); if (!result.ok) throw new Error(result.error ?? '另存失败'); await pendingNavigation.proceed(); setPendingNavigation(null); }} />}

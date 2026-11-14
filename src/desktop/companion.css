@@ -1,0 +1,68 @@
+:root { --utility-ink: #cbd8ea; --utility-muted: #778ba7; --utility-edge: #adcfff23; }
+html[data-desktop-role="orb"], html[data-desktop-role="orb"] body, html[data-desktop-role="orb"] #root { background: transparent !important; width: 280px; height: 280px; overflow: hidden; }
+html[data-desktop-role="panel"], html[data-desktop-role="panel"] body { background: #080f1d; }
+.orb-stage { width: 280px; height: 280px; position: relative; user-select: none; color: #e1ecfd; }
+.orb-core { position: absolute; left: 112px; top: 112px; width: 56px; height: 56px; padding: 0; border: none; border-radius: 50%; background: #081427; box-shadow: 0 0 0 1px #bfdcff88, 0 0 0 3px #253c57c9; cursor: grab; overflow: hidden; transition: box-shadow .2s; }
+.orb-core:active { cursor: grabbing; }
+/* Cut only at the diameter. The other three sides include the circular halo;
+   clipping at the button box flattens its outer arc into straight segments. */
+.orb-stage[data-dock="left"] .orb-core { clip-path: inset(-8px -8px -8px 50%); }
+.orb-stage[data-dock="right"] .orb-core { clip-path: inset(-8px 50% -8px -8px); }
+.orb-stage[data-dock="top"] .orb-core { clip-path: inset(50% -8px -8px -8px); }
+.orb-stage[data-dock="bottom"] .orb-core { clip-path: inset(-8px -8px 50% -8px); }
+.orb-core img { width: 100%; height: 100%; object-fit: cover; pointer-events: none; }
+.orb-core-rim { position: absolute; inset: 0; border-radius: inherit; box-shadow: inset 0 0 0 1px #d9eeff45, inset 0 0 7px #91b5df22; pointer-events: none; }
+.orb-stage[data-expanded="true"] .orb-core { box-shadow: 0 0 0 1px #c7e0ffb0, 0 0 0 4px #334e6bba; }
+.orb-orbit { opacity: 0; visibility: hidden; transition: opacity .16s ease, visibility .16s; }
+.orb-stage[data-expanded="true"] .orb-orbit { opacity: 1; visibility: visible; }
+.orb-tracks { position: absolute; inset: 0; width: 280px; height: 280px; pointer-events: none; overflow: visible; }
+.orb-tracks path { fill: none; stroke: #a4c3e8b0; stroke-width: 1.2; stroke-linecap: round; }
+.orb-satellite-wrap { position: absolute; width: 32px; height: 32px; transform: translate(-50%,-50%) scale(.85); transition: transform .18s cubic-bezier(.2,.8,.2,1); }
+.orb-stage[data-expanded="true"] .orb-satellite-wrap { transform: translate(-50%,-50%) scale(1); }
+.orb-satellite { width: 32px; height: 32px; display: flex; align-items: center; justify-content: center; border-radius: 50%; background: linear-gradient(145deg,#1e304bf5,#0a1528fa); border: 1px solid #b3d6ff5c; color: #dbeaff; box-shadow: 0 3px 10px #0005, inset 0 1px 0 #e2eeff0f; transition: background .15s, box-shadow .15s, border-color .15s; }
+.orb-satellite:hover, .orb-satellite:focus-visible { border-color: #c7e2ffd9; background: #284365; box-shadow: 0 0 12px #8dcaff4d; outline: none; }
+.orb-satellite[data-selected="true"] { background: #2d4d71; border-color: #aacfffc4; }
+.orb-session-number { font-size: 12px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.orb-delete, .utility-quick-delete { display: flex; align-items: center; justify-content: center; padding: 0; position: absolute; left: -4px; top: -4px; width: 14px; height: 14px; border-radius: 50%; background: #25334a; border: 1px solid #adcfff65; color: #c9d9ed; transition: background .15s; }
+.orb-delete:hover, .utility-quick-delete:hover { background: #a54857; color: #fff; border-color: #ffb7bf; }
+.orb-error { position: absolute; left: 18px; right: 18px; top: 10px; padding: 8px 10px; border-radius: 8px; background: #1b263df2; color: #ffd4cc; border: 1px solid #d38d7c66; font-size: 11px; text-align: center; pointer-events: none; }
+.utility-panel { position: fixed; z-index: 205; right: 0; top: 16px; bottom: 12px; display: flex; flex-direction: column; min-width: 0; border: 1px solid var(--utility-edge); border-radius: 14px 0 0 14px; background: #080f1dfc; box-shadow: -14px 8px 50px #0006; color: var(--utility-ink); transform: translateX(104%); opacity: 0; transition: transform .2s cubic-bezier(.2,.75,.25,1), opacity .16s; pointer-events: none; }
+.utility-panel[data-visible="true"] { transform: translateX(0); opacity: 1; pointer-events: auto; }
+.utility-panel-native { inset: 0; width: 100%; height: 100%; border-radius: 0; box-shadow: none; }
+.utility-panel-floating { border-radius: 14px; resize: both; overflow: hidden; min-width: 360px; min-height: 360px; }
+.utility-header { display: flex; align-items: center; justify-content: space-between; flex-shrink: 0; min-height: 40px; padding: 6px 10px 5px 12px; user-select: none; }
+.utility-heading { display: flex; align-items: center; gap: 7px; font-size: 11px; color: var(--utility-muted); letter-spacing: .06em; }
+.utility-actions { display: flex; gap: 3px; }
+.utility-actions button { width: 29px; height: 27px; display: flex; align-items: center; justify-content: center; background: transparent; border: 0; border-radius: 6px; color: #99adc8; -webkit-app-region: no-drag; }
+.utility-actions button:hover { color: #e3efff; background: #c5ddff12; }
+.utility-native-drag { -webkit-app-region: drag; }
+.utility-tabs { display: flex; gap: 3px; padding: 0 10px; flex-shrink: 0; overflow-x: auto; border-bottom: 1px solid var(--utility-edge); scrollbar-width: thin; }
+.utility-tabs::-webkit-scrollbar { height: 4px; }
+.utility-tabs::-webkit-scrollbar-thumb { border-radius: 8px; background: #8da9cd35; }
+.utility-tab { display: flex; align-items: center; flex-shrink: 0; border: 1px solid transparent; border-bottom: 0; border-radius: 7px 7px 0 0; color: #8297b3; }
+.utility-tab > button:first-child { display: flex; align-items: center; gap: 6px; padding: 9px 9px; font-size: 12px; white-space: nowrap; }
+.utility-tab[data-selected="true"] { background: #9dbde713; color: #d9e9ff; border-color: #adcfff23; box-shadow: inset 0 2px #93bde89c; }
+.utility-tab:hover { color: #e0ecfc; background: #91b7e50c; }
+.utility-tab-delete { display: flex; align-items: center; padding: 4px; margin-right: 4px; border-radius: 4px; opacity: .65; }
+.utility-tab-delete:hover { background: #ff9d9d22; color: #ffc8c8; opacity: 1; }
+.utility-content { flex: 1; min-height: 0; min-width: 0; display: flex; flex-direction: column; overflow: hidden; }
+.utility-content > .ai-chat-page { flex: 1; min-height: 0; }
+.utility-content .ai-chat-heading { padding: 11px 14px; }
+.utility-content .ai-chat-heading .ai-chat-title-group { min-width: 0; gap: 7px; }
+.utility-content .ai-chat-title { max-width: 100%; }
+.utility-mode-label { font-size: 10px; color: #7e9bbd; white-space: nowrap; }
+.utility-resize { position: absolute; z-index: 5; left: -4px; top: 0; bottom: 0; width: 8px; cursor: ew-resize; border-radius: 5px; }
+.utility-resize:hover, .utility-resize:focus-visible { background: #94c5ff30; outline: none; }
+.utility-panel-native .utility-resize { left: 0; width: 5px; }
+.utility-bookmarks { position: fixed; z-index: 204; right: 0; top: 28%; display: flex; flex-direction: column; align-items: flex-end; gap: 12px; max-height: 66vh; overflow-y: auto; padding: 5px 0 5px 6px; scrollbar-width: none; }
+.utility-bookmark-wrap { position: relative; }
+.utility-bookmark { display: flex; align-items: center; gap: 7px; padding: 10px 9px; border-radius: 10px 0 0 10px; border: 1px solid #adcfff36; border-right: 0; background: linear-gradient(120deg,#17263eed,#0b1427f5); color: #bed4ee; box-shadow: -3px 3px 12px #0003; font-size: 11px; }
+.utility-bookmark:hover { color: #e7f3ff; background: #263d59; }
+.utility-bookmark-note { color: #ded7bf; }
+.utility-notebook { flex: 1; min-height: 0; display: flex; flex-direction: column; color: #455363; background: #f4f2ed; }
+.utility-notebook .paper-page-toolbar { padding: 8px 12px; gap: 5px; flex-shrink: 0; }
+.utility-paper-scroll { overflow-y: auto; flex: 1; min-height: 0; background: #fff; }
+.utility-paper-scroll .notebook-paper { min-height: 100%; padding: 20px 24px 36px; }
+.utility-notebook footer { padding: 8px 16px; font-size: 10px; color: #858b8c; border-top: 1px solid #a8a39435; }
+.utility-error { position: fixed; right: 90px; top: 30%; z-index: 206; max-width: 280px; }
+@media (prefers-reduced-motion: reduce) { .orb-orbit, .orb-satellite-wrap, .orb-core, .utility-panel { transition: none !important; } }

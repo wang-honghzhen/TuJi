@@ -15,6 +15,7 @@ import { AiInteractionView } from '@/ai/ui/AiTaskView';
 import { AiTargetRefs } from '@/ai/ui/AiTargetRefs';
 import { canvasMemberIds } from '@/ai/canvasScope';
 import { flushCanvasEdits } from '../canvasEditFlush';
+import { trackDraftAction } from '@/ai/draftTransfers';
 
 export function NewChatInput({ canvasId = 'qixue-draft-canvas', sessionId }: { canvasId?: string; sessionId?: string }) {
   const snapshot = useAiStore((state) => state.snapshot);
@@ -69,7 +70,7 @@ export function NewChatInput({ canvasId = 'qixue-draft-canvas', sessionId }: { c
     throw new Error(sessionId ? '临时会话已关闭。' : '请先在会话视图中选择会话。');
   }
 
-  const send = (intent?: SendInput['intent'], target?: Task) => void action.run(async () => {
+  const send = (intent?: SendInput['intent'], target?: Task) => void action.run(() => trackDraftAction(async () => {
     if (!hasContent) return;
     if (session?.lifecycle === 'archived') throw new Error('此会话已归档，仅可查看历史。');
     const currentSession = await ensureSession();
@@ -90,9 +91,9 @@ export function NewChatInput({ canvasId = 'qixue-draft-canvas', sessionId }: { c
       cursor: result.presentation?.cursor ?? (result.id === playback?.taskId ? taskParts(useAiStore.getState().snapshot, result.id).at(-1)?.seq ?? 1 : 1),
       mode: 'follow', cameraFollow: true, followRequest: (usePlaybackStore.getState().byCanvas[canvasId]?.followRequest ?? 0) + 1 });
     setNotice(targetTask?.id===result.id?'已补充当前任务。':'消息已发送。');
-  });
+  }));
 
-  const upload = (files: File[]) => void uploadAction.run(async () => {
+  const upload = (files: File[]) => void uploadAction.run(() => trackDraftAction(async () => {
     const currentSession = await ensureSession();
     const existing=getDraft(currentSession.id).artifactIds.map(id=>useAiStore.getState().snapshot?.artifacts.find(a=>a.id===id)).filter((a):a is Artifact=>!!a);
     const problem=attachmentBatchError([...existing,...files],attachmentLimits(snapshot??undefined),currentSession);
@@ -105,7 +106,7 @@ export function NewChatInput({ canvasId = 'qixue-draft-canvas', sessionId }: { c
       setDraft(currentSession.id, { artifactIds: [...new Set([...current.artifactIds, artifact.id])] });
     }
     setNotice('附件已加入本次消息。');
-  });
+  }));
 
   const sessionUnavailable = !session || action.busy || uploadAction.busy || !snapshot || connection === 'disconnected';
   const unavailable = sessionUnavailable || session?.lifecycle === 'archived';
@@ -129,13 +130,13 @@ export function NewChatInput({ canvasId = 'qixue-draft-canvas', sessionId }: { c
       onKeyDown={(event) => { if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing && !composing && event.keyCode !== 229) { event.preventDefault(); if (!unavailable && hasContent) send(); } }}
       placeholder={!session?'请先在会话视图中选择会话…':task ? '补充要求或询问进展，将继续当前任务…' : session?.mode === 'temporary' ? '输入临时问题…' : '输入问题，或描述需要梳理的知识…'}
       className="w-full resize-none bg-transparent px-4 pt-2.5 pb-1.5 text-[14px] leading-6 text-slate-200 placeholder:text-slate-500 outline-none new-scroll max-h-48" aria-label="消息" data-ai-input />
-    {!minimal && draft.text.length > 20000 && <div className="ai-row px-4 pb-2"><span className="ai-muted">长文本可作为文档按需读取，再输入处理要求。</span><button className="ai-button" disabled={uploadAction.busy} data-ai-paste-as-document onClick={() => void uploadAction.run(async () => {
+    {!minimal && draft.text.length > 20000 && <div className="ai-row px-4 pb-2"><span className="ai-muted">长文本可作为文档按需读取，再输入处理要求。</span><button className="ai-button" disabled={uploadAction.busy} data-ai-paste-as-document onClick={() => void uploadAction.run(() => trackDraftAction(async () => {
       const currentSession = await ensureSession();
       const problem=attachmentBatchError([...artifacts,{size:new Blob([draft.text]).size}],attachmentLimits(snapshot??undefined),currentSession);if(problem)throw new Error(problem);
       const artifact = await command<Artifact>('artifact.upload', { sessionId: currentSession.id, name: `粘贴文档-${new Date().toLocaleDateString('zh-CN').replace(/\//g, '-')}.txt`, mimeType: 'text/plain', dataBase64: await fileToBase64(new File([draft.text], '粘贴文档.txt', { type: 'text/plain' })) });
       setDraft(currentSession.id, { text: '', pendingMessageId: undefined, artifactIds: [...draft.artifactIds, artifact.id] });
       setNotice('全文已保存为附件，请输入希望如何处理它。');
-    })}>全文转为附件</button></div>}
+    }))}>全文转为附件</button></div>}
     {!!draft.progressSelection?.length && <div className="ai-row px-4 pb-2" data-ai-attached-progress>
       <span className="ai-chip">已携带 {draft.progressSelection.length} 个任务的选中进度（发送时补齐完整步骤）
         <button aria-label="移除携带的任务进度" onClick={()=>setDraft(draftId,{progressSelection:[]})}><X size={11}/></button></span>

@@ -1,5 +1,5 @@
 import { modeOf } from '@/v3/design';
-import { TEMPORARY_LIMIT, hasUnfinishedTask, touchTemporary } from '../temporaryModes';
+import { TEMPORARY_LIMIT, DESKTOP_TEMPORARY_CANVAS, isDesktopTemporary, hasUnfinishedTask, touchTemporary } from '../temporaryModes';
 import type { TemporaryMode } from '../domain';
 import { installPromptFork } from './promptFork';
 import { sessionGraphReferences } from './graphReferences';
@@ -17,6 +17,7 @@ import { estimateTokens } from '../tokens';
 import { historyTurns, isCompletedHistoryTask } from '../history';
 import { writableNotebook, assertNotebookCapacity, editNotebookContent, deleteNotebookEntry } from './notebooks';
 import { notebookWorkspace } from '../notebook';
+import { resolveNoteReference } from '../noteReferences';
 import { queueNotebookNotices } from './taskNotices';
 
 function initializeInheritance(state: AppSnapshot, session: Session, selection: OrderedTaskSelection[]): void {
@@ -205,7 +206,8 @@ function validateNoteSources(state: AppSnapshot, session: Session, sources: Sour
       requireValue(message, '消息来源不属于当前工作区或版本不存在', 'OUT_OF_SCOPE');
       if (source.end !== undefined) requireValue(source.end <= message.text.length, '消息来源片段范围不存在', 'VERSION_CONFLICT');
     } else if (source.kind === 'note') {
-      const note = [...workspace.workNotes, ...workspace.pinnedNotes, ...memories.flatMap(memory => memory.notes)].find(note => note.id === source.id && note.version === source.version);
+      const resolved = resolveNoteReference(state, session.id, source), note = resolved.note;
+      requireValue(resolved.status !== 'ambiguous', '笔记来源的分支版本存在歧义，请核对后另存为独立笔记并引用新 ID', 'SOURCE_VERSION_AMBIGUOUS');
       requireValue(note, '笔记来源不属于当前工作区或版本不存在', 'OUT_OF_SCOPE');
       if (source.end !== undefined) requireValue(source.end <= note.text.length, '笔记来源片段范围不存在', 'VERSION_CONFLICT');
     } else if (source.kind === 'snapshot') {
@@ -278,6 +280,26 @@ function inheritanceOutcome(state: AppSnapshot, session: Session, dependencyFing
 export class SessionService {
   constructor(private readonly repo: Repository, public creationAssembler?: SessionCreationAssembler) {}
 
+  createDesktopTemporary(): Session {
+    return this.repo.transaction(state => {
+      requireValue(state.sessions.filter(s => isDesktopTemporary(s) && s.lifecycle === 'active').length < TEMPORARY_LIMIT,
+        '最多保留三个悬浮会话，请先删除一个。', 'TEMPORARY_LIMIT');
+      const number = (state.desktopTemporarySequence ?? 0) + 1;
+      state.desktopTemporarySequence = number;
+      const session: Session = { id: id('session:'), canvasId: DESKTOP_TEMPORARY_CANVAS, workspaceId: id('workspace:'),
+        mode: 'temporary', title: `悬浮会话 ${number}`, titleSource: 'pending', lifecycle: 'active', createdAt: now(),
+        temporaryContext: { revision: 1, mode: 'minimal', scope: 'desktop', desktopNumber: number } };
+      touchTemporary(session);
+      state.sessions.push(session);
+      state.workspaces.push({ id: session.workspaceId, sessionId: session.id, workNotes: [], pinnedNotes: [], snapshotIds: [], artifactIds: [],
+        readRetention: { version: 1, revision: 0, receipts: {} } });
+      initializeInheritance(state, session, []);
+      assembleCreatedSession(state, session, this.creationAssembler);
+      this.repo.event(session.workspaceId, 'session.created', { sessionId: session.id, mode: session.mode, scope: 'desktop', number });
+      return copy(session);
+    });
+  }
+
   ensure(canvasId: string): Session {
     return this.repo.transaction(state => {
       canvasExists(state, canvasId); reconcileSessionRoots(this.repo);
@@ -300,7 +322,7 @@ export class SessionService {
     let orderedTasks = payload.orderedTasks ?? [];
     let temporaryMode: TemporaryMode | undefined;
     if (mode === 'temporary') {
-      requireValue(state.sessions.filter(s=>s.canvasId===canvasId&&s.mode==='temporary'&&s.lifecycle==='active').length<TEMPORARY_LIMIT,'每个画布最多保留三个临时会话，请先关闭一个。','TEMPORARY_LIMIT');
+      requireValue(state.sessions.filter(s=>s.canvasId===canvasId&&s.mode==='temporary'&&!isDesktopTemporary(s)&&s.lifecycle==='active').length<TEMPORARY_LIMIT,'每个画布最多保留三个临时会话，请先关闭一个。','TEMPORARY_LIMIT');
       requireValue(new Set(orderedTasks.map(t => t.sessionId)).size <= 1, '临时会话只能选择一个来源会话', 'SINGLE_SOURCE_REQUIRED');
       const sourceId=payload.sourceSessionId??orderedTasks[0]?.sessionId;
       const source=sourceId?sessionOf(state,sourceId):undefined;
@@ -376,6 +398,7 @@ export class SessionService {
     return this.repo.transaction(state=>{
       const session=sessionOf(state,payload.sessionId),workspace=workspaceOf(state,session);
       requireValue(session.mode==='temporary','仅临时会话可配置模式');
+      requireValue(!isDesktopTemporary(session), '悬浮会话固定使用极简模式', 'MODE_LOCKED');
       requireValue(!session.temporaryContext?.lockedAt&&!state.tasks.some(t=>t.sessionId===session.id),'发送第一条消息后不能更换模式或记忆','MODE_LOCKED');
       requireValue(payload.expectedRevision===(session.temporaryContext?.revision??1),'模式设置已更新，请重新打开','VERSION_CONFLICT');
       requireValue(['minimal','branch','custom'].includes(payload.mode),'临时模式无效');
@@ -500,7 +523,7 @@ export class SessionService {
       const existing = payload.noteId === undefined ? undefined : notes.find(note => note.id === payload.noteId);
       if (payload.noteId !== undefined) requireValue(existing, '笔记不存在或不属于当前工作区与笔记区', 'NOT_FOUND');
       requireValue(!existing || !(payload.sourceRefs ?? []).some(source => source.kind === 'note' && source.id === existing.id), '笔记不能把自己的旧版本作为来源', 'INVALID_SOURCE');
-      const sources = withNoteProvenance(state, validateNoteSources(state, session, payload.sourceRefs ?? []));
+      const sources = withNoteProvenance(state, validateNoteSources(state, session, payload.sourceRefs ?? []), session.id);
       if (existing) requireValue(positiveInteger(payload.expectedVersion) && payload.expectedVersion === existing.version, '笔记已被修改，请刷新后重试', 'VERSION_CONFLICT');
       else requireValue(payload.expectedVersion === undefined, '新笔记不能指定旧版本', 'VERSION_CONFLICT');
       if (existing && payload.kind === 'work') {

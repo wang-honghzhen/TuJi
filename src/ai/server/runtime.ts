@@ -28,7 +28,7 @@ import { captureReviewUnits,decideReview,planReview,protectReviewWrites,register
 import { canvasObservationChanges } from './contextFreshness';
 import { compactConversationHistory } from './conversationHistory';
 import { directContextRead } from './directContextReads';
-import { directGraphRead,graphIndex,membershipStamp,observationChange,observe } from './directGraph';
+import { directGraphRead } from './directGraph';
 import { graphWriteUsage } from './directoryEvidence';
 import { retainedDirectoryObservations } from './directoryObservations';
 import { directReadBudgets,readCapacityReceipt } from './directReadBudget';
@@ -37,14 +37,17 @@ import { planFrozenReads } from './frozenReadCommit';
 import { applyPatches,assertAiCommandRefs,assertAiObjectRefs,canvasOf,checkAiEffects,entity,graphDiff,memberIds,patchCanUndo,patchValue,planMutation,readableIds,resourcesFor,semanticHashes } from './graph';
 import { assertDesignQuery } from './graphQueries';
 import { graphQueryRead } from './graphQueryRead';
+import { graphLayoutVersion, layoutDependencyKey } from './graphLayoutDependencies';
+import { assertMutationReadEvidence } from './graphMutationEvidence';
 import { acknowledgeDeletedGraphReads,advanceResponseReadHashes,assertGraphReadHashes,rememberGraphReadHashes,scopedGraphReadHashes,type GraphReadHashes } from './graphReadDependencies';
 import { canvasGraphReferences,emptyGraphReferences,graphReferenceCodec,rebindCanvasReferences,seedAddressableReferences,seedPayloadReferences,sessionGraphReferences,translateGraphPayload } from './graphReferences';
 import { summaryArchive } from './historyRepresentations';
 import { InputTokenEstimator,inputTokenSample,observedInputUpperBound,type InputTokenSample } from './inputTokenEstimator';
 import { planRelationshipLayout } from './layoutService';
 import { minimalPreview,runMinimalChat } from './minimalChat';
-import { assertCompleteNodeRead,prepareNodeReadAdvances } from './nodeReadEvidence';
+import { assertCompleteNodeRead,completeNodeEvidence,prepareNodeReadAdvances } from './nodeReadEvidence';
 import { deleteNotebookEntry,mutateNotebook,writableNotebook,writeAiNote } from './notebooks';
+import { notebookCheckChanges } from './notebookChecks';
 import { buildPartIndex } from './partIndex';
 import { prefixMetrics,promptRouteSignature,wirePrefixSnapshot,type WirePrefixSnapshot } from './promptPrefix';
 import { callModel,ProviderError,type ModelResponse } from './providers';
@@ -54,6 +57,7 @@ import { hash,id,now,Repository,storableManifest } from './repository';
 import { commitRetention,synchronizeRetentionStage } from './retentionCommit';
 import { reconcileSessionRoots } from './sessions';
 import { sourceChanges } from './sourceFreshness';
+import { assertProposalSourceBasis,captureProposalSourceBasis,requestSourceEvidence,type ProposalSourceBasis } from './requestSourceEvidence';
 import { bindSubgraphVersions } from './subgraphVersions';
 import { claimTaskNotices, commitTaskNoticeBatch, migratePendingTaskNotices, queueNotebookNotices } from './taskNotices';
 import { isDataRead } from './toolContextKinds';
@@ -63,11 +67,11 @@ import { bindToolVersions,captureToolVersions } from './toolVersions';
 import { migrateRetiredCanvasNotices } from './retiredCanvasNotices';
 import { freezeWebRead,WEB_MIN_READ_TOKENS } from './webReads';
 import { callWeb,isWebTool,webRequest } from './webTools';
-import { graphWriteAcknowledgement } from './writeAcknowledgements';
+import { acknowledgedObservations,graphWriteAcknowledgement } from './writeAcknowledgements';
 
 type ModelCaller = typeof callModel;
 type Waiting = { waiting: true };
-interface ProposalPlan { before: GraphState; planned: GraphState; commands: Record<string, unknown>[]; temporary: Record<string, string>; graphRevision: number; readHashes: GraphReadHashes; reviewUnits: ReviewUnit[] }
+interface ProposalPlan { before: GraphState; planned: GraphState; commands: Record<string, unknown>[]; temporary: Record<string, string>; readHashes: GraphReadHashes; reviewUnits: ReviewUnit[]; sourceBasis: ProposalSourceBasis }
 const isTerminal = (task: Task) => TERMINAL_TASK_STATUSES.includes(task.status);
 const owner = (state: AppSnapshot, task: Task) => state.workspaces.find(w => w.id === task.workspaceId)!;
 const bounded = (value: unknown, fallback: number, max: number) => typeof value === 'number' && Number.isInteger(value) && value >= 0 ? Math.min(max, value) : fallback;
@@ -157,7 +161,7 @@ export class Runtime {
       && ['none', 'low', 'high', 'max'].includes(input.modelSelection.thinkingEffort), '模型或思考强度不在可选范围');
     const duplicate = this.repo.state.messages.find(m => m.id === `user:${session.id}:${requestId}`);
     if (duplicate) return this.getTask(duplicate.taskId);
-    const graph = this.graph(), members = memberIds(graph, session.canvasId);
+    const members = isMinimalSession(session) ? new Set<string>() : memberIds(this.graph(), session.canvasId);
     const targets = isMinimalSession(session)?[]:strings(input.targetIds ?? [], '选区').filter(ref => members.has(ref)), attached = strings(input.artifactIds ?? [], '附件');
     const workspace = this.repo.state.workspaces.find(w => w.id === session.workspaceId)!;
     const versions: Record<string, number> = {};
@@ -618,6 +622,7 @@ export class Runtime {
         manifest.error='传输请求的保守用量（含协议续传）超过可用输入容量，请整理后继续。';manifest.capacityEstimateError=true;
       }
       manifest.toolVersions=captureToolVersions(state,task,manifest,ref=>reading.codec.decode(ref,undefined,false));
+      if(state.graph)manifest.mutationLayoutVersion=graphLayoutVersion(state.graph,task.canvasId);
       this.referencePlans.set(manifest,{canvas:reading.references,session:reading.sessionReferences});return manifest;
     }
     }
@@ -831,7 +836,8 @@ export class Runtime {
           }
           // The graph can change after request construction. Bind exactly what this request contains.
           rememberGraphReadHashes(task,this.manifestReadDependencies.get(manifest)??{});
-          task.responseReadHashes={stepId,hashes:{...this.manifestReadDependencies.get(manifest)},observations:structuredClone(manifest.canvasChecks??[])};
+          task.responseReadHashes={stepId,hashes:{...this.manifestReadDependencies.get(manifest)},observations:structuredClone(manifest.canvasChecks??[]),
+            summaryObservations:structuredClone(manifest.summaryChecks??[]),mutationLayoutVersion:manifest.mutationLayoutVersion};
           task.checkpoint = { stepId, operationIds: task.checkpoint?.operationIds ?? [], protocol: baseProtocol, instructionRevision: revision, lastSeq: state.lastSeq };
           this.repo.event(task.workspaceId, 'task.input_applied', { instructionRevision: revision }, task.id);
           if(maintenance)this.repo.event(task.workspaceId,'context.maintenance',maintenance,task.id,stepId);
@@ -1035,7 +1041,7 @@ export class Runtime {
         const definition = toolDefinitions({ write: this.canWrite(task), graph: true, ...this.toolMode(task) }).find(t => t.name === call.name);
         requireValue(definition, '当前任务不允许写图', 'READ_ONLY');
         validateToolCallArguments(call.name, args, definition.parameters);
-        this.proposalPlans.set(call.id, await this.prepareProposal(task, args));
+        this.proposalPlans.set(call.id, await this.prepareProposal(task, args, call.stepId));
       } catch (error) { preparationError = error; }
     }
     try { this.repo.transaction(state => {
@@ -1168,7 +1174,10 @@ export class Runtime {
     }
     const graphRefs = (value: unknown) => { const refs = strings(value, '对象引用', 200); assertAiObjectRefs(graph, refs); requireValue(refs.every(ref => readScope.has(ref)), '读取超出当前画布范围', 'OUT_OF_SCOPE'); return refs; };
     if (call.name === 'workspace_update_work_notes') {
-      const refs = withNoteProvenance(this.repo.state, this.validateSources(task, args.sourceRefs, call.stepId));
+      const input=this.repo.state.contextManifests.find(m=>m.taskId===task.id&&m.stepId===call.stepId);
+      requireValue(input,'缺少本次请求的笔记依据，请在新请求中核对后重试','VERSION_BINDING_REQUIRED',{executed:false,nextAction:'review_latest_sources'});
+      captureProposalSourceBasis(this.repo.state,task,input,this.repo.state.toolCalls.filter(c=>c.taskId===task.id&&c.stepId===call.stepId));
+      const refs = withNoteProvenance(this.repo.state, this.validateSources(task, args.sourceRefs, call.stepId), task.sessionId);
       const value = text(args.text, '工作笔记', 12000);
       requireValue(['goal', 'constraint', 'finding', 'result', 'question', 'next'].includes(String(args.type)), '笔记类型无效');
       const result = writeAiNote(this.repo.state, task, { noteId: args.noteId as string | undefined, expectedVersion: args.expectedVersion as number | undefined,
@@ -1219,20 +1228,29 @@ export class Runtime {
       const group=this.repo.state.toolCalls.filter(c=>c.taskId===task.id&&c.stepId===call.stepId);
       requireValue(group.at(-1)?.id===call.id && group.filter(c=>c.id!==call.id).every(c=>['completed','rejected'].includes(c.status)), '结束回复必须是调用组最后一项，且前序调用已结算。','TASK_PENDING');
       requireValue(!task.interaction && task.instructionRevision===this.repo.state.steps.find(s=>s.id===call.stepId)?.inputInstructionRevision,'还有未处理的用户补充或问题。','INSTRUCTION_CHANGED');
+      requireValue(args.basis!=='historical'||!this.repo.state.changes.some(c=>c.taskId===task.id&&c.status==='committed')
+        &&!this.repo.state.toolCalls.some(c=>c.taskId===task.id&&c.status==='completed'&&['workspace_update_work_notes','workspace_delete_work_notes'].includes(c.name)),
+        '本任务已写入当前画布或笔记，请使用 current 核对结果；historical 仅适用于纯历史读取','HISTORICAL_BASIS_NOT_ALLOWED',
+        {executed:false,nextAction:'finish_with_current_basis'});
       if(args.basis!=='historical'){
         const input=this.repo.state.contextManifests.find(m=>m.taskId===task.id&&m.stepId===call.stepId);
+        requireValue(input,'缺少本次请求的依据，请重新读取后结束','VERSION_BINDING_REQUIRED',{executed:false,nextAction:'review_latest_sources'});
+        requireValue(!input.canvasPendingChanges?.length,'画布仍有未核对的变化或缺失依据，请按通知补读后结束','VERSION_CONFLICT',
+          {executed:false,changes:input.canvasPendingChanges,nextAction:'review_changed_scope'});
         const expected=task.responseReadHashes?.stepId===call.stepId?task.responseReadHashes.hashes:input?.canvasReadHashes??{};
         assertGraphReadHashes(graph,expected,'最终回复依据在生成期间已变化，请核对最新内容后再结束',task.canvasId);
         const observations=task.responseReadHashes?.stepId===call.stepId?task.responseReadHashes.observations:input?.canvasChecks;
-        const graphChanges=(observations??[]).flatMap(o=>canvasObservationChanges(this.repo.state,o));
+        const summaryObservations=task.responseReadHashes?.stepId===call.stepId?task.responseReadHashes.summaryObservations:input.summaryChecks;
+        const graphChanges=[...observations??[],...summaryObservations??[]].flatMap(o=>canvasObservationChanges(this.repo.state,o));
         requireValue(!graphChanges.length,'最终回复所用的目录、路径或查询范围已变化，请核对后再结束','VERSION_CONFLICT',
           {executed:false,changes:graphChanges,nextAction:'review_changed_scope'});
-        const sources=structuredClone(input?.currentSources??[]);
-        for(const previous of group.filter(c=>c.name==='workspace_update_work_notes'&&c.status==='completed')){
-          try{const receipt=JSON.parse(previous.result??'{}');for(const source of sources)if(source.id===receipt.noteId&&typeof receipt.version==='number')source.version=receipt.version;}catch{/* Invalid receipts do not advance evidence. */}
-        }
+        const sources=requestSourceEvidence(this.repo.state,task,input,group);
+        const notebookChanges=notebookCheckChanges(this.repo.state,task,input.notebookCheck,group);
+        requireValue(!notebookChanges.length,'笔记有未核对的增删改，请阅读更新后结束','SOURCE_CHANGED',
+          {executed:false,changes:notebookChanges,nextAction:'review_latest_sources'});
         const changes=sourceChanges(this.repo.state,task,sources,false);
-        requireValue(!changes.length,'最终回复依赖的笔记已更新，请核对新内容后再结束','SOURCE_CHANGED',{executed:false,sources:changes,nextAction:'review_latest_sources'});
+        requireValue(!changes.length,'笔记正文或依据已变化，请核对所列来源后结束','SOURCE_CHANGED',
+          {executed:false,sources:changes,nextAction:'review_latest_sources'});
       }
       const body=text(args.text,'结束回复',50000);
       const operations=this.repo.state.changes.filter(c=>c.taskId===task.id&&c.status==='committed').map(c=>c.operationId);
@@ -1354,11 +1372,14 @@ export class Runtime {
     }
     return structuredClone(refs);
   }
-  private async prepareProposal(task: Task, args: Record<string, unknown>): Promise<ProposalPlan> {
+  private async prepareProposal(task: Task, args: Record<string, unknown>, stepId:string): Promise<ProposalPlan> {
     requireValue(this.canWrite(task), '当前任务不允许写图', 'READ_ONLY');
+    const input=this.repo.state.contextManifests.find(m=>m.taskId===task.id&&m.stepId===stepId);
+    requireValue(input,'缺少本次请求的依据，请在新请求中重新规划','VERSION_BINDING_REQUIRED',{executed:false,nextAction:'replan_in_next_request'});
+    const sourceBasis=captureProposalSourceBasis(this.repo.state,task,input,this.repo.state.toolCalls.filter(c=>c.taskId===task.id&&c.stepId===stepId));
     requireValue(Array.isArray(args.commands) && args.commands.length > 0 && args.commands.length <= 30, '一批操作须为 1～30 条');
     text(args.reason, '修改原因', 12000);
-    const before = this.graph(), graphRevision = this.repo.state.graphRevision, allowed = memberIds(before, task.canvasId); let planned = before;
+    const before = this.graph(), allowed = memberIds(before, task.canvasId); let planned = before;
     const activeSources=owner(this.repo.state,task).progressEvents?.filter(p=>p.taskId===task.id).at(-1)?.sourceRefs??[];
     const readHashes=scopedGraphReadHashes(before,task,args.commands as Record<string,unknown>[],
       args.dependencyRefs===undefined?undefined:strings(args.dependencyRefs,'操作依据',200),
@@ -1372,11 +1393,20 @@ export class Runtime {
       const command = structuredClone(raw);
       const resolve = (ref: unknown) => typeof ref === 'string' ? temporary[ref] ?? ref : ref;
       for (const key of ['id', 'parentId', 'nodeId']) if (key in command) command[key] = resolve(command[key]);
-      if(before.nodes[String(command.id)]&&(command.type==='patchNodeContent'||command.type==='updateDesignNode'&&(command.designPatch!==undefined||command.designListPatch!==undefined))){
+      if(command.type==='moveBlock'&&entity(before,String(command.id))){
+        const binding=(task.responseReadHashes?.stepId===stepId?task.responseReadHashes.mutationLayoutVersion:undefined)
+          ??this.repo.state.contextManifests.find(m=>m.taskId===task.id&&m.stepId===stepId)?.mutationLayoutVersion;
+        requireValue(binding,'此请求缺少布局版本依据，请在下一次请求重新规划坐标修改','VERSION_BINDING_REQUIRED',
+          {executed:false,nextAction:'retry_in_next_request'});
+        requireValue(binding===graphLayoutVersion(before,task.canvasId),'生成期间布局或共享范围已变化，坐标修改未执行，请重新规划','VERSION_CONFLICT',
+          {executed:false,failedRefs:[String(command.id)],dependency:'layout',nextAction:'retry_in_next_request'});
+      }
+      if(before.nodes[String(command.id)]&&['patchNodeContent','updateNodeText','updateDesignNode'].includes(String(command.type))){
         assertCompleteNodeRead(task,before,String(command.id));
         readHashes[`nodes:${String(command.id)}`]=hash(before.nodes[String(command.id)]);
       }
       if (Array.isArray(command.ids)) command.ids = command.ids.map(resolve);
+      assertMutationReadEvidence(task,before,command);
       for (const designKey of ['design', 'designPatch','designListPatch']) if (command[designKey] && typeof command[designKey] === 'object') {
         const data = command[designKey] as Record<string, unknown>;
         for (const key of ['memberIds', 'subjectIds','addMemberIds','removeMemberIds','addSubjectIds','removeSubjectIds']) if (Array.isArray(data[key])) data[key] = data[key].map(resolve);
@@ -1430,14 +1460,17 @@ export class Runtime {
     if (movableIds.length || changedEdgeIds.length) planned = (await planRelationshipLayout(planned, { canvasId: task.canvasId,
       mode: 'auto', movableIds, insertedIds, changedEdgeIds, permittedIds: [...allowed], protectedIds, solveTime: Date.now() }, this.active.get(task.id)?.controller.signal)).state;
     this.guard(task);
-    requireValue(graphRevision === this.repo.state.graphRevision, '布局期间画布已变化，请重新读取并规划', 'VERSION_CONFLICT');
+    requireValue(graphLayoutVersion(before,task.canvasId)===graphLayoutVersion(this.graph(),task.canvasId),
+      '规划所依赖的画布或共享文档已变化，请重新读取', 'VERSION_CONFLICT');
     settleReviewLayout(reviewUnits, planned);
-    return { before, planned, commands, temporary, graphRevision, readHashes, reviewUnits };
+    return { before, planned, commands, temporary, readHashes, reviewUnits, sourceBasis };
   }
   private propose(task: Task, call: ToolCallRecord, _args: Record<string, unknown>): Record<string, unknown> {
     const plan = this.proposalPlans.get(call.id); requireValue(plan, '图规划尚未完成', 'STALE_CHANGE');
-    const { before, planned, commands, temporary, graphRevision } = plan;
-    requireValue(graphRevision === this.repo.state.graphRevision, '画布已变化，请重新规划', 'VERSION_CONFLICT');
+    const { before, planned, commands, temporary } = plan;
+    assertProposalSourceBasis(this.repo.state,task,plan.sourceBasis);
+    requireValue(graphLayoutVersion(before,task.canvasId)===graphLayoutVersion(this.graph(),task.canvasId),
+      '规划所依赖的画布或共享文档已变化，请重新读取', 'VERSION_CONFLICT');
     checkAiEffects(before, planned, task.canvasId, memberIds(this.graph(), task.canvasId));
     const patches = graphDiff(before, planned), beforeHashes = semanticHashes(before), expected = { ...plan.readHashes };
     for (const patch of patches) {
@@ -1458,12 +1491,14 @@ export class Runtime {
     }).map(canvas => canvas.canvasId);
     const existing = this.repo.state.changes.find(c => c.operationId === call.operationId);
     if (existing) return { status: 'proposed', applied:false,nextAction:{tool:'graph_apply_changes',arguments:{changeSetId:existing.id}},changeSetId: existing.id, temporaryRefs: existing.temporaryRefs??{}, affectedRefs: existing.affectedRefs };
+    if (hash(before.canvases.map(c => c.placements)) !== hash(planned.canvases.map(c => c.placements)) ||
+      hash(Object.values(before.documents).map(d => d.placements)) !== hash(Object.values(planned.documents).map(d => d.placements)))
+      expected[layoutDependencyKey(task.canvasId)]=graphLayoutVersion(before,task.canvasId)!;
     const change: ChangeSet = { id: id('change:'), operationId: call.operationId, workspaceId: task.workspaceId, taskId: task.id, stepId: call.stepId,
+      sourceBasis:structuredClone(plan.sourceBasis),
       review: { canvasId: task.canvasId, revision: 0, units: plan.reviewUnits, policy: 'group' },
       status: 'proposed', commands, patches, expectedHashes: expected, affectedRefs, affectedCanvasIds, temporaryRefs: temporary, createdAt: now(), instructionRevision: task.instructionRevision,
       digest: hash([commands, patches, expected]) };
-    if (hash(before.canvases.map(c => c.placements)) !== hash(planned.canvases.map(c => c.placements)) ||
-      hash(Object.values(before.documents).map(d => d.placements)) !== hash(Object.values(planned.documents).map(d => d.placements))) change.layoutGraphRevision = graphRevision;
     this.repo.state.changes.push(change); this.repo.event(task.workspaceId, 'changes.proposed', { changeSetId: change.id, affectedRefs, affectedCanvasIds }, task.id, call.stepId);
     return { status: 'proposed', applied:false,nextAction:{tool:'graph_apply_changes',arguments:{changeSetId:change.id}},changeSetId: change.id, operationId: change.operationId, temporaryRefs: temporary, affectedRefs, affectedCanvasIds,
       summary: patches.map(patch => ({ kind: patch.collection, id: patch.id, action: patch.before === null ? 'create' : patch.after === null ? 'delete' : 'update' })) };
@@ -1471,6 +1506,10 @@ export class Runtime {
   private commitChange(task: Task, change: ChangeSet, call: ToolCallRecord): Record<string, unknown> {
     if (change.status === 'committed') return { status: 'committed', operationId: change.operationId, changeSetId: change.id, affectedRefs: change.affectedRefs, temporaryRefs: change.temporaryRefs??{}, repeated: true };
     requireValue(change.status === 'proposed', '该提案已取消或失效', 'STALE_CHANGE'); this.guard(task, change.instructionRevision);
+    assertProposalSourceBasis(this.repo.state,task,change.sourceBasis);
+    const input=this.repo.state.contextManifests.find(m=>m.taskId===task.id&&m.stepId===call.stepId);
+    requireValue(input,'缺少提交请求的依据，请重新读取后规划','VERSION_BINDING_REQUIRED',{executed:false,nextAction:'replan_changes'});
+    captureProposalSourceBasis(this.repo.state,task,input,this.repo.state.toolCalls.filter(c=>c.taskId===task.id&&c.stepId===call.stepId));
     const graph = this.graph();
     assertGraphReadHashes(graph,change.expectedHashes,'图内容或读取依赖已变化，请查看冲突详情后重新提出补丁',task.canvasId);
     requireValue(change.layoutGraphRevision === undefined || change.layoutGraphRevision === this.repo.state.graphRevision,
@@ -1485,20 +1524,26 @@ export class Runtime {
     this.repo.state.graph = next; this.repo.state.graphRevision++; change.status = 'committed'; change.committedAt = now();
     registerReview(this.repo.state, task, change, call);
     call.nodeReadAdvances=prepareNodeReadAdvances(task,graph,next,change.affectedRefs);
+    for(const advance of call.nodeReadAdvances)(task.nodeReadEvidence??={})[advance.refId]=structuredClone(advance.after);
+    for(const ref of change.affectedRefs)if(!graph.nodes[ref]&&next.nodes[ref])
+      (task.nodeReadEvidence??={})[ref]=completeNodeEvidence(next.nodes[ref]);
     call.graphUsage = graphWriteUsage(graph,next,task.canvasId,change.affectedRefs,call.id);
     call.graphWriteAcknowledgement = graphWriteAcknowledgement(this.repo.state, task, call, change, graph);
     advanceResponseReadHashes(task,graph,next);
-    if(task.responseReadHashes?.observations){
-      const before={...this.repo.state,graph},index=graphIndex(this.repo.state,task.canvasId);
-      task.responseReadHashes.observations=task.responseReadHashes.observations.map(observation=>{
-        if(observationChange(before,observation).changes.length)return observation;
-        const updated=observe(this.repo.state,task,index,observation.refs,observation.completeDirectories,observation.structureOnly,observation.query,observation.queryScope,observation.graphQuery);
-        updated.directoryMembers=Object.fromEntries(Object.keys(observation.directoryMembers??{}).flatMap(ref=>{
-          const version=membershipStamp(index,ref,observation.structureOnly);return version?[[ref,version]]:[];
-        }));return updated;
-      });
+    const response=task.responseReadHashes;
+    if(response?.stepId===call.stepId){
+      const binding=response.mutationLayoutVersion
+        ??this.repo.state.contextManifests.find(m=>m.taskId===task.id&&m.stepId===call.stepId)?.mutationLayoutVersion;
+      // Only this exact acknowledged transition advances layout authority.
+      // If a user changed anything since submission, keep the old fence.
+      if(binding&&binding===graphLayoutVersion(graph,task.canvasId))
+        response.mutationLayoutVersion=graphLayoutVersion(next,task.canvasId);
     }
-    task.readHashes = {}; task.checkpoint!.operationIds = [...new Set([...task.checkpoint!.operationIds, change.operationId])];
+    if(task.responseReadHashes?.observations)
+      task.responseReadHashes.observations=acknowledgedObservations(task.responseReadHashes.observations,[{...call,status:'completed'}]);
+    if(task.responseReadHashes?.summaryObservations)
+      task.responseReadHashes.summaryObservations=acknowledgedObservations(task.responseReadHashes.summaryObservations,[{...call,status:'completed'}]);
+    task.checkpoint!.operationIds = [...new Set([...task.checkpoint!.operationIds, change.operationId])];
     this.repo.event(task.workspaceId, 'changes.committed', { changeSetId: change.id, operationId: change.operationId, affectedRefs: change.affectedRefs, graphRevision: this.repo.state.graphRevision }, task.id, change.stepId);
     return { status: 'committed', operationId: change.operationId, changeSetId: change.id, affectedRefs: change.affectedRefs, temporaryRefs: change.temporaryRefs??{}, affectedCanvasIds: change.affectedCanvasIds };
   }

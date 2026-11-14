@@ -1,4 +1,5 @@
 import { activeAttachmentProtections, authorizedAttachments, attachmentKey } from './attachmentCatalog';
+import { captureSourceClosure } from './sourceFreshness';
 import { AUTOMATIC_DESIGN_MODE_INSTRUCTIONS as DESIGN_MODE_INSTRUCTIONS } from './designModeInstructions';
 import { REVIEW_INSTRUCTION } from '../changeReview';
 import { appendReviewNotices } from './reviewContext';
@@ -30,7 +31,7 @@ import { PAGE_COVERAGE_INSTRUCTION } from './readCoverage';
 import { attachmentEntries, attachmentTreeTokens, appendAttachmentEntries } from './attachmentTree';
 export { attachmentEntries } from './attachmentTree';
 import { currentObservationReadHashes } from './graphReadDependencies';
-import { appendCanvasFreshness, canvasObservationChanges, visibleObservations } from './contextFreshness';
+import { appendCanvasFreshness, canvasObservationChanges, visibleCanvasEvidence, pendingCanvasChanges } from './contextFreshness';
 import { PROMPT_PROJECTION_VERSION, projectPromptEntries } from './promptProjection';
 import { canReceiptTaskNotice, contextNoteNoticeIds, prepareTaskNoticeBatch, taskNoticeEntry } from './taskNotices';
 import { confirmedTaskPages, visibleTaskPages, pendingPageDeliveries } from './readDeliveryEvidence';
@@ -40,6 +41,8 @@ import { retentionFence } from './retentionCommit';
 import { localCompletedGroupCount } from './contextProtection';
 import { appendNoteUpdates, noteVersionNotices } from './noteFreshness';
 import { canvasKey, canvasEvidenceFence } from './canvasReadEvidence';
+import { summarySourceEvidence } from './summaryFreshness';
+import { renderNoticeFacts } from './contextUpdates';
 import { createCanvasMaintenance, prepareCanvasRefresh, installCanvasRefresh, evictCanvasRefresh, canvasRefreshTokens, canvasMemberProof, canvasReadOverflow, renewCanvasPages } from './canvasRefresh';
 
 export const RULES_ID = 'rules:session-context-v3';
@@ -55,7 +58,7 @@ const RULES = [
   '末尾通知列出可见资料未解决的变化，无通知不证明已读。完整新读或成功写入消解对应旧版本；仅身份/版本通知和摘要不代替正文。版本无法确认表示证据不足，非已确认变化。对象回执中的哈希version只判断相等或不同，不表示时间顺序；恢复相同对象内容可恢复旧哈希，不按哈希大小判断新旧。',
   'user_edit是一次已发送的合并笔记或固定要求改动通知，保留在历史中，不是每轮新发生的改动。note_edit提供笔记最新全文，deleted表示删除；requirements_edit.data.requirements带replaces时完整替换此前固定要求（空列表表示清空），user_requirements同理。结合后续实际结果继续工作；bodyOmitted表示内容未交付。只有当前任务需要且缺少的字段才定点补读。',
   '先复用已完成的工具结果和写入回执。明确写入值且收到committed、无后续变化时，可据命令及回执汇报，不为确认成功重读；任务要求独立复核、并发变化或字段未知时才补读。提交回执不等于其他字段全文已交付。用户仅询问选中了哪些对象时，按本条消息的targetIds/目标绑定回答；选区或布局变化不等于内容改变，不因新一轮开始重新拉取资料。版本提示不等于数据损坏；同一提示在成功读取后仍存在时不循环读取，也不猜测未记录的修改。',
-  '提案dependencyRefs列额外依据，无则[]；省略校验全部读取。结束默认current；纯历史查询、引文或比较可用historical，明确为当时事实；混合历史与当前事实的任务仍用current核验。',
+  '提案dependencyRefs列额外依据，无则[]；省略校验全部读取。结束默认current；纯只读历史查询、引文或比较可用historical，明确为当时事实；混合当前事实，或本任务已提交当前画布/笔记写入时，必须用current核验。',
   '摘要供概括，非逐字原文；引文核对原文版本、范围及原字标点。原文已可见无需重读，否则沿历史summaryId/readWith恢复，勿用当前画布或附件搜索替代。压缩不表示未读或未完成。近期同参且内容未变可返回reused=true，正文与原游标照常返回；变动通知不要求从首页重查。',
   'workspace_update_handoff用于追加当前任务笔记，正文直接进入任务进度和后续上下文。按需记录后续会用到的资料要点、必要摘录、临时约定或待确认问题，自由书写，无需阶段性成果格式或重写此前笔记。涉及处理范围时按实际结果记录，失败或未返回页不计为已读；待确认信息明确标注，不建全局已读表。',
   '任务进度中的笔记记录当时的信息，须结合后续实际结果使用。追加失败只表示该条笔记未保存，不撤销已经完成的读取、核验或提交；核对最新记录后，重试追加仍需记录的内容。无法保存时仍据实际结果汇报；不能仅因旧笔记或保存失败减少完成数，也不能将待确认内容或未保存草稿当作已确认事实。笔记正文只能随上下文摘要缩减，不能替换成通知回执。',
@@ -327,7 +330,8 @@ function buildAutomaticContextOnce(state:AppSnapshot,task:Task,tools:ToolDefinit
     taskNoticeBatch.notices.map(taskNoticeEntry).forEach(append);
     if(pendingRequirements)stage.pinnedHash=pinnedHash;
   }
-  const canvasNotices=appendCanvasFreshness(state,task,stage,encode,readContext);
+  const canvasObservations=visibleCanvasEvidence(state,task,stage);
+  const canvasNotices=appendCanvasFreshness(state,task,stage,encode,readContext,canvasObservations);
   const messages=projectPromptEntries(state,task,stage,encode,append);
   if(stage.retentionDraft&&stage.canvasRefresh){
     stage.retentionDraft.canvasProofs=Object.fromEntries(stage.canvasRefresh.members.map(m=>[m.id,canvasMemberProof(m)]));
@@ -345,7 +349,9 @@ function buildAutomaticContextOnce(state:AppSnapshot,task:Task,tools:ToolDefinit
   }
   const stableMessageCount=messages.length;
   const notes=noteVersionNotices(state,task,stage,encode);
-  const versionContent=[...canvasNotices,...notes.lines].join('\n');
+  const summaryEvidence=summarySourceEvidence(state,task,stage,canvasObservations,encode);
+  const summaryNotices=renderNoticeFacts(summaryEvidence.facts);
+  const versionContent=[...canvasNotices,...notes.lines,...summaryNotices].join('\n');
   const withoutNotices=requestTokens({...state.provider,...task.modelSelection},{messages,tools});
   if(versionContent)messages.push({role:'user',content:versionContent});
   const tokens=requestTokens({...state.provider,...task.modelSelection},{messages,tools});
@@ -361,7 +367,6 @@ function buildAutomaticContextOnce(state:AppSnapshot,task:Task,tools:ToolDefinit
   const items=[...stage.entries.map(e=>({id:e.id,category:e.category,section:(e.category==='rules'?'rules':e.category==='canvas'?'canvas':e.category==='work_notes'?'work_notes':e.category==='references'?'references':'conversation') as 'rules'|'canvas'|'work_notes'|'references'|'conversation',sourceRefs:[],text:JSON.stringify(e.messages),representation:'original' as const,budgetBucket:'data' as const,tokens:estimateTokens(JSON.stringify(e.messages)),derivedFrom:e.coverage.map(c=>c.recordId)})),
     ...(versionContent?[{id:`version-notices:${task.id}`,category:'version_notices',section:'conversation' as const,sourceRefs:[],text:versionContent,representation:'original' as const,budgetBucket:'data' as const,tokens:estimateTokens(JSON.stringify({role:'user',content:versionContent})),derivedFrom:[]}]:[])];
   const sections:Record<string,number>={};for(const i of items)sections[i.section]=(sections[i.section]??0)+i.tokens;
-  const canvasObservations=visibleObservations(stage,workspace.observations??[],task,state.toolCalls,state);
   const members=canvasMemberIds(state.graph!,task.canvasId);
   return {id:`manifest:${randomUUID()}`,taskId:task.id,createdAt:new Date().toISOString(),items,messages,requestTokens:tokens,
     readBodyResultIds:[...new Set(stage.entries.flatMap(e=>e.readCallIds??[]))],
@@ -371,7 +376,11 @@ function buildAutomaticContextOnce(state:AppSnapshot,task:Task,tools:ToolDefinit
     canvasSources:canvasObservations.filter(o=>!o.evidenceUnknown).flatMap(o=>o.sources).filter(s=>members.has(s.id)&&digest(readContext.entity(s.id))===s.version),
     canvasReadHashes:currentObservationReadHashes(state.graph!,canvasObservations,task.canvasId,readContext),
     canvasChecks:canvasObservations.filter(o=>!canvasObservationChanges(state,o,readContext).length),
-    currentSources:notes.sources,
+    summaryChecks:summaryEvidence.observations.filter(o=>!canvasObservationChanges(state,o,readContext).length),
+    canvasPendingChanges:[...pendingCanvasChanges(state,task,stage,readContext,canvasObservations).values(),...summaryEvidence.pending.values()].map(v=>structuredClone(v.change)),
+    currentSources:[...notes.sources,...summaryEvidence.sources],
+    sourceClosure:captureSourceClosure(state,task,[...notes.sources,...summaryEvidence.sources]),
+    notebookCheck:notes.check,
     compressed:stage.generation>1,omitted:[],hash:digest(serialized),sourcePolicyHash:sourceRevision,stageDraft:stage,error,capacityEstimateError,
     contextMetrics:{generation:stage.generation,commonPrefixCharacters,stableMessageCount,cacheStatus:'unknown',...(reason?{rebuildReason:reason}:{}),
       versionNotices:{tokens:stage.versionNotices.tokens,threshold:stage.versionNotices.threshold,target:stage.versionNotices.target},

@@ -11,11 +11,11 @@ export type TaskStatus = 'queued' | 'running' | 'waiting_resource' | 'waiting_us
 export const TERMINAL_TASK_STATUSES: TaskStatus[] = ['completed'];
 export interface SourceRef { kind: 'message' | 'artifact' | 'node' | 'document' | 'edge' | 'note' | 'snapshot'; id: string; version: number | string; start?: number; end?: number; page?: number;
   /** Historical citations keep their version; current facts require review when their source changes. */
-  tracking?: 'current' | 'historical'; unavailableReason?: 'history_reset' }
+  tracking?: 'current' | 'historical'; unavailableReason?: 'history_reset' | 'source_unavailable' | 'source_cycle' }
 export interface Session { id: string; canvasId: string; workspaceId: string; mode: SessionMode; title: string;
   titleSource?: 'manual' | 'pending' | 'message';
   temporaryContext?: { sourceSessionId?: string; revision: number; mode?: TemporaryMode; lockedAt?: string;
-    lastActiveAt?: string; expiresAt?: string };
+    lastActiveAt?: string; expiresAt?: string; scope?: 'canvas' | 'desktop'; desktopNumber?: number };
   /** Single-source descendants share allocation, never task ownership or access rights. */
   referenceFamilyId?: string;
   lifecycle: 'active' | 'archived' | 'deleted'; createdAt: string }
@@ -29,7 +29,8 @@ export interface Note { id: string; text: string; version: number; type: 'goal' 
   createdAt?: string; originTaskId?: string; author?: 'user' | 'ai'; clientRequestId?: string;
   lifecycle?: NoteLifecycle; taskId?: string; }
 /** Personal plain-text pages, independent of AI session memory. */
-export interface UserNotePage { id: string; text: string; version: number; createdAt: string; updatedAt: string }
+export interface UserNotePage { id: string; text: string; version: number; createdAt: string; updatedAt: string;
+  blocks?: import('./userNotes').UserNoteBlock[]; directoryId?: string }
 /** User navigation metadata, shared by live and inherited views of the same turn. */
 export interface ChatTurnBookmark { id: string; createdAt: string }
 /** AI reading presentation only. It grants no access and never changes canvas.collapsed. */
@@ -89,7 +90,7 @@ export interface Task { nodeReadEvidence?: Record<string,import('./server/nodeRe
   inputBindings: InputBinding; modelSelection?: ModelSelection; maxSteps: number; maxTokens: number; usedTokens: number; stepCount: number;
   readHashes?: Record<string, string>; maxDurationMs?: number; startedAt?: string;
   /** Versions sent in the response being executed, advanced only by its own committed writes. */
-  responseReadHashes?: { stepId: string; hashes: Record<string, string>; observations?: Observation[] };
+  responseReadHashes?: { stepId: string; hashes: Record<string, string>; observations?: Observation[]; summaryObservations?: Observation[]; mutationLayoutVersion?: string };
   handoff?: { text: string; version: number }; memoryCalls?: number;
   canvasCapacity?: { fenceStepId?: string; organizing?: boolean; lastTokens?: number; noProgress?: number;
     grantedStep?: number; instructionRevision?: number };
@@ -153,6 +154,7 @@ export interface PresentationPart { id:string; taskId:string; seq:number; stepId
   graphRevision:number; messageId?:string; start?:number; end?:number; text?:string;
   kind:'input'|'text'|'tools'|'focus'; sealed:boolean; targets:string[]; calls?:ToolCallRecord[]; dwellMs:number }
 export interface ChangeSet { id: string; operationId: string; workspaceId: string; taskId: string; stepId: string;
+  sourceBasis?: import('./server/requestSourceEvidence').ProposalSourceBasis;
   reviewArchive?: { sessionId?:string; title?:string; request?:string; createdAt:string };
   review?: import('./reviewTypes').ChangeReview;
   status: 'proposed' | 'committed' | 'rejected' | 'superseded' | 'reverted'; commands: Record<string, unknown>[];
@@ -198,8 +200,16 @@ export interface ContextManifest { id: string; taskId: string; stepId?: string; 
   /** Host-only bindings for graph citations; never added to model messages. */
   canvasSources?: SourceRef[];
   canvasReadHashes?: Record<string,string>;
+  /** Host geometry snapshot for coordinate writes; not model-authored evidence. */
+  mutationLayoutVersion?: string;
   canvasChecks?: Observation[];
+  /** Summary provenance checks never establish body-read or mutation evidence. */
+  summaryChecks?: Observation[];
   currentSources?: SourceRef[];
+  /** Frozen transitive dependencies; rewriting a root cannot erase its old sources. */
+  sourceClosure?: SourceRef[];
+  notebookCheck?: import('./server/notebookChecks').NotebookCheck;
+  canvasPendingChanges?: Array<Record<string, unknown>>;
   /** Host-only versions actually advertised in this model input. */
   summaryVersions?: Record<string,string>; summaryViewHash?: string;
   memory?: { inputCapacity: number; apiInputCapacity?: number; contextPresetTokens?: import('./contextCapacity').ContextPresetTokens; occupancy: number; attachmentSummaryRequired: boolean;
@@ -220,6 +230,7 @@ export const DEEPSEEK_MODELS = [{ id: DEEPSEEK_FLASH_MODEL, name: 'DeepSeek V4.1
 export const DEFAULT_PROVIDER: ProviderConfig = { apiFamily: 'deepseek', protocol: 'chat-completions', baseUrl: 'https://api.deepseek.com', model: DEEPSEEK_FLASH_MODEL,
   contextWindow: 500000, contextPresetTokens: 500000, maxOutputTokens: 16384, supportsTools: true, timeoutMs: 300000, thinkingEffort: 'high' };
 export interface AppSnapshot { soundSettings?: SoundSettings; schemaVersion: 3; graph: GraphState | null; graphRevision: number; canvasGraphReferences: Record<string, AgentGraphReferences>; sessionReferences?: Record<string, AgentGraphReferences>; sessions: Session[]; workspaces: Workspace[];
+  desktopTemporarySequence?: number;
   attachmentLimits?: import('./attachments').AttachmentLimits;
   canvasReviewStates?: Record<string, import('./reviewTypes').CanvasReviewState>;
   canvasVersionProtocol?: { version:1; migratedAt?:string; backupPath?:string };
@@ -228,6 +239,7 @@ export interface AppSnapshot { soundSettings?: SoundSettings; schemaVersion: 3; 
     directoryVersion?: number; directDataVersion?: number; deleted?: boolean }>;
   personalizationSettings?: PersonalizationSettings;
   userNotePages?: UserNotePage[];
+  userNoteDirectories?: import('./userNotes').UserNoteDirectory[];
   chatTurnBookmarks?: ChatTurnBookmark[];
   presentationParts?: PresentationPart[];
   inheritanceEdges: InheritanceEdge[]; snapshots: MemorySnapshot[]; tasks: Task[]; messages: ChatMessage[]; steps: ModelStep[];

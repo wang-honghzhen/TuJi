@@ -53,14 +53,14 @@ export function installContextStorage(db: DatabaseSync, location: string, artifa
   try {
     if (databaseFingerprint(db) !== original) throw new Error('备份后数据库发生变化，未执行上下文切换。');
     const meta = new Map(db.prepare('SELECT key,body FROM metadata').all().map(row => [String(row.key), JSON.parse(String(row.body))]));
-    const records = db.prepare("SELECT kind,id,body FROM records WHERE kind IN ('reviewChanges','changes','artifacts','userNotePages')").all().map(row => ({ kind: String(row.kind), id: String(row.id), body: JSON.parse(String(row.body)) }));
+    const records = db.prepare("SELECT kind,id,body FROM records WHERE kind IN ('reviewChanges','changes','artifacts','userNotePages','userNoteDirectories')").all().map(row => ({ kind: String(row.kind), id: String(row.id), body: JSON.parse(String(row.body)) }));
     const put = db.prepare('INSERT INTO records(kind,id,body) VALUES(?,?,?)');
     const setMeta = db.prepare('INSERT INTO metadata(key,body) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET body=excluded.body');
     db.exec('DELETE FROM records');
     // Review data has a separate collection: it can support undo, never become inherited memory.
     for (const record of records) if (record.kind === 'reviewChanges' || record.kind === 'changes' && record.body.status !== 'proposed')
       put.run('reviewChanges', record.id, JSON.stringify(record.body));
-    for (const record of records) if (record.kind === 'artifacts' || record.kind === 'userNotePages') put.run(record.kind, record.id, JSON.stringify(record.body));
+    for (const record of records) if (record.kind === 'artifacts' || record.kind === 'userNotePages' || record.kind === 'userNoteDirectories') put.run(record.kind, record.id, JSON.stringify(record.body));
     const graph = meta.get('graph') as { canvases?: Array<{ canvasId: string; mode?: string }> } | null;
     const createdAt = new Date().toISOString();
     for (const canvas of graph?.canvases ?? []) {

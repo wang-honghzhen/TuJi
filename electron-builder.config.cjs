@@ -7,6 +7,10 @@ module.exports = {
   files: [
     'package.json',
     'desktop/main.mjs',
+    'desktop/preload.cjs',
+    'desktop/window-controls.mjs',
+    'desktop/companion.mjs',
+    'desktop/assets/app-icon.ico',
     'desktop/data-directory.mjs',
     'scripts/credential-storage.mjs',
     'dist/**/*',

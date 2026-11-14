@@ -1,7 +1,9 @@
 import { canvasDirectory } from '@/v3/canvas';
 import { useEffect, useMemo, useState } from 'react';
 import { useId } from 'react';
-import { ChevronDown, ChevronRight, FileText, Folder } from 'lucide-react';
+import { ArrowUpRight, ChevronDown, ChevronRight, FileText, Folder } from 'lucide-react';
+import { searchCanvas } from '../graphSearch';
+import { SearchField, SearchHighlight } from './SearchField';
 import type { CanvasRecord, GraphState } from '@/v3/types';
 import { getStructurePaths, getMoveTargets } from '@/v3/structure';
 import type { GraphActionRequest } from '../graphActions';
@@ -19,6 +21,8 @@ interface Props {
   onOrganize?: (regionId: string) => void;
 }
 export function NewCanvasDirectoryPanel({ canvas, state, onNavigate, onAction, onMove, onNotice, onOrganize }: Props) {
+  const [query, setQuery] = useState('');
+  const matches = useMemo(() => canvas && state ? searchCanvas(state, canvas, query, false) : [], [canvas, state, query]);
   const [closed, setClosed] = useState<Set<string>>(new Set());
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [active, setActive] = useState('');
@@ -33,7 +37,7 @@ export function NewCanvasDirectoryPanel({ canvas, state, onNavigate, onAction, o
     while (parent) { if (closed.has(parent)) return false; parent = parents.get(parent); }
     return true;
   });
-  useEffect(() => { setSelected(new Set()); setActive(''); setClosed(new Set()); setMenu(null); }, [canvas?.canvasId]);
+  useEffect(() => { setSelected(new Set()); setActive(''); setClosed(new Set()); setMenu(null); setQuery(''); }, [canvas?.canvasId]);
   useEffect(() => { setSelected((ids) => new Set([...ids].filter((id) => paths.some((row) => row.id === id)))); }, [paths]);
   if (!canvas || !state) return null;
   const root = canvas.canvasId;
@@ -66,11 +70,25 @@ export function NewCanvasDirectoryPanel({ canvas, state, onNavigate, onAction, o
     setMenu({ position: { x: event.clientX, y: event.clientY }, items });
   };
   return <div className="h-full min-h-0 flex flex-col" data-canvas-directory onContextMenu={(event) => openMenu(event)}>
+    <div className="graph-search-inset" onContextMenu={event => event.stopPropagation()}><SearchField label="搜索当前目录中的节点和子图" placeholder="搜索节点、子图…" value={query} onChange={setQuery} onKeyDown={event => {
+      if (event.key === 'Escape') setQuery('');
+      if (event.key === 'Enter' && !event.nativeEvent.isComposing && matches[0]) onNavigate(matches[0].id);
+    }} /></div>
     <svg width="0" height="0" aria-hidden="true" className="absolute"><defs>
       <linearGradient id={gradientId}><stop stopColor="#60a5fa" /><stop offset="1" stopColor="#a78bfa" /></linearGradient>
       <linearGradient id={`${gradientId}-document`}><stop stopColor="#f4d27a" /><stop offset="1" stopColor="#f6aa55" /></linearGradient>
     </defs></svg>
-    <div role="tree" aria-label="画布目录" aria-multiselectable className="flex-1 min-h-0 overflow-y-auto new-scroll px-2 py-2" onClick={(event) => { if (event.target === event.currentTarget) { setSelected(new Set()); setActive(''); } }}>
+    {query.trim() ? <><div className="graph-search-count" aria-live="polite"><span>{matches.length} 个结果</span><span>当前画布</span></div>
+      <div className="graph-search-results directory-search-list new-scroll">
+        {!matches.length && <p className="graph-search-empty">没有匹配的节点或子图</p>}
+        {matches.map(result => { const Icon = result.kind === 'node' ? FileText : Folder;
+          return <button type="button" key={result.id} data-directory-search-result={result.id} className="graph-search-result" onClick={() => {
+            setSelected(new Set([result.id])); setActive(result.id);
+            setClosed(current => { const next = new Set(current); let id = parents.get(result.id); while (id) { next.delete(id); id = parents.get(id); } return next; });
+            onNavigate(result.id);
+          }}><Icon size={14} /><span className="graph-search-result-copy"><strong><SearchHighlight text={result.name} query={query} /></strong><small>{result.path}</small>{result.detail && <span><SearchHighlight text={result.detail} query={query} /></span>}</span><ArrowUpRight size={13} className="graph-search-go" /></button>;
+        })}
+      </div></> : <div role="tree" aria-label="画布目录" aria-multiselectable className="flex-1 min-h-0 overflow-y-auto new-scroll px-2 py-2" onClick={(event) => { if (event.target === event.currentTarget) { setSelected(new Set()); setActive(''); } }}>
       {rows.map((row) => {
         const node = row.kind === 'node'; const fullDocument = row.kind === 'document';
         const connectionCount = node ? connections.get(row.id) ?? 0 : undefined;
@@ -123,7 +141,7 @@ export function NewCanvasDirectoryPanel({ canvas, state, onNavigate, onAction, o
           <GraphNameLabel id={row.id} name={name} kind={row.kind} className="ml-1.5 truncate text-xs" />
         </div>;
       })}
-    </div>
+    </div>}
     {menu && <GraphContextMenu {...menu} onClose={() => setMenu(null)} />}
   </div>;
 }

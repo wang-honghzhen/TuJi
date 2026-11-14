@@ -13,6 +13,7 @@ export { Application, Repository };
 export interface LocalApplication {
   snapshot(): AppSnapshot;
   dispatch(action: string, payload: unknown): Promise<unknown>;
+  readUserNoteImage?(filename: string): Promise<{ bytes: Buffer; mimeType: string }>;
 }
 export type Middleware = (request: IncomingMessage, response: ServerResponse, next: (error?: unknown) => void) => void;
 export interface HttpServerOptions {
@@ -162,11 +163,25 @@ export async function startHttpServer(options: HttpServerOptions): Promise<Local
     if (url.pathname.startsWith('/api/qixue/')) {
       if (rejectCrossSite(request)) { json(response, 403, { error: '拒绝跨站访问本地会话服务。', code: 'CROSS_SITE_REJECTED' }); return; }
       if (closing) { json(response, 503, { error: '本地服务正在关闭，任务状态正在保存。', code: 'SHUTTING_DOWN' }); return; }
-      if (url.pathname === '/api/qixue/connection' && request.method === 'GET') { json(response, 200, { token }); return; }
+      if (url.pathname === '/api/qixue/connection' && request.method === 'GET') {
+        // Native image elements cannot attach the command header. Limit this
+        // HttpOnly, same-site credential to notebook image reads only.
+        response.setHeader('Set-Cookie', `tuji-note-${port}=${token}; HttpOnly; SameSite=Strict; Path=/api/qixue/user-note-images/`);
+        json(response, 200, { token }); return;
+      }
+      const noteImage = url.pathname.startsWith('/api/qixue/user-note-images/');
+      const imageCookie = noteImage ? String(request.headers.cookie ?? '').split(';').map(value => value.trim())
+        .find(value => value.startsWith(`tuji-note-${port}=`))?.slice(`tuji-note-${port}=`.length) : undefined;
       const suppliedToken = url.pathname === '/api/qixue/events' ? url.searchParams.get('token') ?? undefined
-        : request.headers['x-qixue-token'];
+        : request.headers['x-qixue-token'] ?? imageCookie;
       if (!sameToken(typeof suppliedToken === 'string' ? suppliedToken : undefined, token)) { json(response, 401, { error: '本地连接令牌无效，请重新连接。', code: 'UNAUTHORIZED' }); return; }
       try {
+        if (noteImage && request.method === 'GET' && options.application.readUserNoteImage) {
+          const image = await options.application.readUserNoteImage(url.pathname.slice('/api/qixue/user-note-images/'.length));
+          response.writeHead(200, { 'Content-Type': image.mimeType, 'Content-Length': image.bytes.length,
+            'Cache-Control': 'private, max-age=3600', 'X-Content-Type-Options': 'nosniff', 'Cross-Origin-Resource-Policy': 'same-origin' });
+          response.end(image.bytes); return;
+        }
         if (url.pathname === '/api/qixue/snapshot' && request.method === 'GET') { json(response, 200, options.application.snapshot()); return; }
         if (url.pathname === '/api/qixue/events' && request.method === 'GET') {
           const after = Number(url.searchParams.get('after') ?? request.headers['last-event-id'] ?? 0);

@@ -3,6 +3,7 @@ import { queueNotebookNotices } from './taskNotices';
 import { notebookUsage, notebookWorkspace } from '../notebook';
 import { requireValue } from './errors';
 import { hash, id, now } from './repository';
+import { resolveNoteReference } from '../noteReferences';
 export function writableNotebook(state: AppSnapshot, sessionId: string): Workspace {
   const session = state.sessions.find(s => s.id === sessionId && s.lifecycle === 'active');
   requireValue(session, '会话不存在或不可写', 'NOT_FOUND');
@@ -21,11 +22,16 @@ export function preserveDeliverySources(state: AppSnapshot, task: Task, notebook
   const visiting = new Set<string>();
   const preserve = (ref: SourceRef): SourceRef => {
     const key = hash([notebook.id, ref]), archiveId = 'note:delivery-source:' + key;
-    if (notebook.noteVersions?.some(n => n.id === archiveId)) return { kind: 'note', id: archiveId, version: 1 };
+    // A copied message/snapshot keeps its historical default; an explicitly
+    // current source must still check the dependencies of the immutable archive.
+    const archivedRef: SourceRef = { kind: 'note', id: archiveId, version: 1,
+      ...(ref.tracking ? { tracking: ref.tracking } : ['message', 'snapshot'].includes(ref.kind) ? { tracking: 'historical' } : {}) };
+    if (notebook.noteVersions?.some(n => n.id === archiveId)) return archivedRef;
     const message = ref.kind === 'message' ? state.messages.find(m => m.workspaceId === temporary.id && m.id === ref.id && m.version === ref.version) : undefined;
     const snapshot = ref.kind === 'snapshot' ? state.snapshots.find(s => temporary.snapshotIds.includes(s.id) && s.id === ref.id && s.contentHash === ref.version) : undefined;
-    const note = ref.kind === 'note' ? state.workspaces.flatMap(w => [...w.workNotes, ...(w.noteVersions ?? [])])
-      .find(n => n.id === ref.id && n.version === ref.version && n.lifecycle === 'current_task') : undefined;
+    const resolved = ref.kind === 'note' ? resolveNoteReference(state, task.sessionId, ref) : undefined;
+    requireValue(resolved?.status !== 'ambiguous', '笔记来源的分支版本存在歧义，请重新绑定', 'SOURCE_VERSION_AMBIGUOUS');
+    const note = resolved?.note?.lifecycle === 'current_task' ? resolved.note : undefined;
     if (!message && !snapshot && !note) return ref;
     requireValue(!visiting.has(key), '交付来源存在循环依赖', 'INVALID_SOURCE'); visiting.add(key);
     const original = message ?? note;
@@ -36,7 +42,7 @@ export function preserveDeliverySources(state: AppSnapshot, task: Task, notebook
       createdAt: message?.createdAt ?? note?.createdAt ?? snapshot?.createdAt ?? now(), updatedAt: now(),
       originTaskId: message?.taskId ?? note?.originTaskId ?? task.id, author: message?.role === 'user' ? 'user' : 'ai' };
     (notebook.noteVersions ??= []).push(archive); visiting.delete(key);
-    return { kind: 'note', id: archiveId, version: 1 };
+    return archivedRef;
   };
   return sources.map(preserve);
 }

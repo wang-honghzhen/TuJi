@@ -3,6 +3,8 @@ import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { createCredentialStorage } from '../scripts/credential-storage.mjs';
 import { resolveDataDirectory } from './data-directory.mjs';
+import { attachWindowControls } from './window-controls.mjs';
+import { createCompanion } from './companion.mjs';
 
 const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 app.setName('图记');
@@ -17,22 +19,31 @@ try {
   app.exit(1);
 }
 app.setPath('userData', path.join(directory, 'desktop-profile'));
-if (!app.requestSingleInstanceLock()) { app.quit(); }
+if (!app.requestSingleInstanceLock() || process.argv.includes('--quit')) { app.quit(); }
 else {
   let window;
   let host;
   let vite;
+  let companion;
   let shuttingDown = false;
   let mayQuit = false;
   const credentialStorage = createCredentialStorage(directory, { safeStorage });
-  app.on('second-instance', () => { if (window) { if (window.isMinimized()) window.restore(); window.show(); window.focus(); } });
+  app.on('second-instance', (_event, argv) => { if (argv.includes('--quit')) void shutdown(); else if (companion) void companion.showMain(); });
   const shutdown = async () => {
     if (shuttingDown) return; shuttingDown = true;
+    const trace = message => { if (process.argv.includes('--smoke-test')) console.log(`QIXUE_SHUTDOWN ${message}`); };
+    trace('saving');
+    try { await companion?.beforeQuit(); }
+    catch (error) { shuttingDown = false; console.error('图记退出前保存失败', error); if (!process.argv.includes('--smoke-test')) dialog.showErrorBox('请先保存编辑内容', String(error?.message ?? error)); return; }
+    trace('closing-server');
     host?.beginShutdown(); await vite?.close(); await host?.close();
+    trace('closing-windows');
+    companion?.destroy();
+    trace('quit');
     mayQuit = true; if (process.exitCode === 1) app.exit(1); else app.quit();
   };
   app.on('before-quit', event => { if (!mayQuit) { event.preventDefault(); void shutdown().catch(() => { mayQuit = true; app.quit(); }); } });
-  app.on('window-all-closed', () => { void shutdown(); });
+  app.on('window-all-closed', () => { if (!companion) void shutdown(); });
   for (const signal of ['SIGINT', 'SIGTERM']) process.on(signal, () => { void shutdown(); });
   process.stdin.setEncoding('utf8');
   let control = '';
@@ -59,12 +70,15 @@ else {
         server: { middlewareMode: true, host: '127.0.0.1', hmr: { server: host.server } }, appType: 'spa' });
       host.setMiddleware(vite.middlewares);
     }
-    window = new BrowserWindow({ width: 1450, height: 920, minWidth: 960, minHeight: 620,
-      title: '图记', icon: path.join(projectRoot, 'dist', 'brand', 'app-icon.png'), backgroundColor: '#020617', show: false,
-      webPreferences: { contextIsolation: true, sandbox: true, nodeIntegration: false, nodeIntegrationInWorker: false,
+    window = new BrowserWindow({ width: 1450, height: 920, minWidth: 960, minHeight: 620, frame: false,
+      title: '图记', icon: path.join(projectRoot, app.isPackaged ? 'dist' : 'public', 'brand', 'app-icon.png'), backgroundColor: '#020617', show: false,
+      webPreferences: { preload: path.join(projectRoot, 'desktop', 'preload.cjs'),
+        contextIsolation: true, sandbox: true, nodeIntegration: false, nodeIntegrationInWorker: false,
         webSecurity: true, allowRunningInsecureContent: false, webviewTag: false, spellcheck: false } });
     window.removeMenu(); window.setMenuBarVisibility(false);
-    window.webContents.setWindowOpenHandler(({ url }) => {
+    attachWindowControls(window, host.url);
+    const secure = targetWindow => {
+    targetWindow.webContents.setWindowOpenHandler(({ url }) => {
       // Source links open in the system browser, never inside the local workspace.
       try {
         const target = new URL(url);
@@ -72,9 +86,13 @@ else {
       } catch { /* Ignore malformed links. */ }
       return { action: 'deny' };
     });
-    window.webContents.on('will-navigate', (event, url) => { if (new URL(url).origin !== host.url) event.preventDefault(); });
-    window.webContents.on('will-attach-webview', event => event.preventDefault());
-    window.webContents.session.setPermissionRequestHandler((_contents, _permission, callback) => callback(false));
+    targetWindow.webContents.on('will-navigate', (event, url) => { if (new URL(url).origin !== host.url) event.preventDefault(); });
+    targetWindow.webContents.on('will-attach-webview', event => event.preventDefault());
+    targetWindow.webContents.session.setPermissionRequestHandler((_contents, _permission, callback) => callback(false));
+    };
+    secure(window);
+    companion = createCompanion({ main: window, origin: host.url, preload: path.join(projectRoot, 'desktop', 'preload.cjs'),
+      icon: path.join(projectRoot, 'desktop', 'assets', 'app-icon.ico'), directory, secure, quit: shutdown, smoke: process.argv.includes('--smoke-test') });
     await window.loadURL(host.url);
     if (process.argv.includes('--smoke-test')) {
       console.log(`QIXUE_SMOKE_STATE ${JSON.stringify({ menuVisible: window.isMenuBarVisible(), applicationMenu: Menu.getApplicationMenu() !== null, dataDirectory: directory })}`);

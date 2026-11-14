@@ -12,6 +12,8 @@ import type { CreateEdgeInput, EdgePatch } from '@/v3/storage';
 import { nodeGeometry } from '@/v3/nodeGeometry';
 import { previewBlockMove } from '@/v3/regionLayout';
 import { CanvasRegion, type RegionSummary } from './CanvasRegion';
+import { CanvasSearch } from './CanvasSearch';
+import { searchFocusView } from '../graphSearch';
 import { useSidebarInsets } from '../newUiStore';
 import { loadCanvasViewport, saveCanvasViewport, flushCanvasViewport, type CanvasViewport } from '../canvasViewportStore';
 import { CanvasDetailPanel, type CanvasDetail } from './CanvasDetailPanel';
@@ -715,22 +717,29 @@ export function NewStageLayer({ state, canvas, graphRevision, onAddDocument, onM
   const navigateTo = async (id: string, forceSelect = false) => {
     if (id === canvas.canvasId) { fit(); return; }
     const block = natural.blocks.find((item) => item.id === id);
-    if (!block) { if (state.edges.some((edge) => edge.edgeId === id)) selectItem('edge', id, undefined, forceSelect); return; }
+    const edge = !block ? state.edges.find(item => item.edgeId === id && !item.removed) : undefined;
+    const endpoints = edge ? [edge.sourceNodeId, edge.targetNodeId].map(ref => natural.blocks.find(item => item.id === ref)).filter((item): item is RenderBlock => !!item) : [];
+    if (!block && endpoints.length !== 2) { if (edge) void selectItem('edge', id, undefined, forceSelect); return; }
     if (!await editing.finish()) return;
     popupRequest.current++;
     setPopup(old => old?.id === id ? old : null);
     clearHover(); setFocus(null);
-    const ancestors = new Set<string>([id]); let parent = natural.parentOf.get(id);
-    while (parent) { ancestors.add(parent); parent = natural.parentOf.get(parent); }
+    const targets = block ? [block] : endpoints;
+    const ancestors = new Set<string>();
+    for (const target of targets) { ancestors.add(target.id); let parent = natural.parentOf.get(target.id);
+      while (parent && !ancestors.has(parent)) { ancestors.add(parent); parent = natural.parentOf.get(parent); } }
     setRevealed(ancestors);
-    const zoom = Math.max(.78, view.zoom); const center = visibleCenter();
-    const nextView = { zoom, x: center.x - (block.rect.x + block.rect.width / 2) * zoom, y: center.y - (block.rect.y + block.rect.height / 2) * zoom };
+    const availableWidth = Math.max(100, viewportSize.width - insets.left - insets.right - 80);
+    const availableHeight = Math.max(100, viewportSize.height - bottomInset - 120);
+    const center = visibleCenter();
+    const fitted = searchFocusView(targets.map(b => b.rect), { x: center.x - availableWidth / 2, y: center.y - availableHeight / 2, width: availableWidth, height: availableHeight }, view.zoom);
+    const edgeAnchor = edge ? fitted.anchor : undefined, nextView = fitted.view;
     updateView(() => nextView);
     if (!multiMode || forceSelect) {
       if (forceSelect) { setMultiMode(false); setMultiIds(new Set()); }
-      const kind = block.kind === 'node' ? 'node' : 'record';
+      const kind = edge ? 'edge' : block!.kind === 'node' ? 'node' : 'record';
       const screen = detailPosition(kind, id, center);
-      setSelected({ kind, id, position: attachDetail(kind, id, screen, nextView) });
+      setSelected({ kind, id, edgeAnchor, position: attachDetail(kind, id, screen, nextView, edgeAnchor) });
     }
   };
   useEffect(() => { if (focusRequest) navigateTo(focusRequest.id, focusRequest.forceSelect); }, [focusRequest?.sequence]);
@@ -998,6 +1007,7 @@ export function NewStageLayer({ state, canvas, graphRevision, onAddDocument, onM
       <button type="button" className="p-2 rounded-lg hover:bg-white/10" title="适应画布" onClick={fit}><Maximize2 size={15} /></button>
       <button type="button" className={`px-2 py-1.5 rounded-lg text-xs ${showOutsideEdges ? 'text-blue-200 bg-blue-500/15' : 'text-slate-400 hover:bg-white/10'}`} onClick={() => setShowOutsideEdges((old) => !old)} title="切换画布外的边">画布外边</button>
       <button type="button" className="p-2 rounded-lg hover:bg-white/10" title="另存为画布" onClick={onSaveCanvas}><Save size={15} /></button>
+      <CanvasSearch state={state} canvas={canvas} onLocate={id => { void navigateTo(id, true); }} />
     </div>,document.body)}
     {details.map((item) => {
       const detail = detailFor(item); if (!detail) return null;

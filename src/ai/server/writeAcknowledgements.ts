@@ -53,7 +53,8 @@ export function graphWriteAcknowledgement(state: AppSnapshot, task: Task, call: 
   const workspace = state.workspaces.find(w => w.id === task.workspaceId)!;
   const priorCalls = state.toolCalls.filter(c => c.taskId === task.id && c.status === 'completed')
     .sort((a,b) => (a.sequence ?? 0) - (b.sequence ?? 0));
-  const observations = acknowledgedObservations([...(workspace.observations ?? []), ...(workspace.contextStage?.baselineObservations ?? [])], priorCalls)
+  const observations = acknowledgedObservations([...(workspace.observations ?? []), ...(workspace.contextStage?.baselineObservations ?? []),
+    ...(task.responseReadHashes?.observations??[]),...(task.responseReadHashes?.summaryObservations??[])], priorCalls)
     .filter(o => o.taskId === task.id && !o.historical && o.canvasId === task.canvasId);
   const oldState = { ...state, graph: before }, oldIndex = graphIndex(oldState, task.canvasId), index = graphIndex(state, task.canvasId);
   const oldTables = graphTables(oldIndex), tables = graphTables(index);

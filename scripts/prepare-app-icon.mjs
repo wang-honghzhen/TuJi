@@ -11,6 +11,10 @@ if (original.width < crop.x + crop.size || original.height < crop.y + crop.size)
 const render = size => {
   const canvas = createCanvas(size, size), context = canvas.getContext('2d');
   context.imageSmoothingEnabled = true; context.imageSmoothingQuality = 'high';
+  // Apply the same rounded silhouette at every size; the corners remain transparent.
+  context.beginPath();
+  context.roundRect(0, 0, size, size, size * 0.2);
+  context.clip();
   context.drawImage(original, crop.x, crop.y, crop.size, crop.size, 0, 0, size, size);
   return canvas.toBuffer('image/png');
 };
@@ -26,4 +30,4 @@ for (const [index, size] of sizes.entries()) {
   offset += frames[index].length;
 }
 await fs.writeFile(path.join(root, 'desktop', 'assets', 'app-icon.ico'), Buffer.concat([header, ...frames]));
-console.log('已生成保留背景的方形图标，以及 16–256 像素 Windows 图标。');
+console.log('已生成保留星空背景、四角透明的圆角图标，以及 16–256 像素 Windows 图标。');

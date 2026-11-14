@@ -11,6 +11,7 @@ import { hash } from './repository';
 import { currentRelationHashes, relationDependency, relationDependencyKey } from './graphRelationDependencies';
 import { captureSubgraphHashes, subgraphDependency } from './subgraphVersions';
 import { fullyObservedNodeIds } from './canvasReadEvidence';
+import { currentLayoutHashes, layoutDependencyCanvas } from './graphLayoutDependencies';
 
 export const GRAPH_READ_DEPENDENCIES_VERSION = 4;
 export type GraphReadHashes = Record<string, string>;
@@ -102,14 +103,18 @@ export function rememberGraphReadHashes(task: Task, hashes: GraphReadHashes, his
 }
 
 export function advanceResponseReadHashes(task: Task, before: GraphState, after: GraphState): void {
-  const expected = task.responseReadHashes?.hashes; if (!expected) return;
-  const keys = Object.keys(expected);
+  // A successful write confirms only its exact before -> after transitions.
+  // Other bindings, including ones already changed by the user, remain intact.
+  const bindings=[task.readHashes,task.responseReadHashes?.hashes].filter((v):v is GraphReadHashes=>!!v);
+  const keys=[...new Set(bindings.flatMap(v=>Object.keys(v)))];
   const old = { ...semanticHashes(before), ...currentRelationHashes(before, keys) };
   const current = { ...semanticHashes(after), ...currentRelationHashes(after, keys) };
-  for (const key of keys) if (expected[key] === old[key] && old[key] !== current[key]) {
-    if (current[key] === undefined) delete expected[key]; else expected[key] = current[key];
+  for(const expected of bindings) {
+    for (const key of Object.keys(expected)) if (expected[key] === old[key] && old[key] !== current[key]) {
+      if (current[key] === undefined) delete expected[key]; else expected[key] = current[key];
+    }
+    for (const [key, version] of Object.entries(current)) if (!key.endsWith(':view') && old[key] !== version && expected[key] === undefined) expected[key] = version;
   }
-  for (const [key, version] of Object.entries(current)) if (!key.endsWith(':view') && old[key] !== version && expected[key] === undefined) expected[key] = version;
 }
 
 export function hasGraphReadDependencies(read: FrozenRead): boolean {
@@ -130,6 +135,7 @@ export function graphReadDependenciesCurrent(graph: GraphState, read: FrozenRead
 }
 
 export function dependencyIdentity(key: string) {
+  const layout=layoutDependencyCanvas(key);if(layout)return {kind:'canvases',refId:layout};
   const query=graphQueryDependency(key);if(query)return {kind:'canvases',refId:query.canvasId};
   const subgraph=subgraphDependency(key);if(subgraph)return {kind:'subgraphs',refId:subgraph.refId,part:subgraph.part};
   const relation = relationDependency(key);
@@ -173,7 +179,7 @@ export function scopedGraphReadHashes(graph: GraphState, task: Task, commands: R
 }
 
 export function assertGraphReadHashes(graph: GraphState, expected: GraphReadHashes, message: string, canvasId?: string): void {
-  const current = { ...semanticHashes(graph), ...currentRelationHashes(graph, Object.keys(expected)) };
+  const current = { ...semanticHashes(graph), ...currentRelationHashes(graph, Object.keys(expected)), ...currentLayoutHashes(graph,Object.keys(expected)) };
   const members = canvasId ? canvasMemberIds(graph, canvasId) : undefined;
   const unavailable = (key: string) => {
     const { kind, refId } = dependencyIdentity(key);

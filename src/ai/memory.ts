@@ -3,6 +3,8 @@ import { TERMINAL_TASK_STATUSES } from './domain';
 import { historyTurns, residentHistoryTurns } from './history';
 import { residentSessionTaskIds } from './sessionContext';
 import { contextCapacity } from './contextCapacity';
+import { resolveNoteReference } from './noteReferences';
+import { requireValue } from './server/errors';
 
 // Preserve the former defaults' relative sizes; every region scales with available input.
 export const DEFAULT_CONTEXT_WEIGHTS = { fixed_requirements: 8, canvas: 12, references: 32, work_notes: 4, history: 24, progress: 24 } as const;
@@ -31,8 +33,8 @@ export function sourceVisible(state: AppSnapshot, task: Task, refs: SourceRef[],
       return !record || sourceVisible(state, task, record.sourceRefs, next);
     }
     if (ref.kind === 'note') {
-      const note = [...state.workspaces.flatMap(value => [...value.pinnedNotes, ...value.workNotes, ...(value.noteVersions??[])]), ...state.snapshots.flatMap(value => value.notes)]
-        .find(value => value.id === ref.id && value.version === ref.version);
+      const resolved = resolveNoteReference(state, task.sessionId, ref), note = resolved.note;
+      if (resolved.status !== 'ok' || !note) return false;
       if(note?.lifecycle==='current_task'&&state.tasks.some(t=>t.id===note.taskId&&TERMINAL_TASK_STATUSES.includes(t.status)))return false;
       return !note || sourceVisible(state, task, note.sourceRefs, next);
     }
@@ -72,12 +74,23 @@ export function effectiveArtifacts(state: AppSnapshot, task: Task, retainedTaskI
   });
 }
 /** Keep original dependencies when a cited note block is later overwritten or cleaned. */
-export function withNoteProvenance(state: AppSnapshot, refs: SourceRef[]): SourceRef[] {
-  const notes = [...state.workspaces.flatMap(workspace => [...workspace.workNotes, ...workspace.pinnedNotes, ...(workspace.noteVersions??[])]), ...state.snapshots.flatMap(snapshot => snapshot.notes)];
-  const found = new Map<string, SourceRef>();
+export function withNoteProvenance(state: AppSnapshot, refs: SourceRef[], sessionId: string): SourceRef[] {
+  const found = new Map<string, SourceRef>(), visiting = new Set<string>();
   const visit = (ref: SourceRef) => {
-    const key = JSON.stringify(ref); if (found.has(key)) return; found.set(key, ref);
-    if (ref.kind === 'note') notes.find(note => note.id === ref.id && note.version === ref.version)?.sourceRefs.forEach(child => visit(ref.tracking === 'historical' ? { ...child, tracking: 'historical' } : child));
+    const key = JSON.stringify(ref);
+    requireValue(!visiting.has(key), '笔记来源存在循环引用，请重新绑定独立来源。', 'INVALID_SOURCE', { executed: false, sourceId: ref.id });
+    if (found.has(key)) return;
+    found.set(key, ref); visiting.add(key);
+    if (ref.kind === 'note') {
+      const resolved = resolveNoteReference(state, sessionId, ref);
+      requireValue(resolved.status === 'ok' && resolved.note,
+        resolved.status === 'ambiguous' ? '笔记来源的分支版本存在歧义；请核对当前笔记，另存为独立笔记后引用新 ID，勿重试旧引用。' : '笔记来源不在当前会话允许范围或版本已不可用。',
+        resolved.status === 'ambiguous' ? 'SOURCE_VERSION_AMBIGUOUS' : 'SOURCE_VERSION_UNAVAILABLE',
+        { executed: false, sourceId: ref.id, nextAction: resolved.status === 'ambiguous' ? 'create_unambiguous_note_reference' : 'read_available_note_source',
+          readWith: { tool: 'context_read_children', arguments: { summaryId: ref.id } } });
+      resolved.note.sourceRefs.forEach(child => visit(ref.tracking === 'historical' ? { ...child, tracking: 'historical' } : child));
+    }
+    visiting.delete(key);
   };
   refs.forEach(visit); return [...found.values()];
 }

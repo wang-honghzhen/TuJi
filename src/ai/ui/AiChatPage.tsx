@@ -1,4 +1,4 @@
-import { memo, useEffect, useMemo, useRef, useState, type ReactNode, type PointerEvent } from 'react';
+import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode, type PointerEvent } from 'react';
 import { ArrowDown, ArrowUp, BookOpen, MessageSquarePlus, X } from 'lucide-react';
 import { NewChatInput } from '@/new/components/NewChatInput';
 import { GraphContextMenu } from '@/new/components/GraphContextMenu';
@@ -15,6 +15,7 @@ import { historyTurns, isCompletedHistoryTask } from '../history';
 import { sessionProgressRecords } from '../sessionContext';
 import { openTemporarySession } from '../temporaryWindows';
 import { ReviewAllActions } from './ChangeReviewActions';
+import { setPanelReading, usePanelState } from '@/desktop/panelState';
 
 /** Committed updates replace only the records they changed, so an untouched row keeps the very
  *  same record object and skips rendering entirely. */
@@ -48,7 +49,7 @@ export function AiChatPage({ canvasId, onNavigate, sessionId, selection, heading
   const selectionAction = useAction(), bookmarkAction = useAction();
   const picking: ChatSelection | undefined = selection ?? (multiSelecting ? { taskIds: selectedIds, onChange: setSelectedIds } : undefined);
   const selectedTasks = new Set(picking?.taskIds ?? []);
-  const [following, setFollowing] = useState(!selection);
+  const [following, setFollowing] = useState(() => (session?.mode === 'temporary' ? usePanelState.getState().reading[session.id]?.following : undefined) ?? !selection);
   const history = useRef<HTMLDivElement>(null);
   const jumping = useRef(false), jumpTimer = useRef<ReturnType<typeof setTimeout>>();
   // A streamed answer re-renders this page with a new snapshot many times per second. The live
@@ -75,7 +76,11 @@ export function AiChatPage({ canvasId, onNavigate, sessionId, selection, heading
     jumpTimer.current = setTimeout(finishJump, 180);
   };
   useEffect(() => () => clearTimeout(jumpTimer.current), []);
-  useEffect(() => { setFollowing(!selection && !multiSelecting); }, [session?.id, !!selection, multiSelecting]);
+  useLayoutEffect(() => {
+    const saved = session?.mode === 'temporary' ? usePanelState.getState().reading[session.id] : undefined;
+    if (saved && history.current) history.current.scrollTop = saved.top;
+    setFollowing(saved ? saved.following : !selection && !multiSelecting);
+  }, [session?.id, !!selection, multiSelecting]);
   useEffect(() => { setMultiSelecting(false); setSelectedIds([]); setProgressSelecting(false); setProgressRecords([]); setMenuPosition(undefined); finishJump(); bookmarkAction.setError(''); }, [session?.id, canvasId]);
   useEffect(() => { if (following && !menuPosition && history.current) history.current.scrollTop = history.current.scrollHeight; }, [snapshot?.lastSeq, following, session?.id, !!menuPosition]);
   const pick = (taskId: string, messages: ChatMessage[]) => {
@@ -121,6 +126,7 @@ export function AiChatPage({ canvasId, onNavigate, sessionId, selection, heading
       setMenuPosition(undefined); const element = history.current;
       if (jumping.current) { clearTimeout(jumpTimer.current); jumpTimer.current = setTimeout(finishJump, 180); }
       else if (element) setFollowing(element.scrollHeight - element.scrollTop - element.clientHeight <= 8);
+      if (element && session?.mode === 'temporary') setPanelReading(session.id, { top: element.scrollTop, following: element.scrollHeight - element.scrollTop - element.clientHeight <= 8 });
     }}>
       <div className="ai-conversation" data-ai-conversation>
       <AiError text={error} />
