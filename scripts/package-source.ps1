@@ -12,7 +12,6 @@ $temporary = Join-Path $releaseDirectory ('.source-' + [guid]::NewGuid().ToStrin
 # Explicit inputs keep notes, attachments, credentials and installed dependencies out.
 $inputs = @(
   'desktop', 'public', 'scripts', 'src', '.gitignore', 'README.md',
-  'USER_NOTEBOOK_REQUIREMENTS.md', 'VERSION_MECHANISM.md', 'VERSION_MECHANISM_AUDIT.md', 'VERSION_MECHANISM_REVIEW.md',
   'api-config.example.json', 'package.json', 'package-lock.json',
   'index.html', 'postcss.config.js', 'tailwind.config.js', 'tsconfig.json',
   'tsconfig.node.json', 'vite.config.ts', 'electron-builder.config.cjs'
