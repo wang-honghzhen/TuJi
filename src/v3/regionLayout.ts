@@ -3,13 +3,19 @@ import { canvasDirectory, canvasDirectoryIds } from './canvas';
 import type { CanvasRecord, GraphState, Placement, Point, Rect } from './types';
 import { BLOCK_GAP, COLLAPSED_HEIGHT, COLLAPSED_WIDTH,
   RECORD_HEADER_HEIGHT, RECORD_MIN_WIDTH, RECORD_PADDING } from './types';
-import { RectangleIndex } from './rectangleIndex';
+import { RectangleIndex, intersects } from './rectangleIndex';
 import { getHierarchyIndex, retainHierarchyIndex } from './hierarchyIndex';
 import { PersistentMap } from './persistentMap';
 import { manualProtection } from './placementPolicy';
+import { reconcilePresentationLayouts } from './presentationReconciliation';
 
 export const REGION_LAYOUT_VERSION = 3;
 const validPoint = (p?: Point): p is Point => Boolean(p && Number.isFinite(p.x) && Number.isFinite(p.y));
+const sameRect = (a: Rect, b: Rect) => a.x === b.x && a.y === b.y && a.width === b.width && a.height === b.height;
+function allowedOverlap(id: string, otherId: string, rect: Rect, otherRect: Rect, placements: Record<string, Placement>, parentId: string): boolean {
+  return Boolean(placements[id]?.overlapAllowances?.some(row => row.parentId === parentId && row.otherId === otherId && sameRect(row.self, rect) && sameRect(row.other, otherRect))
+    || placements[otherId]?.overlapAllowances?.some(row => row.parentId === parentId && row.otherId === id && sameRect(row.self, otherRect) && sameRect(row.other, rect)));
+}
 const bounds = (rects: Rect[], root = false): Rect => {
   if (root) {
     const x = Math.min(0, ...rects.map(r => r.x)); const y = Math.min(0, ...rects.map(r => r.y));
@@ -60,6 +66,7 @@ type Solver = (ids: string[], placements: Record<string, Placement>, sizes: Map<
   root: boolean, parentId: string, canvas?: CanvasRecord) => Record<string, Placement>;
 const retained = new WeakMap<GraphState, RegionGeometry>();
 const previews = new WeakMap<GraphState, GraphState>();
+const previewProtection = new WeakMap<GraphState, ReadonlySet<string>>();
 export const invalidateRegionGeometry = (state: GraphState): void => { retained.delete(state); previews.delete(state); };
 export const isRegionPreview = (state: GraphState, previous: GraphState): boolean => previews.get(state) === previous;
 export function retainRegionGeometry(state: GraphState): void { retained.set(state, getNaturalGeometry(state)); }
@@ -201,10 +208,16 @@ export function measureNaturalRegions(state: GraphState, canvas?: CanvasRecord):
  * occupied space, while unchanged siblings keep their coordinates during a drag.
  * Old 'manual' flags were also produced by automatic operations: migrate them
  * to preferences once, preserving coordinates wherever they are still legal. */
-export function normalizeRegionLayout(state: GraphState, previous?: GraphState): GraphState {
-  return normalizeRegions(state, previous, previous && state.layoutVersion === REGION_LAYOUT_VERSION ? changedRegions(state, previous) : undefined);
+export function normalizeRegionLayout(state: GraphState, previous?: GraphState, protectedIds?: ReadonlySet<string>): GraphState {
+  const preview = Boolean(previous && isRegionPreview(state, previous));
+  const fixed = preview ? new Set([...protectedIds ?? [], ...previewProtection.get(state) ?? []]) : protectedIds;
+  const normalized = normalizeRegions(state, previous, previous && state.layoutVersion === REGION_LAYOUT_VERSION ? changedRegions(state, previous) : undefined, preview, fixed);
+  const presented = preview ? normalized : reconcilePresentationLayouts(normalized, previous, fixed);
+  if (presented !== normalized) reconcileRegionGeometry(normalized, presented);
+  if (preview && previous) { previews.set(presented, previous); if (fixed) previewProtection.set(presented, fixed); }
+  return presented;
 }
-function normalizeRegions(state: GraphState, previous?: GraphState, dirty?: DirtyRegions): GraphState {
+function normalizeRegions(state: GraphState, previous?: GraphState, dirty?: DirtyRegions, dragging = false, protectedIds?: ReadonlySet<string>): GraphState {
   const solveTime = Date.now();
   const migrate = state.layoutVersion !== REGION_LAYOUT_VERSION;
   const oldGeometry = previous ? getNaturalGeometry(previous) : undefined;
@@ -219,35 +232,58 @@ function normalizeRegions(state: GraphState, previous?: GraphState, dirty?: Dirt
       const p = placements[id];
       return validPoint(p) ? { ...p, source: (state.layoutVersion ?? 0) >= 1 && p.source === 'manual' ? 'manual' : 'auto' } : { x: 0, y: 0, source: 'auto' };
     };
-    const pinned = (id: string) => preferred(id).source === 'manual';
+    const pinned = (id: string) => preferred(id).source === 'manual' || Boolean(protectedIds?.has(id));
+    const oldSize = (id: string) => previous?.nodes[id] ? nodeGeometry(previous.nodes[id]) : previous?.documents[id]
+      ? oldGeometry?.document(id) : oldCanvas && canvasDirectory(oldCanvas, id) ? oldGeometry?.directory(oldCanvas, id) : undefined;
     const grew = (id: string) => {
-      if (!previous?.nodes[id] || !state.nodes[id]) return false;
-      const before = nodeGeometry(previous.nodes[id]), size = sizes.get(id)!;
-      return size.width > before.width || size.height > before.height;
+      const before = oldSize(id), size = sizes.get(id)!;
+      return Boolean(before && (size.width > before.width || size.height > before.height));
     };
     const stable = (id: string) => {
       if (!previous) return validPoint(placements[id]);
       if (!oldMembers.has(id)) return false;
       const old = oldPlacements?.[id]; const p = preferred(id);
-      const oldSize = previous.nodes[id] ? nodeGeometry(previous.nodes[id]) : previous.documents[id] ? oldGeometry?.document(id) : oldCanvas && canvasDirectory(oldCanvas, id) ? oldGeometry?.directory(oldCanvas, id) : undefined;
-      return old?.x === p.x && old.y === p.y && old.source === p.source && oldSize?.width === sizes.get(id)!.width && oldSize.height === sizes.get(id)!.height;
+      const size = oldSize(id);
+      return old?.x === p.x && old.y === p.y && old.source === p.source && size?.width === sizes.get(id)!.width && size.height === sizes.get(id)!.height;
     };
     const stability = new Map(ids.map(id => [id, Number(stable(id))]));
-    const order = [...ids].sort((a, b) => Number(grew(a)) - Number(grew(b)) || manualProtection(preferred(b), solveTime) - manualProtection(preferred(a), solveTime) ||
-      Number(pinned(b)) - Number(pinned(a)) || stability.get(b)! - stability.get(a)! ||
+    const order = [...ids].sort((a, b) => Number(pinned(b)) - Number(pinned(a)) || Number(grew(a)) - Number(grew(b)) ||
+      manualProtection(preferred(b), solveTime) - manualProtection(preferred(a), solveTime) || stability.get(b)! - stability.get(a)! ||
       Number(Boolean(state.nodes[b])) - Number(Boolean(state.nodes[a])) || a.localeCompare(b));
-    const occupied = new RectangleIndex(); const automatic = new RectangleIndex();
+    const occupied = new RectangleIndex(); const stableObstacles = new RectangleIndex();
+    const owners = new Map<Rect, string>();
     let result = placements;
     for (const id of order) {
-      const p = preferred(id); const manual = pinned(id) && !grew(id); const size = sizes.get(id)!;
-      const point = manual ? { x: root ? p.x : Math.max(0, p.x), y: root ? p.y : Math.max(0, p.y) }
-        : nearestRegionSpace(size, p, stability.get(id) ? automatic : occupied, root);
+      const p = preferred(id); const manual = pinned(id); const size = sizes.get(id)!;
+      const obstacles = stability.get(id) ? stableObstacles : occupied;
+      const preferredRect = { ...size, ...p };
+      const collisions = !manual ? obstacles.query(preferredRect, BLOCK_GAP) : [];
+      const intentional = collisions.length && (root || p.x >= 0 && p.y >= 0) &&
+        collisions.every(other => allowedOverlap(id, owners.get(other)!, preferredRect, other, result, parentId));
+      const point = manual || intentional ? { x: root ? p.x : Math.max(0, p.x), y: root ? p.y : Math.max(0, p.y) }
+        : nearestRegionSpace(size, p, obstacles, root);
       const next = { ...p, ...point }; const old = placements[id];
       if (!old || old.x !== next.x || old.y !== next.y || old.source !== next.source) {
         if (result === placements) result = { ...placements };
         result[id] = next;
       }
-      const rect = { ...size, ...point }; occupied.add(rect); if (!manual) automatic.add(rect);
+      const rect = { ...size, ...point }; occupied.add(rect); owners.set(rect, id);
+      // A content/layout change can expand a hand-placed card or container.
+      // Keep its anchor, and make automatic siblings clear the new footprint.
+      // An explicit drag still permits overlap without shuffling its neighbours.
+      if (!manual || (protectedIds?.has(id) && p.source !== 'manual') || (!dragging && grew(id))) stableObstacles.add(rect);
+    }
+    // A size/position/ownership change invalidates the exceptional pair. Drop
+    // it so returning to old coordinates cannot revive an obsolete permission.
+    for (const id of ids) {
+      const rows = result[id]?.overlapAllowances; if (!rows) continue;
+      const self = { ...sizes.get(id)!, ...result[id] };
+      const kept = rows.filter(row => row.parentId === parentId && sizes.has(row.otherId) && sameRect(row.self, self) &&
+        sameRect(row.other, { ...sizes.get(row.otherId)!, ...result[row.otherId] }));
+      if (kept.length === rows.length) continue;
+      if (result === placements) result = { ...placements };
+      const next = { ...result[id] }; if (kept.length) next.overlapAllowances = kept; else delete next.overlapAllowances;
+      result[id] = next;
     }
     if (result !== placements) {
       changed = true;
@@ -280,7 +316,8 @@ function normalizeRegions(state: GraphState, previous?: GraphState, dirty?: Dirt
 
 /** A position drag preserves ownership and follows the pointer, including over
  * sibling nodes and regions. Only the affected ancestor geometry is recomputed. */
-export function previewBlockMove(state: GraphState, canvasId: string, id: string, parentId: string, point: Point): GraphState {
+export function previewBlockMove(state: GraphState, canvasId: string, id: string, parentId: string, point: Point,
+  protectedIds?: ReadonlySet<string>, settle = false): GraphState {
   if (!validPoint(point)) return state;
   const canvas = state.canvases.find(c => c.canvasId === canvasId); if (!canvas) return state;
   const parent = state.documents[parentId];
@@ -291,12 +328,33 @@ export function previewBlockMove(state: GraphState, canvasId: string, id: string
   if (!state.nodes[id] && !state.documents[id] && !canvasDirectory(canvas, id)) return state;
   const root = parentId === canvas.canvasId;
   const pos: Placement = { ...placements[id], x: root ? point.x : Math.max(0, point.x), y: root ? point.y : Math.max(0, point.y), source: 'manual' };
+  let viewCanvas = canvas;
+  if (canvas.presentationPlacements?.[id]) {
+    const presentationPlacements = { ...canvas.presentationPlacements }; delete presentationPlacements[id];
+    viewCanvas = { ...canvas, presentationPlacements };
+  }
   const next: GraphState = parent ? { ...state, documents: { ...state.documents,
     [parentId]: { ...parent, placements: { ...parent.placements, [id]: pos }, rev: parent.rev + 1,
-      metadata: { ...parent.metadata, updatedAt: new Date().toISOString() } } } } :
-    { ...state, canvases: state.canvases.map(c => c === canvas ? { ...c, placements: { ...c.placements, [id]: pos }, updatedAt: new Date().toISOString() } : c) };
+      metadata: { ...parent.metadata, updatedAt: new Date().toISOString() } } },
+    canvases: viewCanvas === canvas ? state.canvases : state.canvases.map(c => c === canvas ? viewCanvas : c) } :
+    { ...state, canvases: state.canvases.map(c => c === canvas ? { ...viewCanvas, placements: { ...c.placements, [id]: pos }, updatedAt: new Date().toISOString() } : c) };
   if (state.layoutVersion !== REGION_LAYOUT_VERSION) return normalizeRegionLayout(next, state);
   const index = getHierarchyIndex(state);
+  // The requested point is relative to these containers. Moving an ancestor
+  // while its child is dragged changes the screen-space drop behind the user's
+  // pointer. Active editors receive the same temporary, non-persisted locks.
+  const fixed = new Set([id, parentId]), queue = [...fixed];
+  const lock = (ref?: string) => { if (ref && !fixed.has(ref)) { fixed.add(ref); queue.push(ref); } };
+  for (let head = 0; head < queue.length; head++) {
+    const ref = queue[head]; lock(index.nodeParents.get(ref)); lock(index.documentParents.get(ref));
+    for (const parents of index.canvasParents.values()) lock(parents.get(ref));
+  }
+  const dragAncestors = new Set(fixed);
+  for (const ref of protectedIds ?? []) lock(ref);
+  for (let head = 0; head < queue.length; head++) {
+    const ref = queue[head]; lock(index.nodeParents.get(ref)); lock(index.documentParents.get(ref));
+    for (const parents of index.canvasParents.values()) lock(parents.get(ref));
+  }
   const dirty: DirtyRegions = { documents: new Set(), directories: new Map() };
   const local = (viewId: string, start: string) => {
     const ids = dirty.directories.get(viewId) ?? new Set<string>(); dirty.directories.set(viewId, ids);
@@ -311,30 +369,99 @@ export function previewBlockMove(state: GraphState, canvasId: string, id: string
       current = index.documentParents.get(current);
     }
   } else local(canvasId, parentId);
+  if (!settle) {
+    // Pointer previews only follow the dragged object. Reserve every unchanged
+    // sibling in the affected ancestry; collision settling starts on release.
+    for (const ref of dirty.documents) {
+      const doc = state.documents[ref];
+      doc.childNodeIds.forEach(child => fixed.add(child)); doc.childDocumentIds.forEach(child => fixed.add(child));
+    }
+    for (const [viewId, regions] of dirty.directories) {
+      const view = state.canvases.find(item => item.canvasId === viewId)!;
+      for (const ref of regions) canvasDirectory(view, ref)?.childIds.forEach(child => fixed.add(child));
+    }
+  }
   // Ensure the old lazy sizes are retained before seeding the affected branch.
   retained.set(state, geometry);
-  const result = normalizeRegions(next, state, dirty);
-  validateRegions(result, dirty);
-  retainHierarchyIndex(result, index); previews.set(result, state);
+  let result = normalizeRegions(next, state, dirty, true, fixed);
+  if (settle) result = recordDragOverlaps(result, state, dirty, fixed, dragAncestors);
+  validateRegions(result, dirty, fixed);
+  retainHierarchyIndex(result, index); previews.set(result, state); previewProtection.set(result, fixed);
   return result;
 }
 
-/** Assert geometry before publishing a transaction, independently of the packer. */
-export function validateRegionLayout(state: GraphState): void {
-  validateRegions(state);
+/** Persist only new overlaps explicitly caused by a fixed dragged ancestor.
+ * Temporary active protection itself never becomes a persistent position lock. */
+function recordDragOverlaps(state: GraphState, previous: GraphState, dirty: DirtyRegions,
+  fixed: ReadonlySet<string>, ancestors: ReadonlySet<string>): GraphState {
+  const geometry = getNaturalGeometry(state), oldGeometry = getNaturalGeometry(previous);
+  let next = state;
+  const record = (ids: string[], positions: Record<string, Placement>, oldPositions: Record<string, Placement>, parentId: string,
+    canvas?: CanvasRecord, oldCanvas?: CanvasRecord) => {
+    const size = (id: string, old = false) => {
+      const graph = old ? previous : state, measured = old ? oldGeometry : geometry;
+      return graph.nodes[id] ? nodeGeometry(graph.nodes[id]) : graph.documents[id] ? measured.document(id)
+        : measured.directory((old ? oldCanvas : canvas)!, id);
+    };
+    let updated = positions;
+    for (const id of ids) {
+      if (!ancestors.has(id) || positions[id].source === 'manual') continue;
+      const self = { ...size(id), x: positions[id].x, y: positions[id].y };
+      for (const otherId of ids) {
+        if (id === otherId || !fixed.has(otherId) || positions[otherId].source === 'manual') continue;
+        const other = { ...size(otherId), x: positions[otherId].x, y: positions[otherId].y };
+        if (!intersects(self, other) || allowedOverlap(id, otherId, self, other, updated, parentId)) continue;
+        const a = oldPositions[id], b = oldPositions[otherId];
+        if (a && b) {
+          const oldSelf = { ...size(id, true), ...a }, oldOther = { ...size(otherId, true), ...b };
+          // A second explicit drag may resize the same previously permitted
+          // pair. Rebind that intent, but never adopt an unexplained old overlap.
+          if (intersects(oldSelf, oldOther) && !allowedOverlap(id, otherId, oldSelf, oldOther, oldPositions, parentId)) continue;
+        }
+        if (updated === positions) updated = { ...positions };
+        updated[id] = { ...updated[id], overlapAllowances: [...updated[id].overlapAllowances ?? [], { parentId, otherId, self, other }] };
+      }
+    }
+    if (updated === positions) return;
+    if (canvas) next = { ...next, canvases: next.canvases.map(item => item.canvasId === canvas.canvasId
+      ? { ...item, placements: { ...item.placements, ...Object.fromEntries(ids.map(id => [id, updated[id]])) }, updatedAt: new Date().toISOString() } : item) };
+    else {
+      const doc = next.documents[parentId];
+      next = { ...next, documents: { ...next.documents, [parentId]: { ...doc, placements: updated, rev: doc.rev + 1,
+        metadata: { ...doc.metadata, updatedAt: new Date().toISOString() } } } };
+    }
+  };
+  for (const id of dirty.documents) {
+    const doc = state.documents[id];
+    record([...doc.childNodeIds, ...doc.childDocumentIds], doc.placements, previous.documents[id]?.placements ?? {}, id);
+  }
+  for (const [canvasId, regions] of dirty.directories) {
+    const canvas = state.canvases.find(item => item.canvasId === canvasId)!, oldCanvas = previous.canvases.find(item => item.canvasId === canvasId);
+    for (const id of regions) record(canvasDirectory(canvas, id).childIds.filter(child => !canvas.excludedDocumentIds?.includes(child)),
+      canvas.placements, oldCanvas?.placements ?? {}, id, canvas, oldCanvas);
+  }
+  if (next !== state) inheritRegionGeometry(state, next);
+  return next;
 }
-function validateRegions(state: GraphState, dirty?: DirtyRegions): void {
+
+/** Assert geometry before publishing a transaction, independently of the packer. */
+export function validateRegionLayout(state: GraphState, protectedIds?: ReadonlySet<string>): void {
+  const fixed = new Set([...protectedIds ?? [], ...previewProtection.get(state) ?? []]);
+  validateRegions(state, undefined, fixed);
+}
+function validateRegions(state: GraphState, dirty?: DirtyRegions, protectedIds?: ReadonlySet<string>): void {
   const geometry = getNaturalGeometry(state);
   const check = (ids: string[], placements: Record<string, Placement>, root: boolean, parentId: string, canvas?: CanvasRecord) => {
     const automatic = new RectangleIndex();
+    const owners = new Map<Rect, string>();
     for (const id of ids) {
       const p = placements[id];
       if (!validPoint(p) || (!root && (p.x < 0 || p.y < 0))) throw new Error(`区域坐标无效：${parentId}/${id}`);
       const size = state.nodes[id] ? nodeGeometry(state.nodes[id]) : state.documents[id] ? geometry.document(id) : geometry.directory(canvas!, id);
       const rect = { ...size, ...p };
-      if (p.source !== 'manual') {
-        if (automatic.collides(rect)) throw new Error(`区域重叠：${parentId}/${id}`);
-        automatic.add(rect);
+      if (p.source !== 'manual' && !protectedIds?.has(id)) {
+        if (automatic.query(rect).some(other => !allowedOverlap(id, owners.get(other)!, rect, other, placements, parentId))) throw new Error(`区域重叠：${parentId}/${id}`);
+        automatic.add(rect); owners.set(rect, id);
       }
     }
   };

@@ -1,5 +1,5 @@
 import type { UserNotePage } from '../domain';
-import { userNoteText, type UserNoteBlock, type UserNoteDirectory, type UserNoteImage } from '../userNotes';
+import { userNoteDirectoryPages, userNoteText, type UserNoteBlock, type UserNoteDirectory, type UserNoteImage } from '../userNotes';
 import { existsSync } from 'node:fs';
 import path from 'node:path';
 import { requireValue, text } from './errors';
@@ -54,10 +54,16 @@ export function userNotebookCommand(repo: Repository, action: string, payload: R
       return target;
     };
     const touchDirectory = (directoryId?: string) => { if (directoryId) { const directory = directories.find(d => d.id === directoryId); if (directory) directory.updatedAt = now(); } };
+    const directoryOrder = (directoryId: string) => userNoteDirectoryPages(pages, directoryId, directories).map(page => page.id);
+    const setOrder = (directoryId: string | undefined, order: string[]) => {
+      if (!directoryId) return;
+      const directory = findDirectory(directoryId); directory.pageIds = order; directory.updatedAt = now();
+    };
     const create = (directoryId?: string) => {
+      const order = directoryId ? directoryOrder(directoryId) : [];
       const stamp = now();
       const page: UserNotePage = { id: id('user-page:'), text: '', version: 1, createdAt: stamp, updatedAt: stamp, ...(directoryId ? { directoryId } : {}) };
-      pages.push(page); touchDirectory(directoryId); return page;
+      pages.push(page); setOrder(directoryId, [...order, page.id]); return page;
     };
     if (action === 'userNote.directory.create') {
       const name = text(payload.name, '目录名称', 200).trim();
@@ -92,16 +98,48 @@ export function userNotebookCommand(repo: Repository, action: string, payload: R
       repo.event('user-notebook', 'user_note.opened', { pageId: page.id });
       return structuredClone(page);
     }
-    requireValue(['userNote.save', 'userNote.delete', 'userNote.assign'].includes(action), '不支持的笔记操作');
+    requireValue(['userNote.save', 'userNote.delete', 'userNote.assign', 'userNote.transfer', 'userNote.reorder'].includes(action), '不支持的笔记操作');
     const page = pages.find(value => value.id === text(payload.id, '笔记页 ID', 1000));
     requireValue(page, '这页笔记已被删除', 'NOT_FOUND');
+    if (action === 'userNote.reorder') {
+      const directoryId = identifier(payload.directoryId, '目录 ID'); findDirectory(directoryId);
+      requireValue(page.directoryId === directoryId, '这页笔记已移出当前目录，请重新打开排序', 'ORDER_CONFLICT');
+      const order = directoryOrder(directoryId), expected = payload.expectedPageIds;
+      requireValue(Array.isArray(expected) && expected.length === order.length && order.every((id, index) => expected[index] === id),
+        '目录页号已发生变化，请刷新页号后重新选择', 'ORDER_CONFLICT');
+      const referencePageId = identifier(payload.referencePageId, '参考页 ID');
+      requireValue(order.includes(referencePageId), '参考页已不在目录中，请重新选择', 'ORDER_CONFLICT');
+      requireValue(payload.placement === 'before' || payload.placement === 'after', '请选择放在参考页前面或后面');
+      if (referencePageId !== page.id) {
+        const next = order.filter(id => id !== page.id);
+        next.splice(next.indexOf(referencePageId) + (payload.placement === 'after' ? 1 : 0), 0, page.id);
+        setOrder(directoryId, next);
+        repo.event('user-notebook', 'user_note.reordered', { pageId: page.id, directoryId, referencePageId, placement: payload.placement });
+        return { pageId: page.id, directoryId, pageIds: next };
+      }
+      return { pageId: page.id, directoryId, pageIds: order };
+    }
     requireValue(Number.isInteger(payload.expectedVersion) && payload.expectedVersion === page.version,
       '这页笔记已在其他窗口修改，请保留当前内容并重新打开此页', 'VERSION_CONFLICT');
-    if (action === 'userNote.assign') {
+    if (action === 'userNote.assign' || action === 'userNote.transfer') {
       const destination = pageDestination(payload.directoryId);
-      requireValue(!destination || !page.directoryId || destination === page.directoryId, '这页笔记已在其他目录，请先移出原目录', 'PAGE_ALREADY_ASSIGNED');
-      touchDirectory(page.directoryId); touchDirectory(destination);
+      if (action === 'userNote.transfer') {
+        requireValue(destination, '请选择一个用于存放笔记的目录');
+        requireValue(payload.mode === 'move' || payload.mode === 'copy', '请选择迁移或复制');
+        if (payload.mode === 'copy') {
+          const copy = create(destination);
+          copy.text = page.text;
+          if (page.blocks) copy.blocks = structuredClone(page.blocks).map(block => ({ ...block, id: id('note-block:'),
+            ...(block.type === 'images' ? { images: block.images.map(image => ({ ...image, id: id('note-image:') })) } : {}) }));
+          repo.event('user-notebook', 'user_note.copied', { pageId: copy.id, sourcePageId: page.id, directoryId: destination });
+          return structuredClone(copy);
+        }
+      } else requireValue(!destination || !page.directoryId || destination === page.directoryId, '这页笔记已在其他目录，请先移出原目录', 'PAGE_ALREADY_ASSIGNED');
+      if (destination === page.directoryId) return structuredClone(page);
+      const destinationOrder = destination ? directoryOrder(destination) : [];
+      setOrder(page.directoryId, page.directoryId ? directoryOrder(page.directoryId).filter(id => id !== page.id) : []);
       if (destination) page.directoryId = destination; else delete page.directoryId;
+      setOrder(destination, [...destinationOrder, page.id]);
       page.version++; page.updatedAt = now();
       repo.event('user-notebook', 'user_note.assigned', { pageId: page.id, directoryId: destination }); return structuredClone(page);
     }
@@ -115,7 +153,8 @@ export function userNotebookCommand(repo: Repository, action: string, payload: R
       repo.event('user-notebook', 'user_note.saved', { pageId: page.id });
       return structuredClone(page);
     }
-    const index = pages.indexOf(page); pages.splice(index, 1); touchDirectory(page.directoryId);
+    setOrder(page.directoryId, page.directoryId ? directoryOrder(page.directoryId).filter(id => id !== page.id) : []);
+    const index = pages.indexOf(page); pages.splice(index, 1);
     if (!pages.length) create();
     repo.event('user-notebook', 'user_note.deleted', { pageId: page.id });
     return { nextPageId: pages[Math.min(index, pages.length - 1)].id };

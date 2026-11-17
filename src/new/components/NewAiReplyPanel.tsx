@@ -7,6 +7,7 @@ import { presentationRows } from '@/ai/presentation';
 import { AiMessageView, AiToolGroup } from '@/ai/ui/AiTaskView';
 import { resolvePresentationTargets } from '../presentationTargets';
 import { canFollowTask, maximumReached, recordReachedPart } from '@/ai/presentationReading';
+import { useCanvasForeground } from '../canvasInteractionScope';
 
 export function NewAiReplyPanel({canvasId='qixue-draft-canvas'}:{canvasId?:string}){
   const snapshot=useAiStore(s=>s.snapshot),activeId=useAiStore(s=>s.activeSessionByCanvas[canvasId]);
@@ -24,7 +25,7 @@ export function NewAiReplyPanel({canvasId='qixue-draft-canvas'}:{canvasId?:strin
   if(!paused||lastVisible.current.taskId!==task?.id||lastVisible.current.cursor!==playback?.cursor)
     lastVisible.current={taskId:task?.id,cursor:playback?.cursor,rows};
   const displayedRows=lastVisible.current.rows;
-  const [visible,setVisible]=useState(()=>document.visibilityState==='visible'&&document.hasFocus());
+  const visible = useCanvasForeground();
   const [typing,setTyping]=useState(false);
   const [editing,setEditing]=useState<{from:number;text:string}>();
   const edit=useRef(editing); edit.current=editing;
@@ -34,6 +35,12 @@ export function NewAiReplyPanel({canvasId='qixue-draft-canvas'}:{canvasId?:strin
   const mounted=useRef(true),displayedTask=useRef(task?.id);displayedTask.current=task?.id;
   useEffect(()=>{mounted.current=true;return()=>{mounted.current=false;};},[]);
   const targetStatus=useMemo(()=>resolvePresentationTargets(snapshot?.graph,canvasId,part?.targets??[]),[snapshot?.graph,canvasId,part?.targets]);
+  // Camera cancellation belongs to the currently displayed part. An earlier
+  // pan must not suppress the first visit of every subsequent reply part.
+  useLayoutEffect(() => {
+    if (part && part.seq > 0 && !useAiStore.getState().snapshot?.presentationAutoFocus?.[part.id])
+      setPlayback(canvasId, { cameraFollow: true });
+  }, [canvasId, part?.id]);
   useLayoutEffect(()=>{if(editing){numberInput.current?.focus();numberInput.current?.select();}},[!!editing]);
   useEffect(()=>{edit.current=undefined;setEditing(undefined);},[canvasId,task?.id]);
   const control=(action:string,extra:object={})=>task?command<Task['presentation']>('presentation.control',{taskId:task.id,owner:presentationOwner,action,...extra}).catch(()=>undefined):Promise.resolve(undefined);
@@ -68,7 +75,7 @@ export function NewAiReplyPanel({canvasId='qixue-draft-canvas'}:{canvasId?:strin
     return()=>{current=false;};
   },[canvasId,task?.id,visible,connection,playback?.followRequest,eligible]);
   useEffect(()=>{
-    const update=()=>{setVisible(document.visibilityState==='visible'&&document.hasFocus());setTyping(document.activeElement instanceof Element&&!!document.activeElement.closest('input,textarea,[contenteditable="true"]'));};
+    const update=()=>{setTyping(document.activeElement instanceof Element&&!!document.activeElement.closest('input,textarea,[contenteditable="true"]'));};
     window.addEventListener('focus',update);window.addEventListener('blur',update);document.addEventListener('visibilitychange',update);document.addEventListener('focusin',update);document.addEventListener('focusout',update);
     return()=>{window.removeEventListener('focus',update);window.removeEventListener('blur',update);document.removeEventListener('visibilitychange',update);document.removeEventListener('focusin',update);document.removeEventListener('focusout',update);};
   },[]);
@@ -104,6 +111,7 @@ export function NewAiReplyPanel({canvasId='qixue-draft-canvas'}:{canvasId?:strin
   // Keep playback effects mounted even before the first history segment arrives.
   if (!parts.length) return null;
   return <section className="canvas-reply-panel" aria-label="分段回复" data-ai-reply-panel>
+    {!!part && part.seq > 0 && part.targets.length > 0 && <p data-presentation-reference-count className="canvas-reply-reference-count" style={{ color: '#f6c453', margin: '0 0 6px', fontSize: 12 }}>引用了 {new Set(part.targets).size} 个对象</p>}
     <div className="canvas-reply-history new-scroll" key={part?.id} tabIndex={0} aria-label="本段回复">
       {targetStatus.notice&&<p className="canvas-reply-target-notice" role="status" data-presentation-target-notice>{targetStatus.notice}</p>}
       <div className="ai-column">{displayedRows.map(row=>row.calls

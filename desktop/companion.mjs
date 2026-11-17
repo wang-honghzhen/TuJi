@@ -1,13 +1,14 @@
 import { BrowserWindow, Tray, Menu, ipcMain, screen, dialog } from 'electron';
 import fs from 'node:fs';
 import path from 'node:path';
+import { attachWindowDrag } from './window-controls.mjs';
 
 const CHANNEL = 'tuji:desktop';
 const ORB_SIZE = 280, HALF = ORB_SIZE / 2, RADIUS = 28;
 const clamp = (n, low, high) => Math.max(low, Math.min(n, high));
 
 /** One owner for window visibility and editing. Renderers never open native windows. */
-export function createCompanion({ main, origin, preload, icon, directory, secure, quit, smoke = false }) {
+export function createCompanion({ main, origin, preload, icon, directory, secure, quit }) {
   const settingsPath = path.join(directory, 'desktop-profile', 'companion.json');
   let saved = {};
   try { const value = JSON.parse(fs.readFileSync(settingsPath, 'utf8')); if (value && typeof value === 'object' && !Array.isArray(value)) saved = value; } catch { /* First run or disposable UI cache. */ }
@@ -127,7 +128,8 @@ export function createCompanion({ main, origin, preload, icon, directory, secure
   async function ensurePanel() {
     if (!panel) {
       panel = await makeWindow('panel', { width: state.width, height: 760, minWidth: 360, minHeight: 360,
-        backgroundColor: '#080f1d', alwaysOnTop: true });
+        backgroundColor: '#080f1d', alwaysOnTop: true, maximizable: false });
+      attachWindowDrag(panel, origin, () => state.detached && state.host === 'panel' && !transition);
       panel.on('resize', () => { if (!transition && panel.isVisible()) { state.width = panel.getBounds().width;
         if (state.detached) detachedBounds = panel.getBounds(); publish(); } });
       panel.on('move', () => { if (!transition && state.detached && panel.isVisible()) detachedBounds = panel.getBounds(); });
@@ -150,7 +152,7 @@ export function createCompanion({ main, origin, preload, icon, directory, secure
     await prepare(owner());
     state.background = true; state.host = 'none'; state.detached = false;
     panel?.hide(); main.hide();
-    await ensureOrb(); publish(); if (!smoke) orb.showInactive();
+    await ensureOrb(); publish(); orb.showInactive();
   }
   async function showMain() {
     await prepare(owner());
@@ -164,7 +166,7 @@ export function createCompanion({ main, origin, preload, icon, directory, secure
     state.used = true;
     if (state.background || state.detached) {
       await ensurePanel(); positionPanel(); state.host = 'panel'; orb?.hide(); publish();
-      if (!smoke) { panel.show(); panel.focus(); }
+      panel.show(); panel.focus();
     } else { state.host = 'main'; publish(); }
   }
   async function hidePanel() {
@@ -173,13 +175,13 @@ export function createCompanion({ main, origin, preload, icon, directory, secure
     state.host = 'none'; publish();
     await new Promise(resolve => setTimeout(resolve, 210));
     panel?.hide();
-    if (state.background) { await ensureOrb(); if (!smoke) orb.showInactive(); }
+    if (state.background) { await ensureOrb(); orb.showInactive(); }
   }
   async function toggleDetach() {
     await prepare(owner());
     state.detached = !state.detached;
     if (!state.background && !state.detached) { panel?.hide(); state.host = 'main'; publish(); }
-    else { await ensurePanel(); positionPanel(); state.host = 'panel'; publish(); if (!smoke) { panel.show(); panel.focus(); } }
+    else { await ensurePanel(); positionPanel(); state.host = 'panel'; publish(); panel.show(); panel.focus(); }
   }
   ipcMain.handle(CHANNEL, (event, action, payload = {}) => {
     const { role } = trusted(event);

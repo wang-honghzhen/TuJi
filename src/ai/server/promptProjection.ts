@@ -8,7 +8,7 @@ import { historyReferenceProjection } from './historyReferenceProjection';
 import { publicReadEntries } from './toolVersionProtocol';
 import { promptReceipt } from './promptReceipts';
 
-export const PROMPT_PROJECTION_VERSION = 27;
+export const PROMPT_PROJECTION_VERSION = 28;
 
 /** Projection is draft-only. The caller commits the complete stage with the request. */
 export function projectPromptEntries(state: AppSnapshot, task: Task, stage: ContextStage,
@@ -38,6 +38,13 @@ export function projectPromptEntries(state: AppSnapshot, task: Task, stage: Cont
         row.objectBindings = projection.objectBindings;
         if(row.resultTextPart===undefined)row.content = projection.content;
         row.bindingEvidence = projection.bindingEvidence;
+        if(projection.historicalReadPages?.length){
+          row.historicalReadPages = projection.historicalReadPages;
+          row.readPageInstruction = projection.readPageInstruction;
+        }else{
+          delete row.historicalReadPages;
+          delete row.readPageInstruction;
+        }
       }
     }
     return row;

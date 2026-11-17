@@ -18,6 +18,7 @@ export interface DesktopApi {
   onPrepare(callback: () => Promise<void>): () => void;
   hitTest(interactive: boolean): void;
   drag(phase: 'start' | 'move' | 'end' | 'cancel'): void;
+  dragPanel(phase: 'start' | 'move' | 'end' | 'cancel'): void;
   onOrbPointer(callback: (pointer: { x: number; y: number; visible: boolean }) => void): () => void;
 }
 declare global { interface Window { tujiDesktop?: DesktopApi } }

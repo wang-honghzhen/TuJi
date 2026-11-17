@@ -1,18 +1,11 @@
-.utility-tabs { overflow: hidden; gap: 0; padding-right: 0; }
-.utility-tab-pins { display: flex; flex-shrink: 0; padding-right: 5px; border-right: 1px solid var(--utility-edge); }
-.utility-tab-scroll { display: flex; min-width: 0; flex: 1; gap: 3px; overflow-x: auto; padding: 0 6px; scrollbar-width: thin; scroll-snap-type: x proximity; scroll-padding: 6px; }
-.utility-tab-scroll .utility-tab { scroll-snap-align: start; }
-.utility-tab-scroll::-webkit-scrollbar { height: 3px; }
-.utility-note-tab > button:first-child { max-width: 170px; }
-.utility-note-tab > button:first-child span { overflow: hidden; text-overflow: ellipsis; }
 .note-workspace { --note-ink: #35424a; --note-muted: #7d8789; --note-rule: #dce2de; --note-accent: #407765; background: #fafaf6; color: var(--note-ink); }
 .note-content-view { display: flex; flex-direction: column; flex: 1; min-height: 0; }
 .note-content-view[hidden] { display: none; }
-.note-workspace button, .note-workspace input { font: inherit; }
+.note-workspace button, .note-workspace input, .note-workspace select { font: inherit; }
 .note-workspace button { cursor: pointer; }
 .note-workspace button:disabled { cursor: default; opacity: .4; }
 .note-workspace button:focus-visible, .note-workspace input:focus-visible { outline: 2px solid #4c907c; outline-offset: 2px; }
-.note-workspace input { min-width: 0; color: inherit; }
+.note-workspace input, .note-workspace select { min-width: 0; color: inherit; }
 .note-workspace input::placeholder { color: #8a9394; }
 .note-navigation { display: flex; align-items: center; gap: 8px; min-height: 53px; padding: 9px 14px; border-bottom: 1px solid var(--note-rule); flex-shrink: 0; background: #f6f7f2; }
 .note-library-title { display: flex; align-items: center; gap: 9px; flex: 1; font-size: 13px; font-weight: 600; }
@@ -70,14 +63,12 @@
 .note-page-toolbar { justify-content: space-between; border: 0; min-height: 46px; }
 .note-page-controls, .note-page-actions { display: flex; align-items: center; gap: 2px; }
 .note-page-controls { font-size: 12px; }
-.note-page-context { display: flex; justify-content: space-between; gap: 10px; padding: 0 20px 10px; color: #8b938a; font-size: 10px; overflow-wrap: anywhere; border-bottom: 1px solid #e1e6dc; }
-.note-page-context span { flex-shrink: 0; }
 .note-workspace .utility-paper-scroll { background: #fffefa; }
 .note-workspace .notebook-paper { --paper-color: #fffefa; --paper-line: #b4c3a927; padding: 18px 24px 48px; }
 .note-workspace .note-footer { flex-shrink: 0; padding: 8px 16px; background: #f6f7f1; color: #929b8e; border-top: 1px solid #e1e5db; }
 .note-workspace .note-editor-footer { display: grid; grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr); align-items: center; gap: 8px; padding-block: 4px; min-height: 36px; }
 .note-editor-footer > div { min-width: 0; }
-.note-paste-hint { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.note-page-location { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; }
 .note-global-page { color: #687e62; font-size: 11px; white-space: nowrap; font-variant-numeric: tabular-nums; }
 .note-editor-footer .user-note-edit-status { padding: 0; background: transparent; justify-content: flex-end; }
 .note-editor-footer .user-note-edit-status > span:first-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -101,4 +92,31 @@
 .note-result-heading { display: flex; justify-content: space-between; color: #4b6e51; font-size: 13px; }
 .note-result-path { display: block; margin-top: 5px; color: #8c9787; font-size: 10px; overflow-wrap: anywhere; }
 .note-result-snippet { display: block; margin-top: 9px; color: #697464; font-size: 12px; line-height: 1.7; overflow-wrap: anywhere; }
+.note-dialog.ai-modal { width: min(520px, 100%); background: #fafaf6; color: var(--note-ink); color-scheme: light; border-color: #dce2de; border-radius: 12px; overflow: hidden; box-shadow: 0 14px 42px #28392c30, 0 3px 12px #28392c1a; }
+.note-dialog .ai-modal-heading { padding: 14px 18px; border-color: var(--note-rule); background: #f6f7f2; }
+.note-dialog .ai-modal-heading h2 { font-size: 15px; }
+.note-dialog .ai-icon-button { color: #718079; }
+.note-dialog .ai-modal-content { padding: 14px 18px; }
+.note-dialog .ai-modal-footer { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; padding: 10px 14px; border-top: 1px solid var(--note-rule); background: #f6f7f2; }
+.note-dialog .ai-modal-footer > span { flex: 1; }
+.note-dialog-path { display: flex; align-items: center; flex-wrap: wrap; gap: 5px; font-size: 12px; color: #517765; }
+.note-dialog-path > span { display: inline-flex; align-items: center; gap: 5px; min-width: 0; }
+.note-dialog-path button { overflow-wrap: anywhere; text-align: left; }
+.note-dialog-path button:hover { color: #2d5945; text-decoration: underline; }
+.note-dialog-folders { margin: 12px 0; max-height: 280px; overflow-y: auto; }
+.note-dialog-folder { display: flex; align-items: center; gap: 10px; padding: 12px 9px; width: 100%; border-bottom: 1px solid #e3e8df; text-align: left; }
+.note-dialog-folder > svg { flex-shrink: 0; color: #83936c; }
+.note-dialog-folder > span { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.note-dialog-folder:hover { background: #edf3ed; }
+.note-dialog-hint { font-size: 12px; color: #7d8789; line-height: 1.7; }
+.note-dialog-create { display: flex; align-items: center; gap: 7px; margin-top: 10px; }
+.note-dialog-create input, .note-reorder-controls input, .note-reorder-controls select { border: 1px solid #bdcdbc; border-radius: 6px; padding: 7px 9px; background: #fffefa; }
+.note-dialog-create input { flex: 1; min-width: 0; }
+.note-transfer-choice { padding: 8px 2px; overflow-wrap: anywhere; }
+.note-transfer-choice > svg { color: #668373; }
+.note-transfer-choice p { margin-top: 12px; }
+.note-reorder-controls { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; margin: 16px 0 12px; }
+.note-reorder-controls input { width: 70px; text-align: center; }
+.note-reorder-preview { margin-top: 12px; padding: 10px; background: #edf3ed; border-radius: 6px; overflow-wrap: anywhere; max-height: 110px; overflow-y: auto; }
+.note-dialog [role=alert] { font-size: 12px; color: #a35648; margin-bottom: 10px; }
 @media (max-width: 480px) { .note-navigation { padding-inline: 10px; } .note-workspace .notebook-paper { padding-inline: 17px; } .note-page-toolbar { padding-inline: 7px !important; } .note-page-controls { gap: 0; } .note-page-actions { gap: 0; } .note-page-actions .note-text-button { padding-inline: 4px; } }

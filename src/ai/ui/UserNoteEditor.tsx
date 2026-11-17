@@ -1,10 +1,12 @@
 import { forwardRef, useEffect, useImperativeHandle, useLayoutEffect, useRef, useState, type ClipboardEvent, type PointerEvent, type CSSProperties } from 'react';
 import { createPortal } from 'react-dom';
-import { ArrowUpToLine, Check, Crop, Loader2, Redo2, RotateCcw, Trash2, Undo2, X } from 'lucide-react';
+import { ArrowUpToLine, Check, Copy, Crop, Expand, Loader2, Redo2, RotateCcw, Scissors, Trash2, Undo2, X } from 'lucide-react';
 import type { UserNotePage } from '../domain';
 import { userNoteBlocks, type UserNoteBlock, type UserNoteCrop, type UserNoteImage } from '../userNotes';
 import { PaperContextMenu } from './PaperEditor';
 import { blankCrop, deleteNoteImage, fitNoteImage, insertNoteImages, noteRegionLayout } from './userNoteLayout';
+import { copyOrCutNoteImage } from './userNoteImageActions';
+import { UserNoteImageMenu, UserNoteImagePreview, type NoteImageAction } from './UserNoteImageTools';
 import './user-note-editor.css';
 
 export interface UserNoteEditorHandle { flush(): Promise<void> }
@@ -112,19 +114,24 @@ function CropDialog({ image, onApply, onClose }: { image: UserNoteImage; onApply
   </div>, document.body);
 }
 
-function ImageRegion({ block, selected, locked, onSelect, onPatch, onStart, onEnd, onCrop, onRemove, onRaise }: {
+function ImageRegion({ block, selected, locked, onSelect, onPatch, onStart, onEnd, onCrop, onRemove, onRaise, onAction, onMenu }: {
   block: Extract<UserNoteBlock, { type: 'images' }>; selected?: string; locked: boolean;
   onSelect: (id: string) => void; onPatch: (id: string, update: Partial<UserNoteImage>, gesture?: boolean) => void;
   onStart: () => void; onEnd: () => void; onCrop: (image: UserNoteImage) => void; onRemove: (id: string) => void; onRaise: (id: string) => void;
+  onAction: (action: NoteImageAction, image: UserNoteImage) => void;
+  onMenu: (image: UserNoteImage, x: number, y: number) => void;
 }) {
   const root = useRef<HTMLDivElement>(null), [available, setAvailable] = useState(420);
-  const gesture = useRef<{ image: UserNoteImage; x: number; y: number; kind: string; scale: number; width: number }>();
+  const gesture = useRef<{ image: UserNoteImage; x: number; y: number; kind: string; scale: number; width: number; started: boolean }>();
   useLayoutEffect(() => { const observer = new ResizeObserver(() => { const width = root.current!.clientWidth; if (width > 0) setAvailable(width); }); observer.observe(root.current!); return () => observer.disconnect(); }, []);
   const layout = noteRegionLayout(block.images, available), image = block.images.find(item => item.id === selected);
   return <div ref={root} data-note-image-region={block.id} className="user-note-image-region" data-selected={!!image} tabIndex={0} aria-label="图片区域，可继续粘贴图片" style={{ height: Math.max(64, layout.height * layout.scale) }}
     onKeyDown={event => {
-      if (!image || locked || (event.target as HTMLElement).tagName === 'INPUT') return;
-      if (event.key === 'Delete' || event.key === 'Backspace') { event.preventDefault(); onRemove(image.id); }
+      if (!image || (event.target as HTMLElement).closest('input, textarea, [contenteditable="true"]')) return;
+      if ((event.ctrlKey || event.metaKey) && ['c', 'x'].includes(event.key.toLowerCase())) { event.preventDefault(); event.stopPropagation(); if (!locked) onAction(event.key.toLowerCase() === 'x' ? 'cut' : 'copy', image); return; }
+      if (event.key === 'Enter' && event.target === event.currentTarget) { event.preventDefault(); onAction('view', image); return; }
+      if (locked) return;
+      if (event.key === 'Delete' || event.key === 'Backspace') { event.preventDefault(); event.stopPropagation(); onRemove(image.id); }
       if (event.key === 'Escape') onSelect('');
       const offset = event.shiftKey ? 10 : 1;
       if (['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'].includes(event.key)) { event.preventDefault(); onPatch(image.id, fitNoteImage({ ...image, x: image.x + (event.key === 'ArrowLeft' ? -offset : event.key === 'ArrowRight' ? offset : 0), y: image.y + (event.key === 'ArrowUp' ? -offset : event.key === 'ArrowDown' ? offset : 0) }, layout.width)); }
@@ -134,43 +141,52 @@ function ImageRegion({ block, selected, locked, onSelect, onPatch, onStart, onEn
       {block.images.map(item => {
         const crop = item.crop ?? blankCrop;
         return <div key={item.id} data-note-image={item.id} className="user-note-image" data-selected={selected === item.id} style={{ left: item.x, top: item.y, width: item.width, height: item.height, transform: 'rotate(' + item.rotation + 'deg)' } as CSSProperties}
-          onContextMenu={event => { event.preventDefault(); event.stopPropagation(); onSelect(item.id); }}
+          onContextMenu={event => { event.preventDefault(); event.stopPropagation(); onSelect(item.id); root.current?.focus({ preventScroll: true }); onMenu(item, event.clientX, event.clientY); }}
+          onDoubleClick={event => { event.preventDefault(); event.stopPropagation(); onAction('view', item); }}
           onPointerDown={event => {
-            if (event.button !== 0 || locked) return; event.preventDefault(); event.stopPropagation(); onSelect(item.id); root.current?.focus(); onStart();
-            gesture.current = { image: item, x: event.clientX, y: event.clientY, kind: (event.target as HTMLElement).dataset.resize ?? 'move', scale: layout.scale, width: layout.width };
+            if (event.button !== 0 || locked) return; event.preventDefault(); event.stopPropagation(); onSelect(item.id); root.current?.focus({ preventScroll: true });
+            gesture.current = { image: item, x: event.clientX, y: event.clientY, kind: (event.target as HTMLElement).dataset.resize ?? 'move', scale: layout.scale, width: layout.width, started: false };
             event.currentTarget.setPointerCapture(event.pointerId);
           }} onPointerMove={event => {
             const g = gesture.current; if (!g || g.image.id !== item.id) return; const dx = (event.clientX - g.x) / g.scale, dy = (event.clientY - g.y) / g.scale;
+            if (!g.started) { if (Math.hypot(event.clientX - g.x, event.clientY - g.y) < 3) return; g.started = true; onStart(); }
             let next = { ...g.image };
             if (g.kind === 'move') { next.x += dx; next.y += dy; }
             else { const angle = -g.image.rotation * Math.PI / 180; const localX = dx * Math.cos(angle) - dy * Math.sin(angle); const ratio = Math.max(24 / g.image.width, (g.image.width + localX) / g.image.width); next.width *= ratio; next.height *= ratio; }
             onPatch(item.id, fitNoteImage(next, g.width), true);
-          }} onPointerUp={event => { if (!gesture.current) return; gesture.current = undefined; onEnd(); if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId); }}
-          onPointerCancel={() => { gesture.current = undefined; onEnd(); }}>
+          }} onPointerUp={event => { if (!gesture.current) return; const changed = gesture.current.started; gesture.current = undefined; if (changed) onEnd(); if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId); }}
+          onPointerCancel={() => { const changed = gesture.current?.started; gesture.current = undefined; if (changed) onEnd(); }}>
           <div className="user-note-image-clip"><img src={item.src} draggable={false} alt="笔记插图" style={{ width: 100 / (1 - crop.left - crop.right) + '%', height: 100 / (1 - crop.top - crop.bottom) + '%', left: -100 * crop.left / (1 - crop.left - crop.right) + '%', top: -100 * crop.top / (1 - crop.top - crop.bottom) + '%' }} /></div>
           {selected === item.id && <span data-resize="se" className="user-note-image-resize" title="拖动调整图片大小" />}
         </div>;
       })}
     </div>
     {image && <div className="user-note-image-tools" role="toolbar" aria-label="图片编辑" onPointerDown={event => event.stopPropagation()}>
-      <button type="button" onClick={() => onCrop(image)} title="裁剪图片" aria-label="裁剪图片"><Crop size={14} /><span>裁剪</span></button>
-      <button type="button" onClick={() => onPatch(image.id, fitNoteImage({ ...image, rotation: (image.rotation - 90) % 360 }, layout.width))} title="逆时针旋转 90°" aria-label="逆时针旋转 90 度"><RotateCcw size={14} /></button>
-      <label title="旋转角度"><input aria-label="图片旋转角度" type="number" step={1} value={Math.round(image.rotation)} onChange={event => onPatch(image.id, fitNoteImage({ ...image, rotation: Number(event.target.value) % 360 }, layout.width))} /><span>°</span></label>
+      <button type="button" onClick={() => onAction('view', image)} title="查看图片（也可双击图片）" aria-label="查看图片"><Expand size={14} /><span>查看</span></button>
+      <button type="button" disabled={locked} onClick={() => onAction('copy', image)} title="复制图片 Ctrl+C" aria-label="复制图片"><Copy size={14} /></button>
+      <button type="button" disabled={locked} onClick={() => onAction('cut', image)} title="剪切图片 Ctrl+X" aria-label="剪切图片"><Scissors size={14} /></button>
+      <button type="button" disabled={locked} onClick={() => onCrop(image)} title="裁剪图片" aria-label="裁剪图片"><Crop size={14} /><span>裁剪</span></button>
+      <button type="button" disabled={locked} onClick={() => onPatch(image.id, fitNoteImage({ ...image, rotation: (image.rotation - 90) % 360 }, layout.width))} title="逆时针旋转 90°" aria-label="逆时针旋转 90 度"><RotateCcw size={14} /></button>
+      <label title="旋转角度"><input disabled={locked} aria-label="图片旋转角度" type="number" step={1} value={Math.round(image.rotation)} onChange={event => onPatch(image.id, fitNoteImage({ ...image, rotation: Number(event.target.value) % 360 }, layout.width))} /><span>°</span></label>
       <span className="note-tool-divider" />
-      <button type="button" onClick={() => onRaise(image.id)} title="移到最上层" aria-label="图片移到最上层"><ArrowUpToLine size={14} /></button>
-      <button type="button" onClick={() => onRemove(image.id)} title="删除图片" aria-label="删除图片" className="note-image-delete"><Trash2 size={14} /></button>
+      <button type="button" disabled={locked} onClick={() => onRaise(image.id)} title="移到最上层" aria-label="图片移到最上层"><ArrowUpToLine size={14} /></button>
+      <button type="button" disabled={locked} onClick={() => onRemove(image.id)} title="删除图片" aria-label="删除图片" className="note-image-delete"><Trash2 size={14} /></button>
     </div>}
-    {!image && <span className="user-note-image-hint">点击图片编辑 · 可在此继续粘贴</span>}
+    {!image && <span className="user-note-image-hint">单击编辑 · 双击查看 · 右键操作</span>}
   </div>;
 }
 
 export const UserNoteEditor = forwardRef<UserNoteEditorHandle, Props>(function UserNoteEditor(props, ref) {
   const [blocks, setBlocks] = useState(() => userNoteBlocks(props.page)), [selected, setSelected] = useState<{ blockId: string; imageId: string }>();
   const [cropTarget, setCropTarget] = useState<{ blockId: string; image: UserNoteImage }>(), [error, setError] = useState('');
+  const [previewImage, setPreviewImage] = useState<UserNoteImage>();
+  const [imageMenu, setImageMenu] = useState<{ blockId: string; image: UserNoteImage; x: number; y: number }>();
+  const [imageBusy, setImageBusy] = useState(false), [imageMessage, setImageMessage] = useState<{ text: string; error?: boolean }>();
   const [status, setStatus] = useState<'saved' | 'editing' | 'saving'>('saved'), [uploading, setUploading] = useState(false);
   const [menu, setMenu] = useState<{ x: number; y: number }>(), [, renderHistory] = useState(0);
   const root = useRef<HTMLDivElement>(null), options = useRef(props); options.current = props;
   const current = useRef(blocks), saved = useRef({ blocks, version: props.page.version }), pending = useRef<Promise<void>>(), importing = useRef<Promise<void>>();
+  const imageOperation = useRef<Promise<void>>();
   const timer = useRef<ReturnType<typeof setTimeout>>(), composing = useRef(false), token = useRef(Symbol()), mounted = useRef(true);
   const history = useRef<{ past: UserNoteBlock[][]; future: UserNoteBlock[][]; group: string; at: number }>({ past: [], future: [], group: '', at: 0 });
   const flushRef = useRef<() => Promise<void>>(async () => {});
@@ -183,6 +199,7 @@ export const UserNoteEditor = forwardRef<UserNoteEditorHandle, Props>(function U
   const change = (next: UserNoteBlock[], group = '', record = true) => { if (same(next, current.current)) return; if (record) remember(group); current.current = next; setBlocks(next); setStatus('editing'); setError(''); schedule(); };
   const flush = (): Promise<void> => {
     clearTimeout(timer.current);
+    if (imageOperation.current) return imageOperation.current.then(() => flushRef.current());
     if (importing.current) return importing.current.then(() => flushRef.current());
     if (pending.current) return pending.current;
     if (same(current.current, saved.current.blocks) || composing.current) return Promise.resolve();
@@ -207,14 +224,32 @@ export const UserNoteEditor = forwardRef<UserNoteEditorHandle, Props>(function U
     history.current = { past: [], future: [], group: '', at: 0 };
   }, [props.page.version, props.page.blocks, props.page.text]);
   const undo = (redo = false) => {
-    if (uploading) return; const h = history.current, source = redo ? h.future : h.past, target = redo ? h.past : h.future, next = source.pop();
+    if (uploading || imageOperation.current) return; const h = history.current, source = redo ? h.future : h.past, target = redo ? h.past : h.future, next = source.pop();
     if (!next) return; target.push(structuredClone(current.current)); h.group = ''; change(next, '', false); setSelected(undefined); renderHistory(value => value + 1);
+  };
+  const removeImage = (blockId: string, imageId: string) => { change(deleteNoteImage(current.current, blockId, imageId)); setSelected(undefined); };
+  const imageAction = (blockId: string, image: UserNoteImage, action: NoteImageAction) => {
+    setImageMenu(undefined);
+    if (action === 'view') { setPreviewImage(structuredClone(image)); return; }
+    if (uploading || imageOperation.current) return;
+    if (action === 'delete') { removeImage(blockId, image.id); return; }
+    setImageBusy(true); setImageMessage(undefined);
+    const source = structuredClone(image);
+    imageOperation.current = copyOrCutNoteImage(source, action === 'cut' ? () => {
+      if (!mounted.current) return;
+      const block = current.current.find(block => block.id === blockId), latest = block?.type === 'images' ? block.images.find(item => item.id === image.id) : undefined;
+      if (!latest) return;
+      if (JSON.stringify(latest) !== JSON.stringify(source)) throw new Error('图片在复制期间已更改；已复制，未移除原图片');
+      removeImage(blockId, image.id);
+    } : undefined).then(() => { if (mounted.current) setImageMessage({ text: action === 'cut' ? '图片已剪切，可粘贴到其他位置' : '图片已复制，可粘贴到其他位置' }); })
+      .catch(cause => { if (mounted.current) setImageMessage({ text: cause instanceof Error ? cause.message : '图片复制失败，原图片已保留', error: true }); })
+      .finally(() => { imageOperation.current = undefined; if (mounted.current) setImageBusy(false); });
   };
   const patchImage = (blockId: string, imageId: string, update: Partial<UserNoteImage>, gesture = false) => change(current.current.map(block => block.id === blockId && block.type === 'images' ? { ...block, images: block.images.map(image => image.id === imageId ? { ...image, ...update } : image) } : block), '', !gesture);
   const paste = (event: ClipboardEvent<HTMLDivElement>) => {
     const files = [...event.clipboardData.items].filter(item => item.kind === 'file' && item.type.startsWith('image/')).map(item => item.getAsFile()).filter((file): file is File => !!file);
     if (!files.length) return;
-    event.preventDefault(); if (importing.current) return;
+    event.preventDefault(); if (importing.current || imageOperation.current) return;
     const target = event.target as HTMLElement, input = target instanceof HTMLTextAreaElement ? target : undefined;
     const blockId = input?.dataset.noteBlock ?? target.closest<HTMLElement>('[data-note-image-region]')?.dataset.noteImageRegion ?? selected?.blockId ?? current.current.at(-1)!.id;
     const selection = input ? { start: input.selectionStart, end: input.selectionEnd } : undefined;
@@ -235,8 +270,8 @@ export const UserNoteEditor = forwardRef<UserNoteEditorHandle, Props>(function U
     void importing.current.catch(() => undefined);
   };
   const toolbar = <div className="user-note-edit-status"><span role="status">{status === 'saving' ? '正在保存…' : status === 'editing' ? '编辑中' : '已保存'}</span><span />
-    <button type="button" disabled={!history.current.past.length || uploading} onClick={() => undo()} title="撤销 Ctrl+Z" aria-label="撤销笔记编辑"><Undo2 size={14} /></button>
-    <button type="button" disabled={!history.current.future.length || uploading} onClick={() => undo(true)} title="重做 Ctrl+Shift+Z" aria-label="重做笔记编辑"><Redo2 size={14} /></button>
+    <button type="button" disabled={!history.current.past.length || uploading || imageBusy} onClick={() => undo()} title="撤销 Ctrl+Z" aria-label="撤销笔记编辑"><Undo2 size={14} /></button>
+    <button type="button" disabled={!history.current.future.length || uploading || imageBusy} onClick={() => undo(true)} title="重做 Ctrl+Shift+Z" aria-label="重做笔记编辑"><Redo2 size={14} /></button>
   </div>;
   return <div ref={root} className="user-note-editor" data-note-editor data-saving={status === 'saving' || undefined} aria-busy={uploading}
     onPaste={paste} onBlur={event => { if (!event.currentTarget.contains(event.relatedTarget as Node) && !cropTarget) void flush().catch(() => undefined); }}
@@ -251,16 +286,21 @@ export const UserNoteEditor = forwardRef<UserNoteEditorHandle, Props>(function U
       scrollToMatch={!!props.highlight?.trim() && blocks.findIndex(item => item.type === 'text' && item.text.toLocaleLowerCase().includes(props.highlight!.trim().toLocaleLowerCase())) === index}
       onFocus={() => setSelected(undefined)} onComposition={value => { composing.current = value; if (value) clearTimeout(timer.current); else schedule(); }}
       onChange={value => change(current.current.map(item => item.id === block.id && item.type === 'text' ? { ...item, text: value } : item), 'text:' + block.id)} />
-      : <ImageRegion key={block.id} block={block} locked={uploading} selected={selected?.blockId === block.id ? selected.imageId : undefined}
+      : <ImageRegion key={block.id} block={block} locked={uploading || imageBusy} selected={selected?.blockId === block.id ? selected.imageId : undefined}
         onSelect={imageId => setSelected(imageId ? { blockId: block.id, imageId } : undefined)}
         onPatch={(imageId, update, gesture) => patchImage(block.id, imageId, update, gesture)}
         onStart={() => { clearTimeout(timer.current); remember(); }} onEnd={schedule}
         onCrop={image => setCropTarget({ blockId: block.id, image })}
-        onRemove={imageId => { change(deleteNoteImage(current.current, block.id, imageId)); setSelected(undefined); }}
+        onRemove={imageId => removeImage(block.id, imageId)}
+        onAction={(action, image) => imageAction(block.id, image, action)}
+        onMenu={(image, x, y) => { setMenu(undefined); setImageMenu({ blockId: block.id, image, x, y }); }}
         onRaise={imageId => change(current.current.map(item => item.id === block.id && item.type === 'images' ? { ...item, images: [...item.images.filter(image => image.id !== imageId), ...item.images.filter(image => image.id === imageId)] } : item))} />)}
     {props.toolbarTarget ? createPortal(toolbar, props.toolbarTarget) : toolbar}
+    {imageMessage && <div className="user-note-image-message" data-error={imageMessage.error} role={imageMessage.error ? 'alert' : 'status'}><span>{imageMessage.text}</span><button type="button" onClick={() => setImageMessage(undefined)} aria-label="关闭图片操作提示"><X size={13} /></button></div>}
     {error && <div className="user-note-error" role="alert"><span>{error}</span><button type="button" onClick={() => void flush().catch(() => undefined)}>重试保存</button></div>}
     {menu && <PaperContextMenu {...menu} label="删除当前笔记页" onClose={() => setMenu(undefined)} onDelete={() => { setMenu(undefined); void props.onDelete?.().catch(cause => setError(String(cause))); }} />}
+    {imageMenu && <UserNoteImageMenu {...imageMenu} busy={uploading || imageBusy} onClose={() => setImageMenu(undefined)} onAction={action => imageAction(imageMenu.blockId, imageMenu.image, action)} />}
+    {previewImage && <UserNoteImagePreview image={previewImage} onClose={() => setPreviewImage(undefined)} />}
     {cropTarget && <CropDialog image={cropTarget.image} onClose={() => setCropTarget(undefined)} onApply={crop => {
       const old = cropTarget.image.crop ?? blankCrop;
       patchImage(cropTarget.blockId, cropTarget.image.id, fitNoteImage({ ...cropTarget.image, crop, width: cropTarget.image.width * (1 - crop.left - crop.right) / (1 - old.left - old.right), height: cropTarget.image.height * (1 - crop.top - crop.bottom) / (1 - old.top - old.bottom) }, Math.max(root.current!.clientWidth, cropTarget.image.width)));

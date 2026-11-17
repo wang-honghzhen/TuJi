@@ -20,16 +20,23 @@ export interface NoticeState {
 }
 export const noticeThreshold=(capacity:number)=>Math.max(1,Math.min(Math.floor(capacity*AUTO_CONTEXT.noticeShare),AUTO_CONTEXT.noticeMaxTokens));
 
+/** Caller-owned results for one synchronous candidate only; never persist or reuse
+ * across graph edits, retention changes, awaits, or separate prompt builds. */
+interface ResolvedNoticeEvidence {
+  canvasPending:ReturnType<typeof pendingCanvasChanges>;
+  summaryEvidence:ReturnType<typeof summarySourceEvidence>;
+}
+
 /** Private identities/versions, never parsed back from the abbreviated model-facing lines. */
-export function captureNoticeState(state:AppSnapshot,task:Task,stage:ContextStage,tokens:number,encode:(id:string)=>string=id=>id,requestSize?:number,readContext?:GraphReadContext):NoticeState {
+export function captureNoticeState(state:AppSnapshot,task:Task,stage:ContextStage,tokens:number,encode:(id:string)=>string=id=>id,requestSize?:number,readContext?:GraphReadContext,resolved?:ResolvedNoticeEvidence):NoticeState {
   readContext??=state.graph?graphReadContext(state):undefined;
   const facts:NoticeFact[]=[];
-  for(const [key,{change,observations,observation}] of pendingCanvasChanges(state,task,stage,readContext))facts.push({key:`canvas:${key}`,
+  for(const [key,{change,observations,observation}] of (resolved?.canvasPending??pendingCanvasChanges(state,task,stage,readContext)))facts.push({key:`canvas:${key}`,
     version:digest(change),callIds:[...new Set(observations.flatMap(o=>o.callId?[o.callId]:[]))].sort(),
     ...canvasNoticeLabels(state,task,change,observation,encode,readContext),nonCallSource:observations.some(o=>!o.callId)});
   for(const fact of noteNoticeFacts(state,task,stage))facts.push({key:fact.key,version:digest(fact.state),callIds:fact.callIds,
     ...noteNoticeLabels(fact,encode),nonCallSource:!fact.callIds.length});
-  for(const fact of summarySourceEvidence(state,task,stage,visibleCanvasEvidence(state,task,stage),encode).facts)
+  for(const fact of (resolved?.summaryEvidence??summarySourceEvidence(state,task,stage,visibleCanvasEvidence(state,task,stage),encode)).facts)
     facts.push({...fact,version:digest(fact.state),nonCallSource:true});
   const noteNotices=contextNoteNoticeIds(state,task.workspaceId);
   const timelineNotices=stage.entries.filter(e=>e.representation!=='receipt'&&e.contextUpdate?.kind!=='note'&&!noteNotices.has(e.noticeId??'')

@@ -9,14 +9,16 @@ import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import type { AppSnapshot,Artifact,ContextManifest,ProtocolMessage,ProviderConfig,SendInput,Task } from '../domain';
 import { effectiveArtifacts } from '../memory';
+import { normalizeInputTargets } from './inputTargetGroups';
 import { selectedProgressPayload, normalizeProgressSelection,registerSessionTask } from '../sessionContext';
 import { defaultTaskBudget } from '../taskBudget';
-import { isDesktopTemporary, isMinimalSession, touchTemporary } from '../temporaryModes';
+import { isMinimalSession, touchTemporary } from '../temporaryModes';
 import { ApiConfiguration } from './apiConfiguration';
 import { parseArtifact,type ParseArtifactOptions } from './artifacts';
 import { attachmentLimits, attachmentBatchError } from '../attachments';
 import { BackgroundAssets, MAX_BACKGROUND_BYTES } from './backgroundAssets';
-import { protectReviewWrites } from './changeReview';
+import { exportDocumentPackage, importDocumentPackage } from './documentPackages';
+import { claimPresentationAutoFocus } from './presentationAutoFocus';
 import { DomainError,requireValue,strings,text } from './errors';
 import { compactEdges,compactCanvasPresentation,memberIds,normalizedGraph } from './graph';
 import { validateProviderConfig,type ProviderConfig as TransportProviderConfig } from './providers';
@@ -35,13 +37,9 @@ export interface CredentialStorage {
 export interface ApplicationOptions { artifactDirectory: string; credentialStorage?: CredentialStorage;
   apiConfiguration?: ApiConfiguration;
   ocr?: ParseArtifactOptions['ocr']; }
-/** An export is the canvas data only: the graph, nothing about AI sessions or attachments. */
-interface GraphBackup { format: string; exportedAt: string; graph: GraphState; checksum: string }
 interface UploadJob { id: string; workspaceId: string; sourceHash: string; controller: AbortController; promise: Promise<Artifact> }
 const shaPattern = /^[a-f0-9]{64}$/;
 const maximumFileBytes = 50 * 1024 * 1024;
-// The command HTTP transport accepts 128 MiB, including its action envelope.
-const maximumBackupJsonBytes = 120 * 1024 * 1024;
 const active = (task: Task) => task.status!=='completed';
 const object = (value: unknown): value is Record<string, unknown> => Boolean(value && typeof value === 'object' && !Array.isArray(value));
 const payloadObject = (value: unknown): Record<string, unknown> => { requireValue(object(value), '操作参数必须是对象'); return value; };
@@ -136,6 +134,10 @@ export class Application {
         await this.cleanupExpiredTemporary();
         return this.sessions.createDesktopTemporary();
       }
+      case 'temporary.createGlobal': {
+        await this.cleanupExpiredTemporary();
+        return this.sessions.createGlobalTemporary();
+      }
       case 'session.update': return this.sessions.update(payload as unknown as Parameters<SessionService['update']>[0]);
       case 'chat.bookmark': return this.sessions.bookmarkTurn(payload as unknown as Parameters<SessionService['bookmarkTurn']>[0]);
       case 'temporary.close': {
@@ -157,7 +159,7 @@ export class Application {
       case 'note.requirements': return this.sessions.replaceRequirements(payload as unknown as Parameters<SessionService['replaceRequirements']>[0]);
       case 'userNote.image.upload': return this.userNoteImages.upload(payload.dataUrl);
       case 'userNote.ensure': case 'userNote.create': case 'userNote.save': case 'userNote.delete':
-      case 'userNote.assign': case 'userNote.directory.create': case 'userNote.directory.delete':
+      case 'userNote.assign': case 'userNote.transfer': case 'userNote.reorder': case 'userNote.directory.create': case 'userNote.directory.delete':
         return userNotebookCommand(this.repo, action, payload);
       case 'note.edit': return this.sessions.noteEdit(payload as unknown as Parameters<SessionService['noteEdit']>[0]);
       case 'note.delete': this.sessions.noteDelete(payload as unknown as Parameters<SessionService['noteDelete']>[0]); return { ok: true };
@@ -213,8 +215,18 @@ export class Application {
       case 'settings.save': {
         const result = this.settingsChain.then(() => this.saveSettings(payload)); this.settingsChain = result.catch(() => undefined); return result;
       }
-      case 'backup.export': return this.exportBackup();
-      case 'backup.import': return this.importBackup(payload.backup ?? payload);
+      case 'document.export': {
+        requireValue(this.repo.state.graph, '尚无图文档可导出', 'NOT_READY');
+        return exportDocumentPackage(this.repo.state.graph, text(payload.documentId, '图文档 ID', 1000));
+      }
+      case 'document.import': return this.repo.transaction(state => {
+        requireValue(state.graph, '图文档库尚未就绪', 'NOT_READY');
+        const { graph, ...result } = importDocumentPackage(state.graph, payload.package);
+        state.graph = graph; state.graphRevision++;
+        this.repo.event('system', 'document.imported', { ...result, graphRevision: state.graphRevision });
+        return { ok: true, ...result };
+      });
+      case 'presentation.claimAutoFocus': return claimPresentationAutoFocus(this.repo, payload);
       case 'graph.migrate': return this.migrate(payload);
       case 'graph.mutate': return this.runtime.mutateGraph(payload as unknown as Parameters<Runtime['mutateGraph']>[0]);
       case 'graph.layout.preview': return this.runtime.previewLayout(text(payload.canvasId, '画布'), text(payload.regionId, '目录'));
@@ -329,7 +341,8 @@ export class Application {
     const body = text(payload.text ?? '', '草稿消息', 5000000).trim();
     const intent = payload.intent ?? 'new'; requireValue(['new', 'amend'].includes(intent as string), '预览发送意图无效');
     const members = isMinimalSession(session) ? new Set<string>() : memberIds(state.graph!, session.canvasId);
-    const targets = isMinimalSession(session)?[]:strings(payload.targetIds ?? [], '目标').filter(ref => members.has(ref)), artifacts = strings(payload.artifactIds ?? [], '附件');
+    const { targetIds: targets, targetGroups } = normalizeInputTargets(isMinimalSession(session) ? { targetIds: [] } : payload, members);
+    const artifacts = strings(payload.artifactIds ?? [], '附件');
     const versions: Record<string, number> = {};
     for (const ref of artifacts) {
       const artifact = state.artifacts.find(value => value.id === ref && value.workspaceId === session.workspaceId && value.status !== 'deleted');
@@ -357,7 +370,7 @@ export class Application {
       const draftRequestId = payload.clientMessageId === undefined ? '00000000-0000-4000-8000-000000000000' : text(payload.clientMessageId, '草稿请求 ID', 200);
       task = { id: 'task:00000000-0000-4000-8000-000000000000', sessionId: session.id, workspaceId: session.workspaceId, canvasId: session.canvasId,
         rootUserMessageId: `user:${session.id}:${draftRequestId}`, clientRequestId: draftRequestId, instructionRevision: 1, appliedInstructionRevision: 0,
-        status: 'queued', createdAt: now(), updatedAt: now(), inputBindings: { targetIds: targets, artifactIds: artifacts,
+        status: 'queued', createdAt: now(), updatedAt: now(), inputBindings: { targetIds: targets, targetGroups: targetGroups ? structuredClone(targetGroups) : undefined, artifactIds: artifacts,
           artifactVersions: versions },
         readHashes: {},
         ...defaultTaskBudget(state.provider), usedTokens: 0, stepCount: 0, fencingToken: 0,
@@ -369,7 +382,7 @@ export class Application {
     }
     const draftMessageId = amended ? `user:${session.id}:${payload.clientMessageId ?? '00000000-0000-4000-8000-000000000000'}` : task.rootUserMessageId;
     state.messages.push({ id: draftMessageId, workspaceId: session.workspaceId, taskId: task.id,
-      role: 'user', text: body, version: 1, status: 'complete', phase: amended ? 'amendment' : 'request', createdAt: now(), relatedOperationIds: [], targetRefs: targets,
+      role: 'user', text: body, version: 1, status: 'complete', phase: amended ? 'amendment' : 'request', createdAt: now(), relatedOperationIds: [], targetRefs: targets, targetGroups,
       sourceRefs: artifacts.map(ref => ({ kind: 'artifact' as const, id: ref, version: versions[ref] })), instructionRevision: task.instructionRevision });
     state.messages.at(-1)!.partSeq=amended?(state.presentationParts?.filter(p=>p.taskId===task.id&&p.seq>0).at(-1)?.seq??1):0;
     state.messages.at(-1)!.attachments = artifacts.map(ref => ({ kind: 'artifact' as const, id: ref, version: versions[ref] }));
@@ -521,40 +534,6 @@ export class Application {
     return { ok: true, graphRevision: this.repo.state.graphRevision, backup };
   }
 
-  private async exportBackup(): Promise<GraphBackup> {
-    const graph = this.repo.state.graph; requireValue(graph, '尚无画布数据可导出', 'NOT_READY');
-    const material = { graph };
-    const backup: GraphBackup = { format: 'qixue-graph-backup-v1', exportedAt: now(), graph, checksum: hash(material) };
-    requireValue(Buffer.byteLength(JSON.stringify(backup)) <= maximumBackupJsonBytes, '画布数据超过 120 MiB，未生成备份', 'BACKUP_TOO_LARGE');
-    return backup;
-  }
-  private async importBackup(value: unknown) {
-    requireValue(!this.jobs.size && !this.repo.state.tasks.some(active), '请先完成当前任务并停止资料解析，再导入画布数据', 'APPLICATION_BUSY');
-    requireValue(object(value) && value.format === 'qixue-graph-backup-v1' && object(value.graph), '备份格式无效');
-    requireValue(Buffer.byteLength(JSON.stringify(value)) <= maximumBackupJsonBytes, '画布数据超过 120 MiB，未导入', 'BACKUP_TOO_LARGE');
-    const backup = value as unknown as GraphBackup;
-    requireValue(hash({ graph: backup.graph }) === backup.checksum, '备份校验失败，未导入', 'CHECKSUM_MISMATCH');
-    const graph = normalizedGraph(structuredClone(backup.graph));
-    for (const session of this.repo.state.sessions) {
-      const canvas = graph.canvases.find(canvas => canvas.canvasId === session.canvasId);
-      requireValue(!canvas || session.lifecycle === 'deleted' || session.mode === 'temporary' || session.mode === (canvas.mode ?? 'explore'), '导入画布的模式与已有会话不一致，不能替换现有画布');
-    }
-    this.maintenance = true;
-    try {
-      this.repo.transaction(state => {
-        requireValue(!state.tasks.some(active), '导入期间出现活动任务，未覆盖现有数据', 'APPLICATION_BUSY');
-        if (state.graph) protectReviewWrites(state, state.graph, graph);
-        state.graph = graph; state.graphRevision++;
-        // Sessions live only as long as their canvas, and every cached projection is rebuilt.
-        for (const session of state.sessions) if (!isDesktopTemporary(session) && !graph.canvases.some(canvas => canvas.canvasId === session.canvasId) && session.lifecycle === 'active') session.lifecycle = 'archived';
-        for (const canvasId of Object.keys(state.canvasGraphReferences)) if (!graph.canvases.some(canvas => canvas.canvasId === canvasId)) delete state.canvasGraphReferences[canvasId];
-        for (const workspace of state.workspaces) { workspace.canvasView = undefined; }
-        reconcileSessionRoots(this.repo);
-        this.repo.event('system', 'graph.imported', { checksum: backup.checksum, graphRevision: state.graphRevision });
-      });
-      this.runtime.clearSummaryCache(); return { ok: true, snapshot: this.snapshot() };
-    } finally { this.maintenance = false; }
-  }
   async cleanupExpiredTemporary(at=Date.now()):Promise<void> {
     if(this.expiryRunning||this.closed)return;this.expiryRunning=true;
     try {

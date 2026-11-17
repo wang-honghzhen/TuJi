@@ -1,14 +1,18 @@
-import { FilePlus, MoreHorizontal } from 'lucide-react';
+import { FilePlus, MoreHorizontal, Upload } from 'lucide-react';
 import { SidebarToggle } from './SidebarToggle';
 import { DocumentMeta } from '@/types/document';
 import { useNewUiStore, beginSidebarResize } from '../newUiStore';
-import { useEffect, useState, type ReactNode } from 'react';
-import { SearchField, SearchHighlight } from './SearchField';
-import { PendingReviewSearch } from './PendingReviewSearch';
+import { useRef, useState, type ReactNode } from 'react';
+import { SearchField, SearchHighlight, type SidebarSearchKind, type SidebarSearchValues } from './SearchField';
 import { searchContains } from '../graphSearch';
 import { DirectoryTab, ReviewTab } from './NewDirectoryDock';
 import { GraphNameLabel } from './GraphPathLabel';
 import { NewTreeIcon } from './NewTreeIcon';
+import { useAiStore } from '@/ai/client';
+import { AiError, downloadJson, useAction } from '@/ai/ui/common';
+import { modeOf, MODE_LABELS } from '@/v3/design';
+import type { CanvasMode } from '@/v3/types';
+import { GraphContextMenu } from './GraphContextMenu';
 
 interface NewRightSidebarProps {
   documents: DocumentMeta[];
@@ -22,6 +26,9 @@ interface NewRightSidebarProps {
   directoryPanel: ReactNode;
   reviewPanel: ReactNode;
   canvasId: string;
+  searches: SidebarSearchValues;
+  onSearchChange: (kind: SidebarSearchKind, value: string) => void;
+  onSearchEnter: (kind: SidebarSearchKind) => void;
 }
 
 /* ============================================================
@@ -45,9 +52,8 @@ export function NewRightSidebar({
   directoryPanel,
   reviewPanel,
   canvasId,
+  searches, onSearchChange, onSearchEnter,
 }: NewRightSidebarProps) {
-  const [query, setQuery] = useState(''), [searchKind, setSearchKind] = useState<'documents' | 'reviews'>('documents');
-  useEffect(() => { setQuery(''); }, [canvasId]);
   const isOpen = useNewUiStore((state) => state.isRightSidebarOpen);
   const toggle = useNewUiStore((state) => state.toggleRightSidebar);
   const width = useNewUiStore((state) => state.rightWidth);
@@ -58,6 +64,29 @@ export function NewRightSidebar({
   const showDirectory = placement === 'right' && tab === 'directory' && !drag;
   const showReview = reviewPlacement === 'right' && tab === 'review' && !reviewDrag;
   const showDocuments = !showDirectory && !showReview;
+  const searchKind: SidebarSearchKind = showDirectory ? 'directory' : showReview ? 'review' : 'documents';
+  const query = searches[searchKind], setQuery = (value: string) => onSearchChange(searchKind, value);
+  const searchLabel = showDirectory ? '搜索节点、子图…' : showReview ? '搜索待审核提交' : '搜索图文档';
+  const file = useRef<HTMLInputElement>(null), action = useAction();
+  const [notice, setNotice] = useState('');
+  const [menu, setMenu] = useState<{ x: number; y: number; document: DocumentMeta }>();
+  const exportDocument = (doc: DocumentMeta) => void action.run(async () => {
+    setNotice('');
+    const result = await useAiStore.getState().command('document.export', { documentId: doc.documentId });
+    const name = doc.documentName.replace(/[<>:"/\\|?*\u0000-\u001f]/g, '_').trim().slice(0, 100) || '图文档';
+    downloadJson(result, name + '.tuji-document.json');
+    setNotice(`已导出“${doc.documentName}”及其内部嵌套内容。`);
+  });
+  const importDocument = (selected: File) => void action.run(async () => {
+    setNotice('');
+    if (selected.size > 120 * 1024 * 1024) throw new Error('图文档文件不能超过 120 MiB');
+    let bundle: unknown;
+    try { bundle = JSON.parse(await selected.text()); } catch { throw new Error('文件不是有效的 JSON 图文档，请重新选择'); }
+    const result = await useAiStore.getState().command<{ name: string; mode: CanvasMode; documentCount: number }>('document.import', { package: bundle });
+    const current = useAiStore.getState().snapshot?.graph?.canvases.find(canvas => canvas.canvasId === canvasId);
+    setNotice(`已将“${result.name}”作为独立副本导入图文档库${result.documentCount > 1 ? `（含 ${result.documentCount} 个图文档）` : ''}。`
+      + (current && modeOf(current) !== result.mode ? `请切换到${MODE_LABELS[result.mode]}画布查看和使用。` : '可从列表加入画布。'));
+  });
 
   const byUpdatedDesc = (a: DocumentMeta, b: DocumentMeta) =>
     new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime();
@@ -96,28 +125,42 @@ export function NewRightSidebar({
           isOpen ? 'visible delay-0' : 'invisible delay-300'
         }`}
       >
-        <SidebarToggle side="right" expanded onClick={toggle} label="折叠图文档栏"
-          style={{ position: 'absolute', right: 12, top: 16, zIndex: 30 }} />
-
-        {(placement === 'right' || reviewPlacement === 'right') && <div className="pl-3 pr-12 pt-4 pb-2" data-sidebar-tabs>
-          <div className="flex items-center gap-1 rounded-xl bg-space-900/70 border border-space-700 p-1">
+        <div className="library-navigation-row">
+        <div className="library-tabs new-scroll" data-sidebar-tabs role="group" aria-label="右侧栏内容">
             <button type="button" data-document-tab aria-pressed={showDocuments} onClick={() => useNewUiStore.getState().setRightPanelTab('documents')}
-              className={`flex-1 min-w-0 h-8 rounded-lg text-[12px] font-medium ${showDocuments ? 'bg-blue-500/20 text-blue-100 ring-1 ring-inset ring-blue-400/40' : 'text-slate-400 hover:bg-white/5'}`}>图文档</button>
+              className="library-tab">图文档</button>
             {placement === 'right' && <DirectoryTab source="right" active={showDirectory} onClick={() => useNewUiStore.getState().setRightPanelTab('directory')} />}
             {reviewPlacement === 'right' && <ReviewTab canvasId={canvasId} source="right" active={showReview} onClick={() => useNewUiStore.getState().setRightPanelTab('review')} />}
-          </div>
-        </div>}
+        </div>
+          <SidebarToggle side="right" expanded onClick={toggle} label="折叠右侧栏" />
+        </div>
+        <div className="library-search-row">
+          <SearchField label={searchLabel} value={query} onChange={setQuery} onKeyDown={event => {
+            if (event.key === 'Escape') setQuery('');
+            if (event.key === 'Enter' && !event.nativeEvent.isComposing) onSearchEnter(searchKind);
+          }} />
+        </div>
         {showDirectory || showReview ? <div className="flex-1 min-h-0 flex flex-col">{showDirectory ? directoryPanel : reviewPanel}</div> : <div data-document-library className="flex-1 min-h-0 flex flex-col">
-          <div className={`flex items-center justify-between px-3 pb-2 ${placement === 'right' || reviewPlacement === 'right' ? 'pt-1' : 'pt-4 pr-12'}`}>
+          <div className="library-tools">
             <span className="text-[11px] text-slate-500">{documents.length} 个图文档</span>
+            <div className="flex items-center">
+            <button type="button" title="导入图文档" aria-label="导入图文档" data-document-import disabled={action.busy} onClick={() => file.current?.click()}
+              className="flex items-center gap-1.5 rounded-lg px-2 py-1.5 text-xs text-slate-400 hover:bg-white/5 hover:text-blue-300 disabled:opacity-40">
+              <Upload size={15} />导入
+            </button>
             <button type="button" title="新建图文档" aria-label="新建图文档" onClick={onCreateDocument}
               className="flex items-center gap-1.5 rounded-lg px-2 py-1.5 text-xs text-slate-400 hover:bg-white/5 hover:text-blue-300 transition-colors">
               <FilePlus size={15} />新建
             </button>
+            </div>
           </div>
-          <div className="graph-search-inset"><SearchField label={searchKind === 'documents' ? '搜索图文档' : '搜索待审核提交'} value={query} onChange={setQuery} onKeyDown={event => { if (event.key === 'Escape') setQuery(''); }} /></div>
-          <div className="graph-search-filters" role="group" aria-label="文档栏搜索范围"><button type="button" aria-pressed={searchKind === 'documents'} onClick={() => setSearchKind('documents')}>图文档</button><button type="button" aria-pressed={searchKind === 'reviews'} onClick={() => setSearchKind('reviews')}>待审核提交</button></div>
-          {searchKind === 'reviews' ? <PendingReviewSearch canvasId={canvasId} query={query} /> : <div className="flex-1 min-h-0 overflow-y-auto new-scroll px-2.5 pb-2.5 space-y-2">
+          <input ref={file} type="file" hidden accept="application/json,.json" aria-label="选择图文档文件" onChange={event => {
+            const selected = event.target.files?.[0]; event.target.value = ''; if (selected) importDocument(selected);
+          }} />
+          {(notice || action.error || action.busy) && <div className="px-3 pb-2 text-xs leading-5">
+            <AiError text={action.error} />{action.busy ? <p role="status">正在处理图文档…</p> : notice && <p role="status" className="text-slate-300">{notice}</p>}
+          </div>}
+          <div className="flex-1 min-h-0 overflow-y-auto new-scroll px-2.5 pb-2.5 space-y-2">
           {!ordered.length && <p className="graph-search-empty">{query ? '没有匹配的图文档' : '还没有图文档'}</p>}
           {ordered.map((doc, index) => {
             const isOnCanvas = activeDocumentIds.includes(doc.documentId);
@@ -139,6 +182,7 @@ export function NewRightSidebar({
                   type="button"
                   draggable
                   onClick={() => { if (!isOnCanvas) onAddDocument(doc.documentId); }}
+                  onContextMenu={event => { event.preventDefault(); event.stopPropagation(); setMenu({ x: event.clientX, y: event.clientY, document: doc }); }}
                   onDragStart={(event) => {
                     event.dataTransfer.effectAllowed = 'copy';
                     event.dataTransfer.setData(
@@ -196,9 +240,12 @@ export function NewRightSidebar({
               </div>
             );
           })}
-          </div>}
+          </div>
         </div>}
       </div>
+      {menu && <GraphContextMenu position={menu} onClose={() => setMenu(undefined)} items={[
+        { key: 'exportDocument', label: '导出图文档', disabled: action.busy, run: () => exportDocument(menu.document) },
+      ]} />}
     </aside>
   );
 }

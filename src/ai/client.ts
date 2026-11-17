@@ -1,11 +1,12 @@
 import { create } from 'zustand';
-import type { ApiError, AppSnapshot, ModelSelection, Session, Task } from './domain';
+import type { ApiError, AppSnapshot, CanvasTargetGroup, ModelSelection, Session, Task } from './domain';
 import { reconcileGraph } from '@/v3/graphReconciliation';
 import { reconcileReadingProgress } from './presentationReading';
 
 export interface InputDraft {
   text: string;
   artifactIds: string[];
+  targetGroups?: CanvasTargetGroup[];
   progressSelection?: import('./domain').ProgressSelection[];
   pendingMessageId?: string;
   modelSelection?: ModelSelection;
@@ -25,7 +26,7 @@ interface AiStore {
   enteredSessionByCanvas: Record<string, string>;
   draftsBySession: Record<string, InputDraft>;
   selectedRefsByCanvas: Record<string, string[]>;
-  inputRefsByCanvas: Record<string, string[]>;
+  canvasSelectionRequest: { canvasId: string; refs: string[]; sequence: number } | null;
   replyTargetRefsByCanvas: Record<string, string[]>;
   settingsOpen: boolean;
   setView: (view: 'canvas' | 'chat') => void;
@@ -34,8 +35,9 @@ interface AiStore {
   setDraft: (sessionId: string, draft: Partial<InputDraft>) => void;
   clearDraft: (sessionId: string) => void;
   setSelectedRefs: (canvasId: string, refs: string[]) => void;
-  toggleInputRef: (canvasId: string, ref: string) => boolean;
-  removeInputRef: (canvasId: string, ref: string) => void;
+  addInputGroup: (sessionId: string, refs: string[]) => string;
+  removeInputGroup: (sessionId: string, groupId: string) => void;
+  requestCanvasSelection: (canvasId: string, refs: string[]) => void;
   setReplyTargetRefs: (canvasId: string, refs: string[]) => void;
   setSettingsOpen: (open: boolean) => void;
   clearError: () => void;
@@ -80,7 +82,7 @@ async function getConnectionToken(force = false): Promise<string> {
 }
 
 /** Long-running host actions: parsing/OCR, backups and restores are bounded by the server, not here. */
-const LONG_ACTIONS = new Set(['artifact.upload', 'backup.export', 'backup.import']);
+const LONG_ACTIONS = new Set(['artifact.upload', 'document.export', 'document.import']);
 const COMMAND_TIMEOUT_MS = 120_000, LONG_COMMAND_TIMEOUT_MS = 3_600_000;
 
 async function request<T>(url: string, init?: RequestInit, timeoutMs = COMMAND_TIMEOUT_MS): Promise<T> {
@@ -226,6 +228,7 @@ function scheduleReconnect(myGeneration: number) {
   reconnectTimer = setTimeout(() => { void openStream(myGeneration); }, delay);
 }
 
+let canvasSelectionSequence = 0;
 export const useAiStore = create<AiStore>((set, get) => ({
   snapshot: null,
   connection: 'disconnected',
@@ -235,7 +238,7 @@ export const useAiStore = create<AiStore>((set, get) => ({
   enteredSessionByCanvas: {},
   draftsBySession: {},
   selectedRefsByCanvas: {},
-  inputRefsByCanvas: {},
+  canvasSelectionRequest: null,
   replyTargetRefsByCanvas: {},
   settingsOpen: false,
   setView: (view) => set({ view }),
@@ -252,13 +255,19 @@ export const useAiStore = create<AiStore>((set, get) => ({
     [sessionId]: { ...(state.draftsBySession[sessionId] ?? emptyDraft()), ...draft } } })),
   clearDraft: (sessionId) => set((state) => ({ draftsBySession: { ...state.draftsBySession, [sessionId]: emptyDraft() } })),
   setSelectedRefs: (canvasId, refs) => set((state) => ({ selectedRefsByCanvas: { ...state.selectedRefsByCanvas, [canvasId]: [...refs] } })),
-  toggleInputRef: (canvasId, ref) => {
-    const refs = get().inputRefsByCanvas[canvasId] ?? [], added = !refs.includes(ref);
-    set(state => ({ inputRefsByCanvas: { ...state.inputRefsByCanvas, [canvasId]: added ? [...refs, ref] : refs.filter(id => id !== ref) } }));
-    return added;
+  addInputGroup: (sessionId, refs) => {
+    const groupId = crypto.randomUUID(), targetIds = [...new Set(refs)];
+    if (!targetIds.length) return '';
+    set(state => { const draft = state.draftsBySession[sessionId] ?? emptyDraft();
+      return { draftsBySession: { ...state.draftsBySession, [sessionId]: { ...draft, pendingMessageId: undefined,
+        targetGroups: [...draft.targetGroups ?? [], { groupId, targetIds }] } } }; });
+    return groupId;
   },
-  removeInputRef: (canvasId, ref) => set(state => ({ inputRefsByCanvas: { ...state.inputRefsByCanvas,
-    [canvasId]: (state.inputRefsByCanvas[canvasId] ?? []).filter(id => id !== ref) } })),
+  removeInputGroup: (sessionId, groupId) => set(state => { const draft = state.draftsBySession[sessionId] ?? emptyDraft();
+    return { draftsBySession: { ...state.draftsBySession, [sessionId]: { ...draft, pendingMessageId: undefined,
+      targetGroups: (draft.targetGroups ?? []).filter(group => group.groupId !== groupId) } } }; }),
+  requestCanvasSelection: (canvasId, refs) => set({ canvasSelectionRequest: {
+    canvasId, refs: [...new Set(refs)], sequence: ++canvasSelectionSequence } }),
   setReplyTargetRefs: (canvasId, refs) => set((state) => ({ replyTargetRefsByCanvas: { ...state.replyTargetRefsByCanvas, [canvasId]: [...refs] } })),
   setSettingsOpen: (settingsOpen) => set({ settingsOpen }),
   clearError: () => set({ error: null }),
@@ -294,7 +303,7 @@ export const useAiStore = create<AiStore>((set, get) => ({
       const result = await request<T>('/api/qixue/command', { method: 'POST', body: JSON.stringify({ action, payload: payload ?? {} }) },
         LONG_ACTIONS.has(action) ? LONG_COMMAND_TIMEOUT_MS : COMMAND_TIMEOUT_MS);
       // Do not report an acknowledged mutation as failed merely because its state refresh disconnects.
-      if (!['context.preview', 'inheritance.preview', 'backup.export', 'settings.background.read'].includes(action)) await get().refresh().catch(() => undefined);
+      if (!['context.preview', 'inheritance.preview', 'document.export', 'presentation.claimAutoFocus', 'settings.background.read'].includes(action)) await get().refresh().catch(() => undefined);
       return result;
     } catch (error) {
       if (options?.reportError !== false) set({ error: error instanceof Error ? error.message : '操作失败。' });

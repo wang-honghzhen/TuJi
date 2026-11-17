@@ -51,7 +51,7 @@ export function taskArchiveRecords(input: AppSnapshot, task: Task): TaskArchiveR
     for (const m of local ? state.messages : memory!.messages) {
       if (!allowed(m.taskId) || m.status === 'streaming' || m.presentationCallId) continue;
       const order = m.sequence ?? Date.parse(m.createdAt);
-      const original = { role: m.role, content: m.text, selectedRefs: m.targetRefs, sources: m.sourceRefs, attachments: m.attachments,
+      const original = { role: m.role, content: m.text, selectedRefs: m.targetRefs, targetGroups: m.targetGroups, sources: m.sourceRefs, attachments: m.attachments,
         selectedProgress: m.selectedProgress };
       const rootId=state.tasks.find(t=>t.id===m.taskId)?.rootUserMessageId??memory?.sourceTaskStates?.find(t=>t.id===m.taskId)?.rootUserMessageId;
       add({ id: m.id, taskId: m.taskId, sourceSessionId: sourceSession(m.taskId),

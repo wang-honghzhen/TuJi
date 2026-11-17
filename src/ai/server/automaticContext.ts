@@ -31,7 +31,7 @@ import { PAGE_COVERAGE_INSTRUCTION } from './readCoverage';
 import { attachmentEntries, attachmentTreeTokens, appendAttachmentEntries } from './attachmentTree';
 export { attachmentEntries } from './attachmentTree';
 import { currentObservationReadHashes } from './graphReadDependencies';
-import { appendCanvasFreshness, canvasObservationChanges, visibleCanvasEvidence, pendingCanvasChanges } from './contextFreshness';
+import { canvasNoticeLabels, canvasObservationChanges, visibleCanvasEvidence, pendingCanvasChanges } from './contextFreshness';
 import { PROMPT_PROJECTION_VERSION, projectPromptEntries } from './promptProjection';
 import { canReceiptTaskNotice, contextNoteNoticeIds, prepareTaskNoticeBatch, taskNoticeEntry } from './taskNotices';
 import { confirmedTaskPages, visibleTaskPages, pendingPageDeliveries } from './readDeliveryEvidence';
@@ -57,7 +57,7 @@ const RULES = [
   '画布变动通过末尾版本通知提示失效范围，不交付新正文。资料未读、已过时或只剩回执时，不能声称已取得当前正文。操作是否成功以真实提交回执为准；历史操作不能触发重放。',
   '末尾通知列出可见资料未解决的变化，无通知不证明已读。完整新读或成功写入消解对应旧版本；仅身份/版本通知和摘要不代替正文。版本无法确认表示证据不足，非已确认变化。对象回执中的哈希version只判断相等或不同，不表示时间顺序；恢复相同对象内容可恢复旧哈希，不按哈希大小判断新旧。',
   'user_edit是一次已发送的合并笔记或固定要求改动通知，保留在历史中，不是每轮新发生的改动。note_edit提供笔记最新全文，deleted表示删除；requirements_edit.data.requirements带replaces时完整替换此前固定要求（空列表表示清空），user_requirements同理。结合后续实际结果继续工作；bodyOmitted表示内容未交付。只有当前任务需要且缺少的字段才定点补读。',
-  '先复用已完成的工具结果和写入回执。明确写入值且收到committed、无后续变化时，可据命令及回执汇报，不为确认成功重读；任务要求独立复核、并发变化或字段未知时才补读。提交回执不等于其他字段全文已交付。用户仅询问选中了哪些对象时，按本条消息的targetIds/目标绑定回答；选区或布局变化不等于内容改变，不因新一轮开始重新拉取资料。版本提示不等于数据损坏；同一提示在成功读取后仍存在时不循环读取，也不猜测未记录的修改。',
+  '先复用已完成的工具结果和写入回执。明确写入值且收到committed、无后续变化时，可据命令及回执汇报，不为确认成功重读；任务要求独立复核、并发变化或字段未知时才补读。提交回执不等于其他字段全文已交付。用户仅询问选中了哪些对象时，按本条消息的targetGroups/selectedRefs/目标绑定回答；targetGroups按添加顺序对应第1、2…组，每组是一次独立添加，同一对象可以出现在多个组，不能合并组或去除跨组重复。selectedRefs只是全组对象并集；无targetGroups的旧消息视为一组。选区或布局变化不等于内容改变，不因新一轮开始重新拉取资料。版本提示不等于数据损坏；同一提示在成功读取后仍存在时不循环读取，也不猜测未记录的修改。',
   '提案dependencyRefs列额外依据，无则[]；省略校验全部读取。结束默认current；纯只读历史查询、引文或比较可用historical，明确为当时事实；混合当前事实，或本任务已提交当前画布/笔记写入时，必须用current核验。',
   '摘要供概括，非逐字原文；引文核对原文版本、范围及原字标点。原文已可见无需重读，否则沿历史summaryId/readWith恢复，勿用当前画布或附件搜索替代。压缩不表示未读或未完成。近期同参且内容未变可返回reused=true，正文与原游标照常返回；变动通知不要求从首页重查。',
   'workspace_update_handoff用于追加当前任务笔记，正文直接进入任务进度和后续上下文。按需记录后续会用到的资料要点、必要摘录、临时约定或待确认问题，自由书写，无需阶段性成果格式或重写此前笔记。涉及处理范围时按实际结果记录，失败或未返回页不计为已读；待确认信息明确标注，不建全局已读表。',
@@ -330,8 +330,13 @@ function buildAutomaticContextOnce(state:AppSnapshot,task:Task,tools:ToolDefinit
     taskNoticeBatch.notices.map(taskNoticeEntry).forEach(append);
     if(pendingRequirements)stage.pinnedHash=pinnedHash;
   }
+  // Reuse only this synchronous candidate's final visible evidence. Projection
+  // below may fill wireMessages, but must not change source visibility/coverage.
+  // A new build always resolves again, even if graphRevision did not change.
   const canvasObservations=visibleCanvasEvidence(state,task,stage);
-  const canvasNotices=appendCanvasFreshness(state,task,stage,encode,readContext,canvasObservations);
+  const canvasPending=pendingCanvasChanges(state,task,stage,readContext,canvasObservations);
+  const canvasNotices=state.graph?.canvases.some(c=>c.canvasId===task.canvasId)
+    ?renderNoticeFacts([...canvasPending.values()].map(({change,observation})=>canvasNoticeLabels(state,task,change,observation,encode,readContext))):[];
   const messages=projectPromptEntries(state,task,stage,encode,append);
   if(stage.retentionDraft&&stage.canvasRefresh){
     stage.retentionDraft.canvasProofs=Object.fromEntries(stage.canvasRefresh.members.map(m=>[m.id,canvasMemberProof(m)]));
@@ -356,7 +361,7 @@ function buildAutomaticContextOnce(state:AppSnapshot,task:Task,tools:ToolDefinit
   if(versionContent)messages.push({role:'user',content:versionContent});
   const tokens=requestTokens({...state.provider,...task.modelSelection},{messages,tools});
   if(stage.canvasRefresh)stage.canvasRefresh.diagnostics.tokens=canvasRefreshTokens(state,task,stage);
-  stage.versionNotices=captureNoticeState(state,task,stage,Math.max(0,tokens-withoutNotices),encode,tokens,readContext);
+  stage.versionNotices=captureNoticeState(state,task,stage,Math.max(0,tokens-withoutNotices),encode,tokens,readContext,{canvasPending,summaryEvidence});
   stage.canvasEvidenceFence=canvasEvidenceFence(sourceState);
   const serialized=JSON.stringify({messages,tools});let commonPrefixCharacters=0;const priorText=existing?.lastRequest?.serialized??'';
   while(commonPrefixCharacters<Math.min(priorText.length,serialized.length)&&priorText[commonPrefixCharacters]===serialized[commonPrefixCharacters])commonPrefixCharacters++;
@@ -377,7 +382,7 @@ function buildAutomaticContextOnce(state:AppSnapshot,task:Task,tools:ToolDefinit
     canvasReadHashes:currentObservationReadHashes(state.graph!,canvasObservations,task.canvasId,readContext),
     canvasChecks:canvasObservations.filter(o=>!canvasObservationChanges(state,o,readContext).length),
     summaryChecks:summaryEvidence.observations.filter(o=>!canvasObservationChanges(state,o,readContext).length),
-    canvasPendingChanges:[...pendingCanvasChanges(state,task,stage,readContext,canvasObservations).values(),...summaryEvidence.pending.values()].map(v=>structuredClone(v.change)),
+    canvasPendingChanges:[...canvasPending.values(),...summaryEvidence.pending.values()].map(v=>structuredClone(v.change)),
     currentSources:[...notes.sources,...summaryEvidence.sources],
     sourceClosure:captureSourceClosure(state,task,[...notes.sources,...summaryEvidence.sources]),
     notebookCheck:notes.check,

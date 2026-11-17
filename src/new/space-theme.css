@@ -92,7 +92,6 @@
 body:has(.canvas-workspace:is([data-workspace-background='white-grid'], [data-workspace-background='custom'])) .canvas-detail-panel { background-color: rgba(8, 15, 28, .96); }
 .canvas-workspace:is([data-workspace-background='white-grid'], [data-workspace-background='custom']) .ai-composer[data-session-unselected] .ai-composer-box { opacity: 1; }
 .canvas-workspace:is([data-workspace-background='white-grid'], [data-workspace-background='custom']) .ai-composer[data-session-unselected] .ai-composer-toolbar { opacity: .6; }
-.canvas-workspace:is([data-workspace-background='white-grid'], [data-workspace-background='custom']) .canvas-region-header { background: rgba(13, 22, 37, .92); }
 .canvas-workspace[data-workspace-background='white-grid'] .canvas-region { border-color: rgba(var(--region-rgb), .4); }
 .canvas-workspace[data-workspace-background='white-grid'] .workspace-view-toggle { color: #334155; }
 .canvas-workspace[data-workspace-background='white-grid'] .sidebar-toggle[data-mode='expand'] { color: #334155; }

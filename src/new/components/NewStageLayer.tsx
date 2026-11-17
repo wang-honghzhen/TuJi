@@ -11,7 +11,9 @@ import type { CanvasRecord, ConnectionSide, GraphState, Point } from '@/v3/types
 import type { CreateEdgeInput, EdgePatch } from '@/v3/storage';
 import { nodeGeometry } from '@/v3/nodeGeometry';
 import { previewBlockMove } from '@/v3/regionLayout';
-import { CanvasRegion, type RegionSummary } from './CanvasRegion';
+import { presentationPlacement } from '@/v3/presentationLayout';
+import { CanvasRegion, CanvasRegionControls, type RegionSummary } from './CanvasRegion';
+import { layoutRegionControls } from '../regionControls';
 import { CanvasSearch } from './CanvasSearch';
 import { searchFocusView } from '../graphSearch';
 import { useSidebarInsets } from '../newUiStore';
@@ -28,6 +30,8 @@ import { usePlaybackStore } from '@/ai/presentationClient';
 import { useAiStore } from '@/ai/client';
 import { connectionLevel, nodeConnectionCounts } from '@/v3/nodeConnections';
 import { CanvasReviewOverlay } from './CanvasReviewOverlay';
+import { canvasInteractionBlocked, useCanvasForeground } from '../canvasInteractionScope';
+import { resolvePresentationTargets } from '../presentationTargets';
 
 import { GraphAppearanceProvider, nodeAccents, documentAccent, subgraphAccent } from '../graphAppearance';
 const edgeAccents = { ...nodeAccents, neutral: '#8ca3cf', active: '#cee3ff', ai: '#f6c453', outside: '#74839a', drag: '#75d7b0' };
@@ -74,6 +78,13 @@ export function NewStageLayer({ state, canvas, graphRevision, onAddDocument, onM
   const storedPlayback=usePlaybackStore(s=>s.byCanvas[canvas.canvasId]);
   const playbackAvailable=useAiStore(s=>!canvas.isDraft&&!!s.activeSessionByCanvas[canvas.canvasId]&&!!s.snapshot?.tasks.some(t=>t.id===storedPlayback?.taskId&&t.sessionId===s.activeSessionByCanvas[canvas.canvasId]));
   const playback=playbackAvailable?storedPlayback:undefined;
+  const activeSessionId = useAiStore(s => s.activeSessionByCanvas[canvas.canvasId]);
+  const presentationPart = useAiStore(s => s.snapshot?.presentationParts?.find(p => p.taskId === playback?.taskId && p.seq === playback?.cursor));
+  const autoFocusHandled = useAiStore(s => !!presentationPart && !!s.snapshot?.presentationAutoFocus?.[presentationPart.id]);
+  const settingsOpen = useAiStore(s => s.settingsOpen);
+  const selectionRequest = useAiStore(s => s.canvasSelectionRequest);
+  const [selectionNotice, setSelectionNotice] = useState('');
+  useEffect(() => { if (selectionNotice) { const timer = setTimeout(() => setSelectionNotice(''), 5500); return () => clearTimeout(timer); } }, [selectionNotice]);
   const presentationPaused=useAiStore(s=>{const task=s.snapshot?.tasks.find(t=>t.id===playback?.taskId);return !!(task?.pauseRequested||task?.presentation?.playbackPaused);});
   const insets = useSidebarInsets();
   const controlInsets = useSidebarInsets({ reserveExpandButtons: true });
@@ -81,6 +92,8 @@ export function NewStageLayer({ state, canvas, graphRevision, onAddDocument, onM
   const connections = useMemo(() => nodeConnectionCounts(state.edges), [state.edges]);
   const accentLevel = (id?: string) => id && state.nodes[id] ? connectionLevel(connections.get(id) ?? 0) : 'neutral';
   const natural = useMemo(() => buildRenderModel(state, canvas, { zoom: 1, ignoreCollapse: true, skipEdges: true }), [state, canvas]);
+  const selectionContext = useRef({ state, natural, activeSessionId });
+  selectionContext.current = { state, natural, activeSessionId };
   const initialView = () => ({ x: insets.left + 48 - natural.bounds.x, y: 80 - natural.bounds.y, zoom: 1 });
   const viewport = useRef<HTMLDivElement>(null);
   const [view, setView] = useState<View>(() => loadCanvasViewport(canvas.canvasId, initialView()));
@@ -261,16 +274,22 @@ export function NewStageLayer({ state, canvas, graphRevision, onAddDocument, onM
     ...(selected ? [selected.id] : []), ...(hover ? [hover.id] : []), ...(gesture?.type === 'block' ? [gesture.id] : []),
     ...(gesture?.type === 'link' ? [gesture.edgeId, gesture.snap?.id].filter((id): id is string => Boolean(id)) : []), ...(editing.session ? [editing.session.target.id] : [])])),
     [visibility, viewportRect, selectedIds, multiIds, selected, hover, gesture, editing.session?.target.id]);
-  const located=useRef('');
-  const explicitLocation=useRef(0);
+  const regionControls = useMemo(() => layoutRegionControls(mounted.blocks, view, {
+    x: insets.left + 8, y: 64, width: viewportSize.width - insets.left - insets.right - 16,
+    height: Math.max(32, visibleHeight - 72),
+  }), [mounted.blocks, view, insets.left, insets.right, viewportSize.width, visibleHeight]);
+  const pendingAutoFocus = useRef(new Set<string>());
+  const alive = useRef(true);
+  useEffect(() => { alive.current = true; return () => { alive.current = false; }; }, []);
+  const foreground = useCanvasForeground();
   const [otherTargets,setOtherTargets]=useState(0);
   const targetKey=aiTargetRefs.join('\0');
   useLayoutEffect(()=>setOtherTargets(0),[targetKey,canvas.canvasId,playback?.cursor]);
   useLayoutEffect(()=>{
-    const key=JSON.stringify([canvas.canvasId,playback?.taskId,playback?.cursor,targetKey,playback?.locate??0]);
-    if(!targetKey||located.current===key||gestureRef.current||editing.session)return;
-    const explicit=!!playback?.locate&&explicitLocation.current!==playback.locate;
-    if(!explicit&&(playback?.cameraFollow===false||presentationPaused&&playback?.mode!=='review'))return;
+    if(!targetKey||!playback||gestureRef.current||editing.session||!foreground||settingsOpen||canvasInteractionBlocked())return;
+    const explicit=playback.locate > (playback.consumedLocate ?? 0);
+    if(!explicit&&(!presentationPart||presentationPart.seq===0||autoFocusHandled||pendingAutoFocus.current.has(presentationPart.id)
+      ||presentationPaused&&playback.mode!=='review'))return;
     if(explicit){
       // An explicit location request can reveal a folded/filtered object without changing graph data.
       if(focus){setFocus(null);return;}
@@ -283,17 +302,33 @@ export function NewStageLayer({ state, canvas, graphRevision, onAddDocument, onM
       while(block&&!byId.has(block.id)&&!seen.has(block.id)){seen.add(block.id);block=natural.blocks.find(b=>b.id===block!.parentId);}return block?byId.get(block.id):undefined;};
     const targets=aiTargetRefs.flatMap(id=>{const block=find(id);if(block)return [block];const edge=model.edges.find(e=>e.edge.edgeId===id);return edge?[find(edge.sourceBlockId??edge.edge.sourceNodeId),find(edge.targetBlockId??edge.edge.targetNodeId)].filter((b):b is RenderBlock=>!!b):[];});
     if(!targets.length){setOtherTargets(0);return;}
-    located.current=key;if(explicit)explicitLocation.current=playback!.locate;
     const first=targets[explicit?((playback!.locate-1)%targets.length):0].rect,near=targets.filter(b=>Math.hypot(b.rect.x-first.x,b.rect.y-first.y)*viewRef.current.zoom<Math.max(300,viewportSize.width-insets.left-insets.right));
-    setOtherTargets(targets.length-near.length);
     const x=Math.min(...near.map(b=>b.rect.x)),y=Math.min(...near.map(b=>b.rect.y)),right=Math.max(...near.map(b=>b.rect.x+b.rect.width)),bottom=Math.max(...near.map(b=>b.rect.y+b.rect.height));
-    const left=insets.left+36,top=68,width=Math.max(180,viewportSize.width-insets.left-insets.right-72),height=Math.max(150,viewportSize.height-composerBottomInset-100),v=viewRef.current;
-    if(x*v.zoom+v.x>=left&&right*v.zoom+v.x<=left+width&&y*v.zoom+v.y>=top&&bottom*v.zoom+v.y<=top+height)return;
-    const zoom=Math.min(v.zoom,Math.max(.55,Math.min(width/Math.max(1,right-x),height/Math.max(1,bottom-y))));
-    const dx=x*zoom+v.x<left?left-x*zoom:right*zoom+v.x>left+width?left+width-right*zoom:v.x;
-    const dy=y*zoom+v.y<top?top-y*zoom:bottom*zoom+v.y>top+height?top+height-bottom*zoom:v.y;
-    updateView(()=>({zoom,x:dx,y:dy}));
-  },[targetKey,canvas.canvasId,playback?.taskId,playback?.cursor,playback?.locate,playback?.cameraFollow,playback?.mode,model.blocks,model.edges,presentationPaused,revealed,focus,!!gesture,!!editing.session]);
+    const applyLocation = () => {
+      setOtherTargets(targets.length-near.length);
+      const left=insets.left+36,top=68,width=Math.max(180,viewportSize.width-insets.left-insets.right-72),height=Math.max(150,viewportSize.height-composerBottomInset-100),v=viewRef.current;
+      if(x*v.zoom+v.x>=left&&right*v.zoom+v.x<=left+width&&y*v.zoom+v.y>=top&&bottom*v.zoom+v.y<=top+height)return;
+      const zoom=Math.min(v.zoom,Math.max(.55,Math.min(width/Math.max(1,right-x),height/Math.max(1,bottom-y))));
+      const dx=x*zoom+v.x<left?left-x*zoom:right*zoom+v.x>left+width?left+width-right*zoom:v.x;
+      const dy=y*zoom+v.y<top?top-y*zoom:bottom*zoom+v.y>top+height?top+height-bottom*zoom:v.y;
+      updateView(()=>({zoom,x:dx,y:dy}));
+    };
+    if (explicit) {
+      usePlaybackStore.getState().set(canvas.canvasId, { consumedLocate: playback.locate }); applyLocation(); return;
+    }
+    const partId = presentationPart!.id;
+    pendingAutoFocus.current.add(partId);
+    void useAiStore.getState().command<{ claimed: boolean }>('presentation.claimAutoFocus', { partId, canvasId: canvas.canvasId, sessionId: activeSessionId }, { reportError: false })
+      .then(result => {
+        const store = useAiStore.getState(), current = usePlaybackStore.getState().byCanvas[canvas.canvasId];
+        if (!result.claimed || !alive.current || viewportCanvasId.current !== canvas.canvasId || store.view !== 'canvas'
+          || store.activeSessionByCanvas[canvas.canvasId] !== activeSessionId || current?.taskId !== playback.taskId || current.cursor !== playback.cursor
+          || current.cameraFollow === false || gestureRef.current || current.interactionBusy || canvasInteractionBlocked()
+          || document.visibilityState !== 'visible' || !document.hasFocus()) return;
+        applyLocation();
+      }).catch(() => { if (alive.current) setSelectionNotice('自动定位状态保存失败，可点击回复区的定位按钮查看对象'); })
+      .finally(() => pendingAutoFocus.current.delete(partId));
+  },[targetKey,canvas.canvasId,activeSessionId,presentationPart?.id,autoFocusHandled,foreground,settingsOpen,playback?.taskId,playback?.cursor,playback?.locate,playback?.consumedLocate,playback?.cameraFollow,playback?.mode,model.blocks,model.edges,presentationPaused,revealed,focus,!!gesture,!!editing.session]);
   useEffect(() => { previousLod.current = model.lodCollapsed; }, [model.lodCollapsed]);
 
   const fit = () => {
@@ -348,6 +383,7 @@ export function NewStageLayer({ state, canvas, graphRevision, onAddDocument, onM
     const element = viewport.current;
     if (!element) return;
     const onWheel = (event: WheelEvent) => {
+      if (canvasInteractionBlocked()) return;
       if (!event.ctrlKey) return;
       const target = event.target instanceof Element ? event.target : null;
       if (!target || (!element.contains(target) && !target.closest('[data-canvas-detail], [data-canvas-popup], [data-layout-organize-overlay]'))) return;
@@ -358,10 +394,11 @@ export function NewStageLayer({ state, canvas, graphRevision, onAddDocument, onM
       zoomAt({ x: event.clientX - rect.left, y: event.clientY - rect.top }, Math.exp(-delta * 0.0015));
     };
     const onKey = (event: KeyboardEvent) => {
-      if (event.isComposing) return;
+      if (event.isComposing || event.defaultPrevented || canvasInteractionBlocked(event.target, true)) return;
       if (event.key === 'Escape') { updateGesture(null); clearHover(); dismissPreview(); return; }
       if (event.ctrlKey && ['Minus', 'Equal', 'NumpadSubtract', 'NumpadAdd'].includes(event.code)) {
         event.preventDefault();
+        usePlaybackStore.getState().set(canvas.canvasId, { cameraFollow: false });
         if (!gestureRef.current) zoomAt({ x: (insets.left + element.clientWidth - insets.right) / 2, y: Math.max(100, (element.clientHeight - bottomInset) / 2) }, ['Minus', 'NumpadSubtract'].includes(event.code) ? 1 / 1.15 : 1.15);
         return;
       }
@@ -369,7 +406,7 @@ export function NewStageLayer({ state, canvas, graphRevision, onAddDocument, onM
       const movement: Record<string, Point> = { a: { x: 42, y: 0 }, w: { x: 0, y: 42 }, s: { x: 0, y: -42 }, d: { x: -42, y: 0 } };
       const delta = movement[event.key.toLowerCase()];
       if (!delta) return;
-      event.preventDefault(); updateView((old) => ({ ...old, x: old.x + delta.x, y: old.y + delta.y }));
+      event.preventDefault(); usePlaybackStore.getState().set(canvas.canvasId, { cameraFollow: false }); updateView((old) => ({ ...old, x: old.x + delta.x, y: old.y + delta.y }));
     };
     const onBlur = () => { updateGesture(null); clearHover(); dismissPreview(); };
     window.addEventListener('wheel', onWheel, { passive: false });
@@ -481,6 +518,7 @@ export function NewStageLayer({ state, canvas, graphRevision, onAddDocument, onM
   };
   useEffect(() => {
     const altPreview = (event: KeyboardEvent) => {
+      if (canvasInteractionBlocked(event.target, true)) return;
       if (event.key !== 'Alt' || event.repeat || gestureRef.current || !pointer.current || editable(document.activeElement)) return;
       const hit = document.elementFromPoint(pointer.current.x, pointer.current.y);
       if (!hit || !viewport.current?.contains(hit)) return;
@@ -524,9 +562,8 @@ export function NewStageLayer({ state, canvas, graphRevision, onAddDocument, onM
       if (!await editing.finish()) return false;
       popupRequest.current++;
       setPopup(old => old?.kind === kind && old.id === id ? old : null);
-      const added = useAiStore.getState().toggleInputRef(canvas.canvasId, id);
       setSelected(null); setMultiMode(true);
-      setMultiIds((old) => { const next = new Set(old); if (added) next.add(id); else next.delete(id); return next; });
+      setMultiIds((old) => { const next = new Set(multiMode ? old : selected ? [selected.id] : []); if (next.has(id)) next.delete(id); else next.add(id); return next; });
       return false;
     }
     if (multiMode) return false;
@@ -553,8 +590,9 @@ export function NewStageLayer({ state, canvas, graphRevision, onAddDocument, onM
     if (event.button !== 0) return;
     const kind = block.kind === 'node' ? 'node' : 'record';
     if (event.ctrlKey) { event.preventDefault(); event.stopPropagation(); selectByPointer(kind, block.id, true); return; }
-    const pos = previewState.documents[block.parentId]?.placements[block.id] ?? previewCanvas.placements[block.id];
-    if (!pos) return;
+    const base = previewState.documents[block.parentId]?.placements[block.id] ?? previewCanvas.placements[block.id];
+    if (!base) return;
+    const pos = presentationPlacement(previewCanvas, block.id, block.parentId, base);
     capture(event, { type: 'block', kind, pointerId: event.pointerId, id: block.id, parentId: block.parentId,
       startClient: { x: event.clientX, y: event.clientY }, startLocal: pos, zoom: view.zoom, offset: { x: 0, y: 0 } });
   };
@@ -743,6 +781,41 @@ export function NewStageLayer({ state, canvas, graphRevision, onAddDocument, onM
     }
   };
   useEffect(() => { if (focusRequest) navigateTo(focusRequest.id, focusRequest.forceSelect); }, [focusRequest?.sequence]);
+  useEffect(() => {
+    if (!selectionRequest || selectionRequest.canvasId !== canvas.canvasId) return;
+    let cancelled = false;
+    void editing.finish().then(saved => {
+      if (cancelled || useAiStore.getState().canvasSelectionRequest?.sequence !== selectionRequest.sequence) return;
+      useAiStore.setState({ canvasSelectionRequest: null });
+      if (!saved) { setSelectionNotice('请先保存当前编辑，再恢复引用组选择'); return; }
+      const latest = selectionContext.current;
+      if (latest.activeSessionId !== activeSessionId) return;
+      const { state, natural } = latest;
+      const resolved = resolvePresentationTargets(state, canvas.canvasId, selectionRequest.refs);
+      const refs = resolved.available;
+      if (resolved.notice) setSelectionNotice(resolved.notice.replaceAll('本段', '本组').replaceAll('指定', '引用'));
+      popupRequest.current++; setPopup(null); clearHover(); setFocus(null); setSelected(null);
+      setMultiMode(refs.length > 0); setMultiIds(new Set(refs));
+      usePlaybackStore.getState().set(canvas.canvasId, { cameraFollow: false });
+      const targets = refs.flatMap(id => {
+        const block = natural.blocks.find(b => b.id === id); if (block) return [block];
+        const edge = state.edges.find(e => e.edgeId === id && !e.removed);
+        return edge ? [edge.sourceNodeId, edge.targetNodeId].flatMap(ref => natural.blocks.find(b => b.id === ref) ?? []) : [];
+      });
+      const ancestors = new Set<string>();
+      for (const target of targets) {
+        ancestors.add(target.id); let parent = natural.parentOf.get(target.id);
+        while (parent && !ancestors.has(parent)) { ancestors.add(parent); parent = natural.parentOf.get(parent); }
+      }
+      setRevealed(ancestors);
+      if (targets.length) {
+        const width = Math.max(100, viewportSize.width - insets.left - insets.right - 80), height = Math.max(100, viewportSize.height - bottomInset - 120);
+        const center = visibleCenter();
+        updateView(() => searchFocusView(targets.map(b => b.rect), { x: center.x - width / 2, y: center.y - height / 2, width, height }, viewRef.current.zoom).view);
+      }
+    });
+    return () => { cancelled = true; };
+  }, [selectionRequest?.sequence, canvas.canvasId]);
   const openContextMenu = async (event: React.MouseEvent<HTMLDivElement>) => {
     const target = event.target instanceof Element ? event.target : null;
     if (!target || target.closest('[data-canvas-detail], [data-canvas-popup], [data-graph-dialog], [data-graph-menu]') || editable(target)) return;
@@ -751,7 +824,8 @@ export function NewStageLayer({ state, canvas, graphRevision, onAddDocument, onM
     const point = worldPoint({ x: event.clientX, y: event.clientY });
     const nodeId = target.closest('[data-node-id]')?.getAttribute('data-node-id');
     const edgeId = target.closest('[data-edge-id]')?.getAttribute('data-edge-id');
-    const region = model.blocks.filter((block) => block.kind !== 'node' && point.x >= block.rect.x && point.x <= block.rect.x + block.rect.width &&
+    const headerId = target.closest('[data-record-header]')?.getAttribute('data-record-header');
+    const region = model.blocks.find(block => block.id === headerId) ?? model.blocks.filter((block) => block.kind !== 'node' && point.x >= block.rect.x && point.x <= block.rect.x + block.rect.width &&
       point.y >= block.rect.y && point.y <= block.rect.y + block.rect.height).sort((a, b) => b.depth - a.depth)[0];
     const parentId = nodeId ? model.blocks.find((block) => block.id === nodeId)?.parentId ?? canvas.canvasId : region?.id ?? canvas.canvasId;
     const menuPosition = { x: event.clientX, y: event.clientY };
@@ -762,7 +836,22 @@ export function NewStageLayer({ state, canvas, graphRevision, onAddDocument, onM
       { key: 'createEdge', label: '创建边', run: action({ type: 'createEdge', sourceId: nodeId ?? undefined }) },
       { key: 'createSubgraph', label: '创建子图', run: action({ type: 'createSubgraph', parentId, point }) },
     ];
-    if (onCreateTemporary) items.push({ key: 'createTemporary', label: '创建临时会话', run: () => onCreateTemporary(menuPosition) });
+    const refs = multiMode ? [...multiIds] : selected ? [selected.id] : [];
+    if (refs.length) {
+      const store = useAiStore.getState();
+      const session = store.snapshot?.sessions.find(s => s.id === store.activeSessionByCanvas[canvas.canvasId]);
+      const canAdd = !canvas.isDraft && session?.lifecycle === 'active' && session.canvasId === canvas.canvasId && session.mode !== 'temporary';
+      items.unshift({ key: 'addToSession', label: canAdd ? '将选中对象添加到当前会话' : '将选中对象添加到当前会话（请先进入可用会话）', disabled: !canAdd,
+        run: () => {
+          const current = useAiStore.getState(), currentSession = current.snapshot?.sessions.find(s => s.id === current.activeSessionByCanvas[canvas.canvasId]);
+          if (!currentSession || currentSession.id !== session?.id || currentSession.lifecycle !== 'active') { setSelectionNotice('当前会话已变化，请重新选择添加'); return; }
+          const available = resolvePresentationTargets(current.snapshot?.graph, canvas.canvasId, refs).available;
+          if (!available.length) { setSelectionNotice('选中的对象已不在当前画布中'); return; }
+          current.addInputGroup(currentSession.id, available);
+          setSelected(null); setMultiIds(new Set()); setMultiMode(false); setFocus(null); setPopup(null); clearHover();
+        } });
+    }
+    if (onCreateTemporary) items.push({ key: 'createTemporary', label: canvas.isDraft ? '创建极简临时会话' : '创建临时会话', run: () => onCreateTemporary(menuPosition) });
     if (onOrganize) items.push({ key: 'organize', label: '整理此目录…', run: () => onOrganize(region?.id ?? parentId) });
     const selectedNodes = [...multiIds].filter((id) => Boolean(state.nodes[id]));
     if (multiMode && selectedNodes.length) items.push(
@@ -862,10 +951,10 @@ export function NewStageLayer({ state, canvas, graphRevision, onAddDocument, onM
     <div data-canvas-world className="absolute left-0 top-0 pointer-events-none" style={{ transform: `translate(${view.x}px, ${view.y}px) scale(${view.zoom})`, transformOrigin: '0 0' }}>
       {mounted.blocks.filter(block => block.kind !== 'node').sort((a, b) => a.depth - b.depth).map(block =>
         <CanvasRegion key={block.id} block={block} zoom={view.zoom} document={state.documents[block.id]?.kind === 'document'}
-          active={selectedIds.has(block.id) || hover?.id === block.id} selected={selectedIds.has(block.id)} disabled={Boolean(focus)}
+          active={selectedIds.has(block.id) || hover?.id === block.id} selected={selectedIds.has(block.id)}
           summary={regionSummaries.get(block.id) ?? { nodeCount: 0, regionCount: 0, preview: [] }} edges={state.edges}
           onPointerDown={event => blockDown(event, block)}
-          onSelect={event => { if (event.detail === 0) selectByPointer('record', block.id, false, { x: event.clientX, y: event.clientY }); }} onToggle={() => toggleRecord(block)}
+          onSelect={event => { if (event.detail === 0) selectByPointer('record', block.id, false, { x: event.clientX, y: event.clientY }); }}
           onEnter={event => showHover('record', block.id, event, block)} onLeave={scheduleDismiss} />)}
       <svg className="absolute left-0 top-0 overflow-visible pointer-events-none" width="1" height="1" style={{ zIndex: 100 }}>
         <defs>
@@ -997,8 +1086,25 @@ export function NewStageLayer({ state, canvas, graphRevision, onAddDocument, onM
         </div>;
       })}
     </div>
+    <div className="canvas-region-controls-layer">
+      {regionControls.map(({ block, rect, anchor, displaced }) => {
+        const active = selectedIds.has(block.id) || hover?.id === block.id || gesture?.type === 'block' && gesture.id === block.id;
+        return <div key={block.id}>
+          {displaced && active && <svg className="canvas-region-control-leader" width="100%" height="100%" aria-hidden="true">
+            <path d={`M ${anchor.x + 16} ${anchor.y + 16} L ${rect.x + 16} ${rect.y + 16}`} />
+          </svg>}
+          <CanvasRegionControls block={block} rect={rect} document={state.documents[block.id]?.kind === 'document'}
+            active={active} selected={selectedIds.has(block.id)} disabled={Boolean(focus)}
+            summary={regionSummaries.get(block.id) ?? { nodeCount: 0, regionCount: 0, preview: [] }}
+            onPointerDown={event => blockDown(event, block)} onToggle={() => toggleRecord(block)}
+            onSelect={event => { if (event.detail === 0) selectByPointer('record', block.id, false, { x: event.clientX, y: event.clientY }); }}
+            onEnter={event => showHover('record', block.id, event, block)} onLeave={scheduleDismiss} />
+        </div>;
+      })}
+    </div>
     {multiMode && <div className="absolute top-16 z-20 rounded border border-blue-400/30 bg-slate-950/80 px-3 py-1.5 text-xs text-blue-100 pointer-events-none" style={{ left: insets.left + 12 }}>多选 {multiIds.size} 项 · Ctrl 添加/取消 · 单击空白退出</div>}
     {otherTargets>0&&<div className="absolute top-16 left-1/2 text-xs text-amber-200 pointer-events-none">另有 {otherTargets} 处指定对象，未缩小整张画布</div>}
+    {selectionNotice && <div role="status" data-canvas-selection-notice className="absolute top-24 z-30 max-w-sm rounded-lg border border-amber-300/30 bg-slate-950/95 px-3 py-2 text-xs text-amber-100" style={{ right: insets.right + 16 }}>{selectionNotice}</div>}
     {editing.error && <div role="alert" data-canvas-edit-error className="absolute top-16 z-30 max-w-sm rounded-lg border border-red-400/40 bg-slate-950/95 px-3 py-2 text-xs text-red-200" style={{ right: insets.right + 16 }}>{editing.error}</div>}
     {createPortal(<div data-canvas-interactive data-canvas-toolbar className="canvas-toolbar fixed top-4 z-[170] flex flex-wrap items-center justify-end gap-1 p-1"
       style={{ right: controlInsets.right + 16, width: 'max-content', maxWidth: `calc(100% - ${controlInsets.left + controlInsets.right + 32}px)` }}>

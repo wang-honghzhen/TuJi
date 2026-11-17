@@ -1,5 +1,6 @@
 import { modeOf } from '@/v3/design';
-import { TEMPORARY_LIMIT, DESKTOP_TEMPORARY_CANVAS, isDesktopTemporary, hasUnfinishedTask, touchTemporary } from '../temporaryModes';
+import { TEMPORARY_LIMIT, DESKTOP_TEMPORARY_CANVAS, GLOBAL_TEMPORARY_CANVAS, isDesktopTemporary, isIndependentTemporary,
+  hasUnfinishedTask, touchTemporary, nextTemporaryNumber, normalizeTemporaryNumbers, temporaryMode as sessionTemporaryMode } from '../temporaryModes';
 import type { TemporaryMode } from '../domain';
 import { installPromptFork } from './promptFork';
 import { sessionGraphReferences } from './graphReferences';
@@ -278,24 +279,35 @@ function inheritanceOutcome(state: AppSnapshot, session: Session, dependencyFing
 
 /** User session and note commands. Every mutation and its event share a repository commit. */
 export class SessionService {
-  constructor(private readonly repo: Repository, public creationAssembler?: SessionCreationAssembler) {}
+  constructor(private readonly repo: Repository, public creationAssembler?: SessionCreationAssembler) {
+    repo.transaction(state => {
+      if (normalizeTemporaryNumbers(state.sessions)) repo.event('system', 'temporary.numbers_initialized', {});
+    });
+  }
 
   createDesktopTemporary(): Session {
+    return this.createIndependentTemporary('desktop');
+  }
+
+  createGlobalTemporary(): Session {
+    return this.createIndependentTemporary('global');
+  }
+
+  private createIndependentTemporary(scope: 'global' | 'desktop'): Session {
     return this.repo.transaction(state => {
-      requireValue(state.sessions.filter(s => isDesktopTemporary(s) && s.lifecycle === 'active').length < TEMPORARY_LIMIT,
-        '最多保留三个悬浮会话，请先删除一个。', 'TEMPORARY_LIMIT');
-      const number = (state.desktopTemporarySequence ?? 0) + 1;
-      state.desktopTemporarySequence = number;
-      const session: Session = { id: id('session:'), canvasId: DESKTOP_TEMPORARY_CANVAS, workspaceId: id('workspace:'),
-        mode: 'temporary', title: `悬浮会话 ${number}`, titleSource: 'pending', lifecycle: 'active', createdAt: now(),
-        temporaryContext: { revision: 1, mode: 'minimal', scope: 'desktop', desktopNumber: number } };
+      requireValue(state.sessions.filter(s => s.mode === 'temporary' && s.temporaryContext?.scope === scope && s.lifecycle === 'active').length < TEMPORARY_LIMIT,
+        scope === 'desktop' ? '最多保留三个悬浮会话，请先删除一个。' : '最多保留三个全局极简会话，请先删除一个。', 'TEMPORARY_LIMIT');
+      const number = nextTemporaryNumber(state.sessions, scope === 'desktop' ? 'desktop' : 'minimal');
+      const session: Session = { id: id('session:'), canvasId: scope === 'desktop' ? DESKTOP_TEMPORARY_CANVAS : GLOBAL_TEMPORARY_CANVAS, workspaceId: id('workspace:'),
+        mode: 'temporary', title: `${scope === 'desktop' ? '悬浮窗' : '极简'}${number}`, titleSource: 'pending', lifecycle: 'active', createdAt: now(),
+        temporaryContext: { revision: 1, mode: 'minimal', scope, number } };
       touchTemporary(session);
       state.sessions.push(session);
       state.workspaces.push({ id: session.workspaceId, sessionId: session.id, workNotes: [], pinnedNotes: [], snapshotIds: [], artifactIds: [],
         readRetention: { version: 1, revision: 0, receipts: {} } });
       initializeInheritance(state, session, []);
       assembleCreatedSession(state, session, this.creationAssembler);
-      this.repo.event(session.workspaceId, 'session.created', { sessionId: session.id, mode: session.mode, scope: 'desktop', number });
+      this.repo.event(session.workspaceId, 'session.created', { sessionId: session.id, mode: session.mode, scope, number });
       return copy(session);
     });
   }
@@ -349,7 +361,8 @@ export class SessionService {
     const session: Session = { id: id('session:'), canvasId, workspaceId: id('workspace:'), mode,
       title: title || `新建会话${state.sessions.filter(s => s.canvasId === canvasId).length + 1}（发送第一条消息后改名）`, titleSource: title ? 'manual' : 'pending',
       lifecycle: 'active', createdAt: now(),
-      ...(mode === 'temporary' ? { temporaryContext: { revision: 1, mode:temporaryMode, sourceSessionId: temporaryMode!=='minimal' ? payload.sourceSessionId??orderedTasks[0]?.sessionId : undefined } } : {}) };
+      ...(mode === 'temporary' ? { temporaryContext: { revision: 1, mode:temporaryMode, scope: 'canvas', number: nextTemporaryNumber(state.sessions, temporaryMode!),
+        sourceSessionId: temporaryMode!=='minimal' ? payload.sourceSessionId??orderedTasks[0]?.sessionId : undefined } } : {}) };
     touchTemporary(session);
     const workspace: Workspace = { id: session.workspaceId, sessionId: session.id, workNotes: [], pinnedNotes: [], snapshotIds: [], artifactIds: [] };
     workspace.readRetention={version:1,revision:0,receipts:{}};
@@ -398,7 +411,7 @@ export class SessionService {
     return this.repo.transaction(state=>{
       const session=sessionOf(state,payload.sessionId),workspace=workspaceOf(state,session);
       requireValue(session.mode==='temporary','仅临时会话可配置模式');
-      requireValue(!isDesktopTemporary(session), '悬浮会话固定使用极简模式', 'MODE_LOCKED');
+      requireValue(!isIndependentTemporary(session), '独立临时会话固定使用极简模式', 'MODE_LOCKED');
       requireValue(!session.temporaryContext?.lockedAt&&!state.tasks.some(t=>t.sessionId===session.id),'发送第一条消息后不能更换模式或记忆','MODE_LOCKED');
       requireValue(payload.expectedRevision===(session.temporaryContext?.revision??1),'模式设置已更新，请重新打开','VERSION_CONFLICT');
       requireValue(['minimal','branch','custom'].includes(payload.mode),'临时模式无效');
@@ -413,7 +426,9 @@ export class SessionService {
       for(const key of Object.keys(workspace))if(!['id','sessionId'].includes(key))delete (workspace as unknown as Record<string,unknown>)[key];
       Object.assign(workspace,{workNotes:[],pinnedNotes:[],snapshotIds:[],artifactIds:artifacts});
       for(const material of preview.parents){const snapshot={...copy(material),id:id('snapshot:'),createdAt:now()};state.snapshots.push(snapshot);workspace.snapshotIds.push(snapshot.id);}
-      session.temporaryContext={mode:payload.mode,sourceSessionId:source?.id,revision:payload.expectedRevision+1};touchTemporary(session);
+      const number = sessionTemporaryMode(session) === payload.mode ? session.temporaryContext?.number
+        : nextTemporaryNumber(state.sessions, payload.mode, session.id);
+      session.temporaryContext={mode:payload.mode,sourceSessionId:source?.id,revision:payload.expectedRevision+1,scope:'canvas',number};touchTemporary(session);
       session.referenceFamilyId=source?(source.referenceFamilyId??=source.id):undefined;
       initializeInheritance(state,session,orderedTasks);
       if(source&&preview.parents[0])installPromptFork(state,workspace,source,preview.parents[0],payload.mode==='branch');

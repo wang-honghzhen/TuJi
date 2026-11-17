@@ -10,6 +10,7 @@ import { planDocumentImport } from './canvasProjection';
 import { invalidateHierarchyIndex, retainHierarchyIndex } from './hierarchyIndex';
 import { migrateProposalEvaluations, modeOf, reconcileDesign, remapDesign, validateDesign } from './design';
 import type { CanvasMode } from './types';
+import { avoidExpandedRegion, prunePresentationPlacements } from './presentationLayout';
 
 const NODES_KEY = 'qixue_nodes';
 const CANVASES_KEY = 'qixue_canvases';
@@ -68,16 +69,18 @@ export function finishStructureWrite(): boolean {
   throw new Error('结构恢复记录损坏');
 }
 
-export function commitStructure(next: GraphState, previous?: GraphState): GraphState {
+export function commitStructure(next: GraphState, previous?: GraphState, protectedIds?: ReadonlySet<string>): GraphState {
   next = reconcileDesign(next, previous);
   if (!planningDepth && localStorage.getItem(STRUCTURE_WRITE_KEY)) throw new Error('请先恢复上一次结构变更');
-  const preview = previous && published.has(previous) && isRegionPreview(next, previous);
+  const drag = previous && isRegionPreview(next, previous);
+  const preview = drag && published.has(previous!);
   if (!preview) {
     // A caller may hand us a mutable draft (including one reused by an importer).
-    invalidateHierarchyIndex(next); invalidateRegionGeometry(next); published.delete(next);
+    invalidateHierarchyIndex(next); if (!drag) invalidateRegionGeometry(next); published.delete(next);
     validateStructure(next);
-    next = normalizeRegionLayout(next, previous);
-    validateRegionLayout(next);
+    next = normalizeRegionLayout(next, previous, protectedIds);
+    next = prunePresentationPlacements(next);
+    validateRegionLayout(next, protectedIds);
   }
   const baseline = previous && published.has(previous) ? previous : undefined;
   if (planningDepth) return publish(next);
@@ -256,9 +259,14 @@ export function cloneCanvas(state: GraphState, id: string, name: string): GraphS
     name: canvasDirectory(source, dirId).name,
     childIds: canvasDirectory(source, dirId).childIds.map((childId) => renamed[childId] ?? childId),
   }]));
-  const placements = Object.fromEntries(Object.entries(source.placements).map(([key, pos]) => [renamed[key] ?? key, pos]));
+  const placements = Object.fromEntries(Object.entries(source.placements).map(([key, pos]) => [renamed[key] ?? key,
+    pos.overlapAllowances ? { ...pos, overlapAllowances: pos.overlapAllowances.map(row => ({ ...row,
+      parentId: renamed[row.parentId] ?? row.parentId, otherId: renamed[row.otherId] ?? row.otherId })) } : pos]));
   const collapsed = Object.fromEntries(Object.keys(source.collapsed).map((key) => [renamed[key] ?? key, true])) as Record<string, true>;
-  const canvas: CanvasRecord = { ...source, canvasId: copyId, canvasName: name, childIds: source.childIds.map(id => renamed[id] ?? id), directories, placements, collapsed, isDraft: false, updatedAt: new Date().toISOString() };
+  const presentationPlacements = source.presentationPlacements && Object.fromEntries(Object.entries(source.presentationPlacements)
+    .map(([key, value]) => [renamed[key] ?? key, { ...value, parentId: renamed[value.parentId] ?? value.parentId }]));
+  const canvas: CanvasRecord = { ...source, canvasId: copyId, canvasName: name, childIds: source.childIds.map(id => renamed[id] ?? id), directories, placements, collapsed,
+    ...(presentationPlacements ? { presentationPlacements } : {}), isDraft: false, updatedAt: new Date().toISOString() };
   const canvases = [...state.canvases, canvas];
   const nodes = { ...state.nodes, ...Object.fromEntries(localNodes.map((nodeId) => [renamed[nodeId], { ...state.nodes[nodeId], nodeId: renamed[nodeId], design: remapDesign(state.nodes[nodeId].design, renamed, true) }])) };
   const copiedEdges = state.edges.filter((edge) => !edge.removed && !edge.membershipFor && (renamed[edge.sourceNodeId] || renamed[edge.targetNodeId])).map((edge) => ({
@@ -305,16 +313,18 @@ export function removeDocument(state: GraphState, canvasId: string, id: string):
     excludedDocumentIds: parentId ? canvas.excludedDocumentIds : [...new Set([...(canvas.excludedDocumentIds ?? []), id])], updatedAt: new Date().toISOString() };
   return commitStructure({ ...state, canvases: state.canvases.map((item) => item.canvasId === canvasId ? updated : item) });
 }
-export function moveBlock(state: GraphState, canvasId: string, id: string, parentId: string, point: Point): GraphState {
-  const next = previewBlockMove(state, canvasId, id, parentId, point);
-  return next === state ? state : commitStructure(next, state);
+export function moveBlock(state: GraphState, canvasId: string, id: string, parentId: string, point: Point,
+  protectedIds?: ReadonlySet<string>): GraphState {
+  const next = previewBlockMove(state, canvasId, id, parentId, point, protectedIds, true);
+  return next === state ? state : commitStructure(next, state, protectedIds);
 }
-export function toggleCollapse(state: GraphState, canvasId: string, id: string): GraphState {
+export function toggleCollapse(state: GraphState, canvasId: string, id: string, protectedIds?: ReadonlySet<string>): GraphState {
   const canvas = state.canvases.find((c) => c.canvasId === canvasId);
   if (!canvas || (!state.documents[id] && !canvasDirectory(canvas, id))) return state;
   const collapsed = { ...canvas.collapsed };
   if (collapsed[id]) delete collapsed[id]; else collapsed[id] = true;
-  return saveCanvas(state, { ...canvas, collapsed });
+  const next = { ...canvas, collapsed };
+  return saveCanvas(state, canvas.collapsed[id] ? avoidExpandedRegion(state, canvas, next, id, { protectedIds }) : next);
 }
 
 export interface CreateEdgeInput {

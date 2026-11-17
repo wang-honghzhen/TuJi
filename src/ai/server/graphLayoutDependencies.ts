@@ -1,9 +1,22 @@
 import type { GraphState } from '@/v3/types';
+import type { GraphPatch } from '../domain';
 import { canvasMemberIds } from '../canvasScope';
 import { hash } from './repository';
 
 export const layoutDependencyKey = (canvasId:string) => `layout-scope:${canvasId}`;
 export const layoutDependencyCanvas = (key:string) => key.startsWith('layout-scope:') ? key.slice(13) : undefined;
+
+/** Removing an expansion offset moves the visible object too. Include both
+ * sides and both coordinate stores in dependency and editing checks. */
+export function changedPlacementRefs(patches: readonly GraphPatch[]): string[] {
+  return [...new Set(patches.flatMap(patch => {
+    const before = patch.before as Record<string, Record<string, unknown>> | null;
+    const after = patch.after as Record<string, Record<string, unknown>> | null;
+    return ['placements', 'presentationPlacements'].flatMap(field =>
+      [...new Set([...Object.keys(before?.[field] ?? {}), ...Object.keys(after?.[field] ?? {})])]
+        .filter(ref => hash(before?.[field]?.[ref] ?? null) !== hash(after?.[field]?.[ref] ?? null)));
+  }))];
+}
 
 /** Layout can resize shared document ancestors and their canvas placements.
  * Include that connected ownership scope, never unrelated canvases. Membership,

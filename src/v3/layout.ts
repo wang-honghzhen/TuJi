@@ -16,6 +16,7 @@ import { getCanvasPaths, type PathSegment } from './paths';
 import { getNaturalGeometry, measureNaturalRegions, type RegionGeometry } from './regionLayout';
 import { getHierarchyIndex, retainHierarchyIndex } from './hierarchyIndex';
 import { RectangleIndex } from './rectangleIndex';
+import { presentationGeometry, presentationPlacement } from './presentationLayout';
 import {
   BLOCK_GAP,
   COLLAPSED_HEIGHT,
@@ -224,7 +225,8 @@ export function buildRenderModel(
   canvas: CanvasRecord,
   options: RenderOptions
 ): RenderModel {
-  const geometry = measureNaturalRegions(state.canvases.includes(canvas) ? state : { ...state }, canvas);
+  const geometry = presentationGeometry(state, canvas,
+    measureNaturalRegions(state.canvases.includes(canvas) ? state : { ...state }, canvas), options.ignoreCollapse);
   const blocks: RenderBlock[] = [];
   const blockIndex = new RectangleIndex();
   const byId = new Map<string, RenderBlock>();
@@ -269,14 +271,14 @@ export function buildRenderModel(
       y: anchor.y + RECORD_HEADER_HEIGHT + RECORD_PADDING,
     };
     for (const childId of childIds) {
-      const pos = placement(childId, childIds, positions);
+      const pos = presentationPlacement(canvas, childId, id, placement(childId, childIds, positions));
       visit(childId, id, { x: contentOrigin.x + pos.x, y: contentOrigin.y + pos.y }, depth + 1);
     }
   };
   const root = canvasDirectory(canvas, canvas.canvasId);
   if (root) {
     for (const childId of [...root.childIds].sort()) {
-      const pos = placement(childId, root.childIds, canvas.placements);
+      const pos = presentationPlacement(canvas, childId, canvas.canvasId, placement(childId, root.childIds, canvas.placements));
       visit(childId, canvas.canvasId, { x: pos.x, y: pos.y }, 0);
     }
   }

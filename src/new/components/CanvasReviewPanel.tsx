@@ -7,7 +7,7 @@ import type { ReviewDelta } from '@/ai/reviewTypes';
 import { ChangeReviewActions, ReviewAllActions } from '@/ai/ui/ChangeReviewActions';
 import { reviewObjectName, reviewObjectRefs } from '@/ai/ui/reviewPresentation';
 import './canvas-review.css';
-import { SearchField } from './SearchField';
+import { SearchField, type PanelSearchProps } from './SearchField';
 import { searchPendingReviews } from '../graphSearch';
 
 const EMPTY: string[] = [];
@@ -32,8 +32,9 @@ function displayDelta(delta: ReviewDelta, name: (ref: string) => string) {
   return { label: delta.member ? `成员 · ${name(delta.member)}` : delta.layout ? '位置' : labels[field] ?? name(delta.id), before: value(delta.before), after: value(delta.after) };
 }
 
-export function CanvasReviewPanel({ canvasId }: { canvasId: string }) {
-  const [query, setQuery] = useState('');
+export function CanvasReviewPanel({ canvasId, query: controlledQuery, onQueryChange, showSearch = true }: { canvasId: string } & PanelSearchProps) {
+  const [localQuery, setLocalQuery] = useState('');
+  const query = controlledQuery ?? localQuery, setQuery = onQueryChange ?? setLocalQuery;
   const section = useRef<HTMLElement>(null);
   const snapshot = useAiStore(s => s.snapshot);
   const canvasSelection = useAiStore(s => s.selectedRefsByCanvas[canvasId] ?? EMPTY);
@@ -64,7 +65,7 @@ export function CanvasReviewPanel({ canvasId }: { canvasId: string }) {
     }
   }, [canvasId, canvasSelectionKey, !!snapshot]);
   useEffect(() => { if (!entries.length && boxCanvasId === canvasId) box(undefined); }, [entries.length, boxCanvasId, canvasId]);
-  useEffect(() => setQuery(''), [canvasId]);
+  useEffect(() => setLocalQuery(''), [canvasId]);
   useEffect(() => {
     const frame = requestAnimationFrame(() => {
       const item = [...section.current?.querySelectorAll<HTMLElement>('[data-review-unit]') ?? []].find(el => selected.includes(el.dataset.reviewUnit!));
@@ -75,10 +76,11 @@ export function CanvasReviewPanel({ canvasId }: { canvasId: string }) {
     });
     return () => cancelAnimationFrame(frame);
   }, [selected.join('|'), panel.round]);
-  if (!snapshot || !entries.length) return <div data-review-empty className="review-empty">
-    <Sparkles size={23} aria-hidden="true" /><p>{snapshot ? '暂无待处理的 AI 修改' : '正在读取 AI 修改…'}</p>
+  const search = showSearch && <div className="graph-search-inset"><SearchField label="搜索待审核提交" placeholder="搜索对象或修改摘要…" value={query} onChange={setQuery} onKeyDown={event => { if (event.key === 'Escape') setQuery(''); }} /></div>;
+  if (!snapshot || !entries.length) return <>{search}<div data-review-empty className="review-empty">
+    <Sparkles size={23} aria-hidden="true" /><p>{snapshot ? '暂无待审核提交' : '正在读取待审核提交…'}</p>
     <p className="review-help">AI 修改后，点击画布上的标记即可保留或回退。</p>
-  </div>;
+  </div></>;
   const name = reviewObjectName(snapshot, canvasId);
   const groups = new Map<string, typeof shown>();
   for (const e of shown) {
@@ -96,11 +98,11 @@ export function CanvasReviewPanel({ canvasId }: { canvasId: string }) {
         <div className="review-before"><span>修改前</span><pre>{diff.before}</pre></div>
         <div className="review-after"><span>修改后</span><pre>{diff.after}</pre></div></div>;
     })}</details>;
-  return <section ref={section} data-review-panel className="canvas-review-panel" aria-label="AI 修改">
+  return <section ref={section} data-review-panel className="canvas-review-panel" aria-label="待审核提交">
+    {search}
     <div className="review-heading"><span>修改已应用</span><span tabIndex={0} role="note" aria-label="审阅说明"
       title="保留会确认当前结果，回退会撤回相关修改。这里只保留最近两轮待处理修改；开始第三轮写入时，最早一轮会自动保留。"><Info size={14} /></span></div>
     <div className="review-body">
-      <SearchField label="搜索待审核修改" placeholder="搜索对象或修改摘要…" value={query} onChange={setQuery} onKeyDown={event => { if (event.key === 'Escape') setQuery(''); }} />
       <div className="review-toolbar">
         <div className="review-round-tabs" role="group" aria-label="修改轮次">
           {[0, 1].map(n => <button key={n} disabled={!!query.trim() || !taskIds.at(-1 - n)} aria-pressed={!query.trim() && panel.round === n}

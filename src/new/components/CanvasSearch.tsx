@@ -3,6 +3,7 @@ import { ArrowUpRight, FileText, Folder, Search, Share2, X } from 'lucide-react'
 import type { CanvasRecord, GraphState } from '@/v3/types';
 import { searchCanvas } from '../graphSearch';
 import { SearchField, SearchHighlight } from './SearchField';
+import { canvasInteractionBlocked } from '../canvasInteractionScope';
 
 export function CanvasSearch({ state, canvas, onLocate }: { state: GraphState; canvas: CanvasRecord; onLocate: (id: string) => void }) {
   const [open, setOpen] = useState(false), [query, setQuery] = useState(''), [active, setActive] = useState(0);
@@ -30,6 +31,7 @@ export function CanvasSearch({ state, canvas, onLocate }: { state: GraphState; c
   }, [open]);
   useEffect(() => {
     const key = (event: KeyboardEvent) => {
+      if (event.defaultPrevented || event.isComposing || canvasInteractionBlocked(event.target, true)) return;
       if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'f' && !(event.target as HTMLElement)?.closest('input,textarea,[contenteditable="true"]')) {
         event.preventDefault(); setOpen(true); input.current?.focus();
       }

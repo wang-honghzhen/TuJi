@@ -17,7 +17,9 @@ import { noticeDue, noticeMaintenanceReasons } from './noticeMaintenance';
 import { createDirectoryMaintenance, evictDirectoryCacheEntry } from './directoryCache';
 import { createSummaryMaintenance, evictSummaryRegion } from './summaryRegions';
 import { createCanvasMaintenance } from './canvasRefresh';
-import { taskSummaryUnits, boundedSummaryInput, acceptTaskSummaries, TASK_SUMMARY_INSTRUCTIONS, taskSummaryBudget, summaryInputWeight, type TaskSummaryInput } from './taskSummaryEngine';
+import { taskSummaryUnits, boundedSummaryInput, acceptTaskSummaries, summaryStorageBenefit, TASK_SUMMARY_INSTRUCTIONS, taskSummaryBudget, summaryInputWeight, type TaskSummaryInput } from './taskSummaryEngine';
+import { allocateSummaryRanges, summaryRangeRequest, bindSummaryRangeResponse } from './taskSummaryRanges';
+import { selectProjectedSummaries, summaryProjectionBenefits } from './summaryAdmission';
 
 interface PrepareOptions {repo:Repository;task:Task;caller:typeof callModel;signal:AbortSignal;guard:()=>void;
   build?:(options?:ContextBuildOptions)=>ContextManifest;preview?:(clean?:boolean)=>ContextManifest}
@@ -173,15 +175,18 @@ export async function prepareAutomaticContext(options:PrepareOptions):Promise<Co
       if(evictOldest())continue;
       return lowerBound(candidate,'摘要所需模型调用预算不足且必需内容仍无法容纳；任务与原文已保留。');
     }
-    const makeRequest=():ModelRequest=>({messages:[{role:'system',content:TASK_SUMMARY_INSTRUCTIONS},{role:'user',content:JSON.stringify({tasks:inputs.map(i=>({taskId:i.taskId,initialMessage:i.initialMessage,referenceCatalog:i.referenceCatalog,executionFunctionGuide:i.executionFunctionGuide,
-      units:i.units.map(u=>({id:u.id,weight:u.weight,content:u.content}))}))})}],tools:[]});
+    const rangeRecords=allEvidence(materialState,task);
+    let rangePlan=allocateSummaryRanges(inputs,rangeRecords);
+    const makeRequest=():ModelRequest=>({messages:[{role:'system',content:TASK_SUMMARY_INSTRUCTIONS},
+      {role:'user',content:JSON.stringify(summaryRangeRequest(rangePlan))}],tools:[]});
     let request=makeRequest(),tokens=requestTokens(provider,request);
     while(tokens>contextCapacity(provider).inputCapacity&&inputs.length){
       const last=inputs.at(-1)!;
       if(summaryInputWeight(last.units.slice(0,-1))>=2)last.units.pop();else inputs.pop();
+      rangePlan=allocateSummaryRanges(inputs,rangeRecords);
       request=makeRequest();tokens=requestTokens(provider,request);
     }
-    if(!inputs.length){
+    if(!inputs.length||!rangePlan.ranges.length){
       if(evictOldest())continue;
       return lowerBound(candidate,'完整步骤与摘要背景无法容纳在摘要模型输入容量内；已保留全部原文。');
     }
@@ -194,6 +199,7 @@ export async function prepareAutomaticContext(options:PrepareOptions):Promise<Co
     repo.transaction(()=>{task.memoryCalls=(task.memoryCalls??0)+1;task.usedTokens+=tokens+provider.maxOutputTokens;
       repo.event(task.workspaceId,'context.compaction_started',{roundId,phase:'summary'},task.id);});
     let accepted:SummarySnapshot[]=[];
+    let commitFailed=false;
     let summaryStatus:'completed'|'failed'|'cancelled'|'skipped'='skipped';
     try{
       const response=await caller({...provider,timeoutMs:Math.max(1,Math.min(provider.timeoutMs,AUTO_CONTEXT.maxDurationMs-(Date.now()-started)))},connection.credential,request,{signal});
@@ -203,30 +209,54 @@ export async function prepareAutomaticContext(options:PrepareOptions):Promise<Co
       resetMaintenance();candidate=build('refactor','capacity');trim();
       if(sourceFence!==summaryInputFence(repo,task,inputs))continue;
       const output=JSON.parse(response.text.replace(/^```(?:json)?\s*/,'').replace(/\s*```$/,''));
-      accepted=acceptTaskSummaries(materialState,task,inputs,output,roundId);
-      if(accepted.length)repo.transaction(state=>{
+      const proposals=acceptTaskSummaries(materialState,task,inputs,bindSummaryRangeResponse(rangePlan,output,inputs,rangeRecords),roundId);
+      if(proposals.length){
         if(sourceFence!==summaryInputFence(repo,task,inputs))throw new Error('摘要来源已变化');
-        const owner=state.workspaces.find(w=>w.id===task.workspaceId)!,context=ensureSessionContext(state,owner);
-        const prior=owner.summaries??[];
-        owner.summaries=[...prior,...accepted];
-        // The authoritative saving is the serialized next executor request, including
-        // user metadata, reference bindings and all summary envelopes.
-        const projected=build('compact','capacity');
-        if((projected.contextMetrics?.rawRequestTokens??projected.requestTokens)>=(candidate.contextMetrics?.rawRequestTokens??candidate.requestTokens)
-          ||projected.error&&!projected.capacityEstimateError&&projected.error!==candidate.error){
-          owner.summaries=prior;accepted=[];return;
+        const owner=repo.state.workspaces.find(w=>w.id===task.workspaceId)!,prior=owner.summaries;
+        const baseDirectory=directoryMaintenance,baseSummary=summaryMaintenance,baseCanvas=canvasMaintenance;
+        let committed=false;
+        // Copy eviction decisions, but never share memo tables or new evictions
+        // between competing projections. Preserve stable IDs within this build.
+        const project=(summaries:SummarySnapshot[])=>{
+          guard();
+          directoryMaintenance={...baseDirectory,replayMemo:new Map(),usageEvidenceMemo:new Map(),
+            evictedReplayKeys:new Set(baseDirectory.evictedReplayKeys),diagnostics:{...baseDirectory.diagnostics}};
+          summaryMaintenance={...baseSummary,memo:new Map(),evicted:new Set(baseSummary.evicted),deferred:new Set(baseSummary.deferred)};
+          canvasMaintenance={...baseCanvas,memo:new Map(),evicted:new Set(baseCanvas.evicted),evictionReasons:new Map(baseCanvas.evictionReasons)};
+          owner.summaries=[...(prior??[]),...summaries];
+          try{return build('compact','capacity');}finally{owner.summaries=prior;}
+        };
+        try{
+          const chosen=selectProjectedSummaries({before:candidate,preferred:proposals.filter(s=>summaryStorageBenefit(s,inputs)),
+            candidates:proposals,project,canProject:()=>Date.now()-started<AUTO_CONTEXT.maxDurationMs});
+          if(chosen.length){
+            const projected=project(chosen);
+            if(sourceFence!==summaryInputFence(repo,task,inputs))throw new Error('摘要来源已变化');
+            if(summaryProjectionBenefits(projected,candidate)){
+              // Probe failures are recoverable; only the final durable write owns
+              // a transaction. A failed commit must stop before using a stale task.
+              try{repo.transaction(state=>{
+                if(sourceFence!==summaryInputFence(repo,task,inputs))throw new Error('摘要来源已变化');
+                const context=ensureSessionContext(state,owner);
+                owner.summaries=[...(prior??[]),...chosen];
+                for(const taskId of new Set(chosen.flatMap(s=>s.coverage.map(c=>c.taskId))))if(taskId!==task.id){
+                  const rounds=(context.countedSummaryRounds??={})[taskId]??=[];
+                  if(!rounds.includes(roundId)){rounds.push(roundId);context.countedSummaryRounds![taskId]=rounds;
+                    context.historicalSummaryCounts[taskId]=Math.min(2,(context.historicalSummaryCounts[taskId]??0)+1);}
+                }
+              });}catch(error){commitFailed=true;throw error;}
+              accepted=chosen;candidate=projected;committed=true;
+            }
+          }
+        }finally{
+          if(!committed){owner.summaries=prior;directoryMaintenance=baseDirectory;summaryMaintenance=baseSummary;canvasMaintenance=baseCanvas;}
         }
-        for(const taskId of new Set(accepted.flatMap(s=>s.coverage.map(c=>c.taskId))))if(taskId!==task.id){
-          const rounds=(context.countedSummaryRounds??={})[taskId]??=[];
-          if(!rounds.includes(roundId)){rounds.push(roundId);context.countedSummaryRounds![taskId]=rounds;
-            context.historicalSummaryCounts[taskId]=Math.min(2,(context.historicalSummaryCounts[taskId]??0)+1);}
-        }
-      });
+      }
       if(accepted.length)summaryStatus='completed';
     }catch(error){
       summaryStatus=signal.aborted?'cancelled':'failed';
       accepted=[];
-      guard();if(signal.aborted)throw error;
+      guard();if(signal.aborted||commitFailed)throw error;
       resetMaintenance();
       repo.transaction(()=>repo.event(task.workspaceId,'context.summary_failed',{message:error instanceof Error?error.message:String(error),calls},task.id));
     }finally{

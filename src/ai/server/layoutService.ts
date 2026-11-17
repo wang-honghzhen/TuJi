@@ -32,7 +32,8 @@ export async function planRelationshipLayout(graph: GraphState, options: Relatio
           const old = documents[row.id]; documents[row.id] = { ...old, placements: row.placements, rev: row.rev, metadata: { ...old.metadata, updatedAt: row.updatedAt } };
         }
         for (const row of geometry.canvases) {
-          const index = canvases.findIndex(c => c.canvasId === row.id); canvases[index] = { ...canvases[index], placements: row.placements, updatedAt: row.updatedAt };
+          const index = canvases.findIndex(c => c.canvasId === row.id); canvases[index] = { ...canvases[index], placements: row.placements,
+            presentationPlacements: row.presentationPlacements, updatedAt: row.updatedAt };
         }
         state = { ...graph, documents, canvases, layoutVersion: geometry.layoutVersion }; reconcileRegionGeometry(graph, state);
       }
@@ -41,7 +42,9 @@ export async function planRelationshipLayout(graph: GraphState, options: Relatio
     worker.once('error', error => finish(error));
     worker.once('exit', code => { if (!finished) finish(new Error(`布局线程提前结束 (${code})`)); });
     const lightweight: GraphState = { ...graph,
-      nodes: Object.fromEntries(Object.keys(graph.nodes).map(id => [id, { nodeId: id, name: '', content: '' }])),
+      // Node dimensions depend on both strings. Dropping them makes worker
+      // placement disagree with rendering, especially for multiline cards.
+      nodes: Object.fromEntries(Object.entries(graph.nodes).map(([id, node]) => [id, { nodeId: id, name: node.name, content: node.content }])),
       documents: Object.fromEntries(Object.entries(graph.documents).map(([id, doc]) => [id, { ...doc, name: '', metadata: { ...doc.metadata, description: undefined } }])),
       canvases: graph.canvases.map(canvas => ({ ...canvas, canvasName: '', directories: Object.fromEntries(Object.entries(canvas.directories).map(([id, dir]) => [id, { name: '', childIds: dir.childIds }])) })),
       edges: graph.edges.map(edge => ({ ...edge, edgeContent: '' })) };

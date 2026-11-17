@@ -28,9 +28,9 @@ function summary(stats?: LayoutStats): string {
   }${detail}`;
   return `当前排布已经合适，无需调整。${detail}`;
 }
-export function LayoutOrganizeDialog({ state, canvas, graphRevision, initialRegionId, onPreview, onClose, onCommitted, onInspect }: {
+export function LayoutOrganizeDialog({ state, canvas, graphRevision, initialRegionId, onPreview, onClose, onInspect }: {
   state: GraphState; canvas: CanvasRecord; graphRevision: number; initialRegionId: string;
-  onPreview: (graph: GraphState | null) => void; onClose: () => void; onCommitted: (changeSetId: string) => void;
+  onPreview: (graph: GraphState | null) => void; onClose: () => void;
   onInspect?: (regionId: string) => void;
 }) {
   const [regionId, setRegionId] = useState(initialRegionId), [preview, setPreview] = useState<Preview>();
@@ -68,8 +68,8 @@ export function LayoutOrganizeDialog({ state, canvas, graphRevision, initialRegi
   const apply = async () => {
     if (!preview) return; setBusy(true); setError('');
     try {
-      const result = await useAiStore.getState().command<{ changeSetId: string }>('graph.layout.apply', { proposalId: preview.proposalId, operationId: operationId.current }, localErrors);
-      onCommitted(result.changeSetId); onClose();
+      await useAiStore.getState().command('graph.layout.apply', { proposalId: preview.proposalId, operationId: operationId.current }, localErrors);
+      onClose();
     } catch (cause) { setError(cause instanceof Error ? cause.message : '保存失败'); }
     finally { if (mounted.current) setBusy(false); }
   };

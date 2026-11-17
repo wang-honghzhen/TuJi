@@ -1,15 +1,16 @@
 import { useEffect, useRef, useState, type CSSProperties } from 'react';
 import { createPortal } from 'react-dom';
-import { ArrowLeft, Database, Download, Network, Palette, Settings, Upload, Volume2 } from 'lucide-react';
+import { ArrowLeft, Keyboard, Network, Palette, Volume2 } from 'lucide-react';
 import { useAiStore } from '../client';
 import { DEFAULT_PROVIDER, type ProviderConfig } from '../domain';
-import { AiError, downloadJson, useAction } from './common';
+import { AiError, useAction } from './common';
 import { AiCredentialInput } from './AiCredentialInput';
+import { ShortcutReference } from './ShortcutReference';
 import { UiSoundSettings } from '@/new/components/UiSoundSettings';
 import { CanvasBackgroundSettings } from '@/new/components/CanvasBackgroundSettings';
 import { useNewUiStore } from '@/new/newUiStore';
 
-const tabs = [{ id: 'model', label: '模型连接', icon: Network }, { id: 'personalization', label: '个性化', icon: Palette }, { id: 'appearance', label: '音效', icon: Volume2 }, { id: 'data', label: '数据', icon: Database }] as const;
+const tabs = [{ id: 'model', label: '模型连接', icon: Network }, { id: 'personalization', label: '个性化', icon: Palette }, { id: 'appearance', label: '音效', icon: Volume2 }, { id: 'shortcuts', label: '快捷键参考', icon: Keyboard }] as const;
 type SettingsTab = typeof tabs[number]['id'];
 
 export function AiSettingsDialog() {
@@ -25,11 +26,7 @@ function SettingsContent() {
   const [tab, setTab] = useState<SettingsTab>('model');
   const [provider, setProvider] = useState<ProviderConfig>({ ...(snapshot?.provider ?? DEFAULT_PROVIDER), contextPresetTokens: undefined, workNotesPercent: undefined });
   const [credential, setCredential] = useState('');
-  const [backup, setBackup] = useState<unknown>();
-  const [backupName, setBackupName] = useState('');
-  const [confirmImport, setConfirmImport] = useState(false);
   const [notice, setNotice] = useState('');
-  const file = useRef<HTMLInputElement>(null);
   const page = useRef<HTMLElement>(null);
   const action = useAction();
   const patch = (value: Partial<ProviderConfig>) => { setProvider(previous => ({ ...previous, ...value })); setNotice(''); };
@@ -61,7 +58,7 @@ function SettingsContent() {
     style={{ '--settings-sidebar-width': `${sidebarWidth}px` } as CSSProperties}>
     <aside className="ai-settings-sidebar" data-ai-settings-sidebar aria-label="设置导航">
       <button type="button" className="ai-settings-back" data-ai-settings-back onClick={() => close(false)} aria-label="返回工作区"><ArrowLeft size={17} />返回</button>
-      <div className="ai-settings-brand"><span><Settings size={20} /></span><div><p>图记</p><h2>应用设置</h2></div></div>
+      <div className="ai-settings-brand"><span><img src="/brand/app-icon.png" width={32} height={32} alt="图记" /></span><div><p>图记</p><h2>应用设置</h2></div></div>
       <nav className="ai-settings-tabs" role="tablist" aria-label="设置分类" aria-orientation="vertical">{tabs.map((item, index) => {
         const Icon = item.icon;
         return <button key={item.id} type="button" id={'settings-tab-' + item.id} role="tab" aria-selected={tab === item.id} aria-controls={'settings-panel-' + item.id}
@@ -89,16 +86,8 @@ function SettingsContent() {
     <section role="tabpanel" id="settings-panel-personalization" aria-labelledby="settings-tab-personalization" hidden={tab !== 'personalization'} className="ai-column">
       {tab === 'personalization' && <CanvasBackgroundSettings />}
     </section>
-    <section role="tabpanel" id="settings-panel-data" aria-labelledby="settings-tab-data" hidden={tab !== 'data'} className="ai-column">
-      <div className="ai-settings-intro"><h3>画布数据导入导出</h3><p className="ai-muted">备份目录、图文档、节点与关系；不包含会话、消息和附件。</p></div>
-      <div className="ai-card ai-column"><h3>导出备份</h3><p className="ai-muted">将当前画布数据保存为 JSON 文件。</p>
-        <div className="ai-row"><button className="ai-button" disabled={action.busy} onClick={() => void action.run(async () => { const result = await command('backup.export'); downloadJson(result, 'QIXUE-canvas-' + new Date().toISOString().slice(0, 10) + '.json'); })}><Download size={14} />导出画布</button></div>
-      </div>
-      <div className="ai-card ai-column"><h3>从备份恢复</h3><p className="ai-muted">导入会替换当前画布数据；没有一起导入的画布，其会话会被归档。</p>
-        <div className="ai-row"><button className="ai-button" disabled={action.busy} onClick={() => file.current?.click()}><Upload size={14} />选择画布文件</button></div>
-        <input ref={file} type="file" accept="application/json,.json" hidden aria-label="选择画布数据文件" onChange={event => { const selected = event.target.files?.[0]; event.target.value = ''; if (!selected) return; void action.run(async () => { const text = await selected.text(); setBackup(JSON.parse(text) as unknown); setBackupName(selected.name); setConfirmImport(false); }); }} />
-        {backupName && <><p className="ai-muted">准备导入：{backupName}</p><label className="ai-check"><input type="checkbox" checked={confirmImport} onChange={event => setConfirmImport(event.target.checked)} />确认用此文件替换当前画布数据</label><button className="ai-button ai-button-danger" disabled={!confirmImport || action.busy} onClick={() => void action.run(async () => { await command('backup.import', { backup }); setBackup(undefined); setBackupName(''); setConfirmImport(false); setNotice('画布数据已导入。'); })}>导入画布</button></>}
-      </div>
+    <section role="tabpanel" id="settings-panel-shortcuts" aria-labelledby="settings-tab-shortcuts" hidden={tab !== 'shortcuts'} className="ai-column">
+      <ShortcutReference />
     </section>
       </div></div>
       {(tab === 'model' || action.error || notice) && <footer className="ai-settings-footer"><div>

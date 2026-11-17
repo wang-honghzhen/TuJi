@@ -1,5 +1,5 @@
 import type { UserNotePage } from '@/ai/domain';
-import type { UserNoteDirectory } from '@/ai/userNotes';
+import { userNoteDirectoryPages, type UserNoteDirectory } from '@/ai/userNotes';
 import type { NotebookTab, PanelState } from './api';
 
 type NotebookView = Pick<PanelState, 'noteTabs' | 'notePageId' | 'noteDirectoryId'>;
@@ -9,10 +9,6 @@ export function reconcileNotebookView(view: NotebookView, pages: UserNotePage[],
   const patch: Partial<NotebookView> = {};
   const directoryIds = new Set(directories.map(directory => directory.id));
   const parents = new Set(directories.map(directory => directory.parentId ?? ''));
-  const byDirectory = new Map<string, UserNotePage[]>();
-  for (const page of pages) if (page.directoryId) {
-    const list = byDirectory.get(page.directoryId) ?? []; list.push(page); byDirectory.set(page.directoryId, list);
-  }
   const pageId = pages.some(page => page.id === view.notePageId) ? view.notePageId : pages[0]?.id ?? '';
   if (pageId !== view.notePageId) patch.notePageId = pageId;
   if (view.noteDirectoryId && !directoryIds.has(view.noteDirectoryId)) patch.noteDirectoryId = '';
@@ -22,7 +18,7 @@ export function reconcileNotebookView(view: NotebookView, pages: UserNotePage[],
     // A directory browser remains a browser when a first page is added: opening
     // its reader is an explicit action that must create a separate new tab.
     const kind = directoryId && !parents.has(directoryId) ? tab.kind : 'directory';
-    const candidates = byDirectory.get(directoryId) ?? [];
+    const candidates = userNoteDirectoryPages(pages, directoryId, directories);
     const pageId = kind === 'pages' ? (candidates.some(page => page.id === tab.pageId) ? tab.pageId : candidates[0]?.id) : undefined;
     if (directoryId === tab.directoryId && kind === tab.kind && pageId === tab.pageId) return tab;
     changed = true;

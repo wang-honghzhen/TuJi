@@ -15,7 +15,7 @@ export interface SourceRef { kind: 'message' | 'artifact' | 'node' | 'document' 
 export interface Session { id: string; canvasId: string; workspaceId: string; mode: SessionMode; title: string;
   titleSource?: 'manual' | 'pending' | 'message';
   temporaryContext?: { sourceSessionId?: string; revision: number; mode?: TemporaryMode; lockedAt?: string;
-    lastActiveAt?: string; expiresAt?: string; scope?: 'canvas' | 'desktop'; desktopNumber?: number };
+    lastActiveAt?: string; expiresAt?: string; scope?: 'canvas' | 'global' | 'desktop'; number?: number; desktopNumber?: number };
   /** Single-source descendants share allocation, never task ownership or access rights. */
   referenceFamilyId?: string;
   lifecycle: 'active' | 'archived' | 'deleted'; createdAt: string }
@@ -77,7 +77,8 @@ export interface MemorySnapshot { id: string; sourceSessionId: string; sourceTas
   sourceTaskStates?: Array<{ id: string; status: TaskStatus; instructionRevision: number; rootUserMessageId?: string }>;
   provenancePaths?: Array<{ source: SourceRef; viaSessionId: string; viaSnapshotIds: string[] }>;
   toolCalls?: ToolCallRecord[]; artifacts?: Artifact[] }
-export interface InputBinding { targetIds: string[]; artifactIds: string[]; artifactVersions: Record<string, number> }
+export interface CanvasTargetGroup { groupId: string; targetIds: string[] }
+export interface InputBinding { targetIds: string[]; targetGroups?: CanvasTargetGroup[]; artifactIds: string[]; artifactVersions: Record<string, number> }
 export interface Task { nodeReadEvidence?: Record<string,import('./server/nodeReadEvidence').NodeReadEvidence>; id: string; sessionId: string; workspaceId: string; canvasId: string; rootUserMessageId: string;
   reviewFirstCommitSeq?: number; reviewWindowClosed?: boolean; notebookBinding?: { id: string; revision: number };
   pauseRequested?: boolean; pauseReturnStatus?: TaskStatus; waitingSince?: number; idleDurationMs?: number;
@@ -107,6 +108,7 @@ export interface ProtocolMessage { role: 'system' | 'user' | 'assistant' | 'tool
   images?: import('./attachments').ImageAssetRef[];
   toolCalls?: Array<{ id: string; name: string; arguments: string }>; toolCallId?: string; responseItems?: unknown[]; reasoningContent?: string; stepId?: string }
 export interface ChatMessage { id: string; workspaceId: string; taskId: string; role: 'user' | 'assistant' | 'system'; text: string;
+  targetGroups?: CanvasTargetGroup[];
   targetNames?: Record<string,string>;
   progressSelection?: ProgressSelection[];
   selectedProgress?: import('./sessionContext').SelectedProgressTask[];
@@ -230,6 +232,7 @@ export const DEEPSEEK_MODELS = [{ id: DEEPSEEK_FLASH_MODEL, name: 'DeepSeek V4.1
 export const DEFAULT_PROVIDER: ProviderConfig = { apiFamily: 'deepseek', protocol: 'chat-completions', baseUrl: 'https://api.deepseek.com', model: DEEPSEEK_FLASH_MODEL,
   contextWindow: 500000, contextPresetTokens: 500000, maxOutputTokens: 16384, supportsTools: true, timeoutMs: 300000, thinkingEffort: 'high' };
 export interface AppSnapshot { soundSettings?: SoundSettings; schemaVersion: 3; graph: GraphState | null; graphRevision: number; canvasGraphReferences: Record<string, AgentGraphReferences>; sessionReferences?: Record<string, AgentGraphReferences>; sessions: Session[]; workspaces: Workspace[];
+  presentationAutoFocus?: Record<string, true>;
   desktopTemporarySequence?: number;
   attachmentLimits?: import('./attachments').AttachmentLimits;
   canvasReviewStates?: Record<string, import('./reviewTypes').CanvasReviewState>;
@@ -246,6 +249,7 @@ export interface AppSnapshot { soundSettings?: SoundSettings; schemaVersion: 3; 
   changes: ChangeSet[]; reviewChanges?: ChangeSet[]; toolCalls: ToolCallRecord[]; artifacts: Artifact[]; contextManifests: ContextManifest[]; events: WorkspaceEvent[];
   provider: ProviderConfig; credentialConfigured: boolean; setupCompleted: boolean; lastSeq: number }
 export interface SendInput { sessionId: string; text: string; clientMessageId: string; intent: 'new' | 'amend';
+  targetGroups?: CanvasTargetGroup[];
   progressSelection?: ProgressSelection[];
   presentationOwner?: string;
   viewedPart?: { taskId: string; part: number; version?:number };

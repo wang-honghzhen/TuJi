@@ -8,6 +8,7 @@ import { entity } from './graph';
 import { translateGraphPayload } from './graphReferences';
 import { READ_FORMAT_VERSION } from './readCoverage';
 import { visibleCallResult } from './readVisibility';
+import { summaryReceiptFacts, SUMMARY_PAGE_FACTS_INSTRUCTION } from './summaryReceiptFacts';
 
 const marker=/\[\[ref:([a-f0-9]{16})\]\]/g;
 /** Catalog entries come from structured source references, never guessed from object names. */
@@ -90,7 +91,11 @@ export function summaryProjection(state:AppSnapshot,task:Task,summary:SummarySna
     bindings=[...bindings,...catalog.filter(b=>b.kind==='read'&&used.has(b.key)&&!bindings.some(old=>old.key===b.key))];
   }
   const index=bindings.length&&state.graph?.canvases.some(c=>c.canvasId===task.canvasId)?graphIndex(state,task.canvasId):undefined;
+  const historicalReadPages=summaryReceiptFacts(state,task,summary);
   return {summaryId:summary.id,semanticType:summary.semanticType,summaryType:summary.children.length?'normal':'leaf',contentState:'summary',readWith:'context_read_children',content,
+    ...(summary.intermediateUserMessages?.some(message=>message.targetGroups?.length)
+      ?{intermediateUserMessages:summary.intermediateUserMessages.filter(message=>message.targetGroups?.length)}:{}),
+    ...(historicalReadPages.length?{historicalReadPages,readPageInstruction:SUMMARY_PAGE_FACTS_INSTRUCTION}:{}),
     ...(decisions.length?{userReviews:decisions.map(d=>JSON.parse(reviewDecisionText(d)).user_canvas_decision),reviewInstruction:REVIEW_INSTRUCTION}:{}),
     ...(bindings.length?{bindingEvidence:'identity_only',objectBindings:bindings.map(b=>{
       if(b.kind==='read'){

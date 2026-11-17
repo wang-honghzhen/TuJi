@@ -31,15 +31,10 @@ else {
   app.on('second-instance', (_event, argv) => { if (argv.includes('--quit')) void shutdown(); else if (companion) void companion.showMain(); });
   const shutdown = async () => {
     if (shuttingDown) return; shuttingDown = true;
-    const trace = message => { if (process.argv.includes('--smoke-test')) console.log(`QIXUE_SHUTDOWN ${message}`); };
-    trace('saving');
     try { await companion?.beforeQuit(); }
-    catch (error) { shuttingDown = false; console.error('图记退出前保存失败', error); if (!process.argv.includes('--smoke-test')) dialog.showErrorBox('请先保存编辑内容', String(error?.message ?? error)); return; }
-    trace('closing-server');
+    catch (error) { shuttingDown = false; console.error('图记退出前保存失败', error); dialog.showErrorBox('请先保存编辑内容', String(error?.message ?? error)); return; }
     host?.beginShutdown(); await vite?.close(); await host?.close();
-    trace('closing-windows');
     companion?.destroy();
-    trace('quit');
     mayQuit = true; if (process.exitCode === 1) app.exit(1); else app.quit();
   };
   app.on('before-quit', event => { if (!mayQuit) { event.preventDefault(); void shutdown().catch(() => { mayQuit = true; app.quit(); }); } });
@@ -92,13 +87,9 @@ else {
     };
     secure(window);
     companion = createCompanion({ main: window, origin: host.url, preload: path.join(projectRoot, 'desktop', 'preload.cjs'),
-      icon: path.join(projectRoot, 'desktop', 'assets', 'app-icon.ico'), directory, secure, quit: shutdown, smoke: process.argv.includes('--smoke-test') });
+      icon: path.join(projectRoot, 'desktop', 'assets', 'app-icon.ico'), directory, secure, quit: shutdown });
     await window.loadURL(host.url);
-    if (process.argv.includes('--smoke-test')) {
-      console.log(`QIXUE_SMOKE_STATE ${JSON.stringify({ menuVisible: window.isMenuBarVisible(), applicationMenu: Menu.getApplicationMenu() !== null, dataDirectory: directory })}`);
-      console.log(`QIXUE_SMOKE_READY ${host.url}`);
-    }
-    else { window.show(); window.focus(); }
+    window.show(); window.focus();
   } catch (error) {
     console.error(`图记桌面启动失败：${error instanceof Error ? error.message : '未知错误'}`);
     process.exitCode = 1; await shutdown();

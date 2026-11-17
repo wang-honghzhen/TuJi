@@ -9,6 +9,7 @@ module.exports = {
     'desktop/main.mjs',
     'desktop/preload.cjs',
     'desktop/window-controls.mjs',
+    'desktop/window-gestures.mjs',
     'desktop/companion.mjs',
     'desktop/assets/app-icon.ico',
     'desktop/data-directory.mjs',

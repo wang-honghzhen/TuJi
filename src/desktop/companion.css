@@ -30,25 +30,52 @@ html[data-desktop-role="panel"], html[data-desktop-role="panel"] body { backgrou
 .utility-panel[data-visible="true"] { transform: translateX(0); opacity: 1; pointer-events: auto; }
 .utility-panel-native { inset: 0; width: 100%; height: 100%; border-radius: 0; box-shadow: none; }
 .utility-panel-floating { border-radius: 14px; resize: both; overflow: hidden; min-width: 360px; min-height: 360px; }
-.utility-header { display: flex; align-items: center; justify-content: space-between; flex-shrink: 0; min-height: 40px; padding: 6px 10px 5px 12px; user-select: none; }
-.utility-heading { display: flex; align-items: center; gap: 7px; font-size: 11px; color: var(--utility-muted); letter-spacing: .06em; }
-.utility-actions { display: flex; gap: 3px; }
-.utility-actions button { width: 29px; height: 27px; display: flex; align-items: center; justify-content: center; background: transparent; border: 0; border-radius: 6px; color: #99adc8; -webkit-app-region: no-drag; }
-.utility-actions button:hover { color: #e3efff; background: #c5ddff12; }
-.utility-native-drag { -webkit-app-region: drag; }
-.utility-tabs { display: flex; gap: 3px; padding: 0 10px; flex-shrink: 0; overflow-x: auto; border-bottom: 1px solid var(--utility-edge); scrollbar-width: thin; }
-.utility-tabs::-webkit-scrollbar { height: 4px; }
-.utility-tabs::-webkit-scrollbar-thumb { border-radius: 8px; background: #8da9cd35; }
-.utility-tab { display: flex; align-items: center; flex-shrink: 0; border: 1px solid transparent; border-bottom: 0; border-radius: 7px 7px 0 0; color: #8297b3; }
-.utility-tab > button:first-child { display: flex; align-items: center; gap: 6px; padding: 9px 9px; font-size: 12px; white-space: nowrap; }
-.utility-tab[data-selected="true"] { background: #9dbde713; color: #d9e9ff; border-color: #adcfff23; box-shadow: inset 0 2px #93bde89c; }
-.utility-tab:hover { color: #e0ecfc; background: #91b7e50c; }
-.utility-tab-delete { display: flex; align-items: center; padding: 4px; margin-right: 4px; border-radius: 4px; opacity: .65; }
-.utility-tab-delete:hover { background: #ff9d9d22; color: #ffc8c8; opacity: 1; }
+.utility-header { --tab-surface: #0f1b2b; --tab-ink: #9fb4d0; --tab-hover: #c5ddff20; --tab-focus: #a5ccfc; display: flex; align-items: stretch; flex-shrink: 0; min-width: 0; height: 41px; padding: 0; user-select: none; background: var(--tab-surface); color: var(--tab-ink); border-radius: 13px 0 0 0; overflow: hidden; }
+.utility-header[data-edge-theme="note"] { --tab-surface: #e9ede6; --tab-ink: #65766a; --tab-hover: #40776512; --tab-focus: #4c907c; }
+.utility-header[data-edge-theme="note"][data-edge-selected="true"] { --tab-surface: #f6f7f2; --tab-ink: #355c4c; }
+.utility-header[data-edge-theme="temporary"][data-edge-selected="true"] { --tab-surface: #2a4362; --tab-ink: #e2efff; }
+.utility-panel-native .utility-header { border-radius: 0; }
+.utility-actions { display: flex; align-items: stretch; flex-shrink: 0; background: var(--tab-surface); }
+.utility-actions button { flex: 0 0 32px; width: 32px; height: 100%; display: flex; align-items: center; justify-content: center; padding: 0; background: transparent; border: 0; border-radius: 0; color: inherit; -webkit-app-region: no-drag; }
+.utility-actions button { cursor: pointer; }
+.utility-actions button:hover, .utility-actions button:active { background: var(--tab-hover); }
+.utility-actions button:focus-visible, .utility-tab button:focus-visible { outline: 2px solid var(--tab-focus); outline-offset: -3px; }
+.utility-actions .utility-drag-handle { cursor: grab; touch-action: none; }
+.utility-actions .utility-drag-handle[data-dragging="true"] { cursor: grabbing; background: var(--tab-hover); }
+.utility-actions button svg { pointer-events: none; }
+/* Native resize borders consume the first few pixels; the segment background still reaches the top. */
+.utility-panel-native .utility-actions { padding-top: 8px; }
+.utility-panel-native .utility-tab > button { padding-top: 8px; }
+.utility-tabs { display: flex; align-items: stretch; flex: 1; min-width: 0; height: 100%; overflow: hidden; }
+.utility-tab-pins { position: relative; z-index: 2; display: flex; flex-shrink: 0; }
+/* The scroll viewport extends under the pinned slant, keeping that seam diagonal while scrolling. */
+.utility-tab-scroll { display: flex; align-items: stretch; min-width: 0; flex: 1; height: 100%; margin-left: -7px; padding-left: 7px; overflow-x: auto; overflow-y: hidden; scrollbar-width: none; }
+.utility-tab-scroll::-webkit-scrollbar { display: none; }
+.utility-tab-scroll .utility-tab { flex: 0 0 148px; width: 148px; min-width: 0; max-width: 100%; }
+.utility-tab-scroll .utility-tab > button:first-child { flex: 1; }
+.utility-tab { --tab-focus: #a5ccfc; --segment-surface: #0f1b2b; --segment-underline: transparent; position: relative; isolation: isolate; display: flex; align-items: stretch; flex-shrink: 0; height: 100%; border: 0; border-radius: 0; background: transparent; color: #91a5c0; transition: color .12s; }
+/* Background and divider share the same full-height slash; button hit areas stay rectangular. */
+.utility-tab::before { content: ''; position: absolute; z-index: -1; inset: 0; background: var(--segment-surface); box-shadow: inset 0 -2px var(--segment-underline); transform: skewX(-18deg); pointer-events: none; }
+.utility-tab-pins .utility-tab:first-child::before { left: -7px; }
+.utility-tab::after { content: ''; position: absolute; z-index: 1; right: -.5px; top: 0; width: 1px; height: 100%; background: currentColor; opacity: .24; transform: skewX(-18deg); pointer-events: none; }
+.utility-tab-scroll .utility-tab:last-child::after,
+.utility-tabs:has(.utility-tab-scroll:empty) .utility-tab-pins .utility-tab:last-child::after { display: none; }
+.utility-tab > button:first-child { display: flex; align-items: center; justify-content: center; gap: 5px; min-width: 0; height: 100%; padding: 0 10px; font-size: 12px; white-space: nowrap; cursor: pointer; border-radius: 0; }
+.utility-tab > button:first-child svg { flex-shrink: 0; }
+.utility-tab > button:first-child span { max-width: 148px; overflow: hidden; text-overflow: ellipsis; }
+.utility-tab:hover { --segment-surface: #192b40; color: #e0ecfc; }
+.utility-tab[data-selected="true"] { --segment-surface: #2a4362; --segment-underline: #9bbfe9; color: #e2efff; }
+.utility-tab[data-theme="note"] { --tab-focus: #4c907c; --segment-surface: #e9ede6; color: #65766a; }
+.utility-tab[data-theme="note"]:hover { --segment-surface: #f0f3ec; color: #355c4c; }
+.utility-tab[data-theme="note"][data-selected="true"] { --segment-surface: #f6f7f2; --segment-underline: #628d76; color: #355c4c; }
+.utility-tab-delete { display: flex; align-items: center; justify-content: center; flex: 0 0 24px; width: 24px; height: 100%; padding: 0; border-radius: 0; opacity: .65; cursor: pointer; }
+.utility-tab-delete:hover { color: #ffc8c8; opacity: 1; }
+.utility-tab[data-theme="note"] .utility-tab-delete:hover { color: #a35648; }
 .utility-content { flex: 1; min-height: 0; min-width: 0; display: flex; flex-direction: column; overflow: hidden; }
 .utility-content > .ai-chat-page { flex: 1; min-height: 0; }
 .utility-content .ai-chat-heading { padding: 11px 14px; }
-.utility-content .ai-chat-heading .ai-chat-title-group { min-width: 0; gap: 7px; }
+.utility-content .ai-chat-heading .ai-chat-title-group { flex: 1; min-width: 0; flex-wrap: nowrap; gap: 7px; }
+.utility-content .ai-chat-tools { margin-left: auto; flex-shrink: 0; }
 .utility-content .ai-chat-title { max-width: 100%; }
 .utility-mode-label { font-size: 10px; color: #7e9bbd; white-space: nowrap; }
 .utility-resize { position: absolute; z-index: 5; left: -4px; top: 0; bottom: 0; width: 8px; cursor: ew-resize; border-radius: 5px; }

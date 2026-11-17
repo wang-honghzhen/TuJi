@@ -7,7 +7,7 @@ export interface UserNoteImage {
 }
 export type UserNoteBlock = { id: string; type: 'text'; text: string }
   | { id: string; type: 'images'; images: UserNoteImage[] };
-export interface UserNoteDirectory { id: string; name: string; parentId?: string; createdAt: string; updatedAt: string }
+export interface UserNoteDirectory { id: string; name: string; parentId?: string; createdAt: string; updatedAt: string; pageIds?: string[] }
 
 /** Old plain-text pages keep their complete whitespace when first opened. */
 export function userNoteBlocks(page: Pick<UserNotePage, 'id' | 'text' | 'blocks'>): UserNoteBlock[] {
@@ -27,6 +27,13 @@ export function userNotePath(directories: UserNoteDirectory[], directoryId?: str
   }
   return '/' + names.join('/');
 }
-export function userNoteDirectoryPages(pages: UserNotePage[], directoryId: string): UserNotePage[] {
-  return pages.filter(page => page.directoryId === directoryId);
+export function userNoteDirectoryPages(pages: UserNotePage[], directoryId: string, directories: UserNoteDirectory[] = []): UserNotePage[] {
+  const members = pages.filter(page => page.directoryId === directoryId);
+  const remaining = new Map(members.map(page => [page.id, page]));
+  const ordered: UserNotePage[] = [];
+  for (const id of directories.find(directory => directory.id === directoryId)?.pageIds ?? []) {
+    const page = remaining.get(id);
+    if (page) { ordered.push(page); remaining.delete(id); }
+  }
+  return [...ordered, ...remaining.values()];
 }

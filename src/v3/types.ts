@@ -24,6 +24,9 @@ export interface Placement extends Point {
   /** Trusted user placement time; automatic moves retain this historical intent. */
   lastManualAt?: number;
   manualAnchor?: Point;
+  /** An explicit drag may enlarge a fixed container into another fixed object.
+   * Only this exact pair of footprints may overlap; neither becomes manual. */
+  overlapAllowances?: Array<{ parentId: string; otherId: string; self: Rect; other: Rect }>;
 }
 
 export interface GraphRecord {
@@ -68,6 +71,9 @@ export interface CanvasRecord {
   directories: Record<string, CanvasDirectory>;
   placements: Record<string, Placement>;
   collapsed: Record<string, true>;
+  /** Canvas-only collision adjustments made while opening a folded region.
+   * The canonical anchor remains unchanged, including shared document content. */
+  presentationPlacements?: Record<string, Point & { parentId: string; baseX: number; baseY: number }>;
   /** Branches removed from this canvas only; original document ownership is retained. */
   excludedDocumentIds?: string[];
   /** Retained node references after a shared document layer is dissolved; these do not own the node. */

@@ -1,9 +1,7 @@
 import type { CSSProperties, MouseEventHandler, PointerEventHandler } from 'react';
-import { ChevronDown, ChevronRight, File, Layers } from 'lucide-react';
-import type { GraphEdge } from '@/v3/types';
+import { ChevronDown, ChevronRight, File, Move, Layers } from 'lucide-react';
+import type { GraphEdge, Rect } from '@/v3/types';
 import type { RenderBlock } from '@/v3/layout';
-import { CanvasTextPreview } from './CanvasTextPreview';
-import { canvasTextMetrics } from '../canvasTextPresentation';
 
 export interface RegionSummary { nodeCount: number; regionCount: number; preview: RenderBlock[] }
 interface Props {
@@ -24,8 +22,7 @@ interface Props {
 
 /** The occupied rectangle stays explicit, while a soft surface and title tab
  * carry the hierarchy instead of stacking heavy picture-frame borders. */
-export function CanvasRegion({ block, document, active, selected, disabled, summary, edges, zoom, onPointerDown, onSelect, onToggle, onEnter, onLeave }: Props) {
-  const titleMetrics = canvasTextMetrics('region', zoom);
+export function CanvasRegion({ block, document, active, selected, summary, edges, zoom, onPointerDown, onSelect, onEnter, onLeave }: Omit<Props, 'disabled' | 'onToggle'>) {
   const points = new Map<string, { x: number; y: number }>();
   if (summary.preview.length) {
     const xs = summary.preview.map(b => b.rect.x + b.rect.width / 2);
@@ -41,20 +38,6 @@ export function CanvasRegion({ block, document, active, selected, disabled, summ
   return <div data-region-id={block.id} data-region-collapsed={block.collapsed} data-region-kind={document ? 'document' : 'subgraph'}
     data-region-selected={selected} className={`canvas-region ${block.collapsed ? 'is-folded' : ''} ${active ? 'is-active' : ''}`}
     style={style}>
-    <div data-canvas-interactive data-hover-id={block.id} data-hover-kind="record" data-record-header={block.id}
-      className="canvas-region-header" style={{ overflow: 'hidden', top: zoom < .7 ? 4 : 10,
-        height: Math.min(block.rect.height - 20, Math.max(32, titleMetrics.lineHeight)), gap: zoom < .7 ? 3 : 8 }}
-      onPointerDown={onPointerDown} onDragStart={event => event.preventDefault()} onClick={onSelect} onPointerEnter={onEnter} onPointerMove={onEnter} onPointerLeave={onLeave}>
-      <button data-canvas-interactive type="button" disabled={disabled} className="canvas-region-toggle"
-        onPointerDown={event => event.stopPropagation()}
-        onClick={event => { event.stopPropagation(); onToggle(); }} aria-label={block.collapsed ? '展开' : '折叠'}>
-        {block.collapsed ? <ChevronRight size={14} /> : <ChevronDown size={14} />}
-      </button>
-      {zoom >= .7 && (document ? <File size={15} className="shrink-0 text-amber-200/90" /> : <Layers size={15} className="shrink-0 text-slate-200/90" />)}
-      <CanvasTextPreview data-region-title zoom={zoom} textRole="region" {...titleMetrics} center maxLines={1}
-        className="min-w-0 font-medium" style={{ width: undefined, flex: '1 1 auto' }}>{block.name}</CanvasTextPreview>
-      {!block.collapsed && zoom >= .7 && <span className="canvas-region-count" style={{ fontSize: Math.max(10, 11 / zoom) }}>{summary.nodeCount}</span>}
-    </div>
     {block.collapsed && <div data-canvas-interactive data-hover-id={block.id} data-hover-kind="record"
       className="canvas-region-summary overflow-hidden" style={{ display: zoom < .7 ? 'none' : undefined }}
       onPointerDown={onPointerDown} onDragStart={event => event.preventDefault()} onClick={onSelect} onPointerEnter={onEnter} onPointerMove={onEnter} onPointerLeave={onLeave}>
@@ -68,5 +51,28 @@ export function CanvasRegion({ block, document, active, selected, disabled, summ
         {[...points].map(([id, p]) => <rect key={id} x={p.x - 4} y={p.y - 2.5} width="8" height="5" rx="1.8" fill="currentColor" opacity=".75" />)}
       </svg>
     </div>}
+  </div>;
+}
+
+export function CanvasRegionControls({ block, document, active, selected, disabled, rect, summary, onPointerDown, onSelect, onToggle, onEnter, onLeave }:
+  Omit<Props, 'edges' | 'zoom'> & { rect: Rect }) {
+  return <div data-canvas-interactive data-hover-id={block.id} data-hover-kind="record" data-record-header={block.id}
+    data-region-selected={selected} data-active={active} className="canvas-region-controls"
+    title={block.name} style={{ left: rect.x, top: rect.y, width: rect.width, zIndex: active ? 2 : 1 }}
+    onPointerDown={onPointerDown} onDragStart={event => event.preventDefault()} onClick={onSelect}
+    onPointerEnter={onEnter} onPointerMove={onEnter} onPointerLeave={onLeave}>
+    <button data-canvas-interactive type="button" disabled={disabled} className="canvas-region-toggle"
+      title={(block.collapsed ? '展开 ' : '折叠 ') + block.name} aria-label={(block.collapsed ? '展开 ' : '折叠 ') + block.name}
+      onPointerDown={event => event.stopPropagation()} onClick={event => { event.stopPropagation(); onToggle(); }}>
+      {block.collapsed ? <ChevronRight size={15} /> : <ChevronDown size={15} />}
+    </button>
+    <button data-region-drag type="button" className="canvas-region-grip" title={'拖动 ' + block.name} aria-label={'拖动 ' + block.name}>
+      <Move size={17} aria-hidden="true" />
+    </button>
+    {rect.width >= 128 && <>
+      {document ? <File size={13} className="text-amber-200/90" /> : <Layers size={13} />}
+      <span data-region-title className="canvas-region-name">{block.name}</span>
+      {!block.collapsed && <span className="canvas-region-count">{summary.nodeCount}</span>}
+    </>}
   </div>;
 }

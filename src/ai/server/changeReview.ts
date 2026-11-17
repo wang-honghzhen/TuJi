@@ -15,7 +15,7 @@ const ignored = new Set(['rev', 'updatedAt', 'collapsed']);
 function semantic(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(semantic);
   if (!object(value)) return value;
-  return Object.fromEntries(Object.entries(value).filter(([k]) => !ignored.has(k) && k !== 'placements').map(([k, v]) => [k, semantic(v)]));
+  return Object.fromEntries(Object.entries(value).filter(([k]) => !ignored.has(k) && k !== 'placements' && k !== 'presentationPlacements').map(([k, v]) => [k, semantic(v)]));
 }
 const same = (a: unknown, b: unknown) => hash(a === undefined ? null : a) === hash(b === undefined ? null : b);
 const comparable = (d: ReviewDelta, a: unknown, b: unknown) => same(d.layout ? a : semantic(a), d.layout ? b : semantic(b));
@@ -27,8 +27,8 @@ export function reviewDeltas(before: GraphState, after: GraphState): ReviewDelta
     const walk = (a: unknown, b: unknown, path: string[]) => {
       if (same(a, b) || ignored.has(path.at(-1) ?? '')) return;
       const base = { collection: patch.collection, id: patch.id, path };
-      if (path.includes('placements')) {
-        if (path.at(-1) === 'placements') {
+      if (path.includes('placements') || path.includes('presentationPlacements')) {
+        if (path.at(-1) === 'placements' || path.at(-1) === 'presentationPlacements') {
           for (const key of new Set([...Object.keys(object(a) ? a : {}), ...Object.keys(object(b) ? b : {})]))
             walk(object(a) ? a[key] : undefined, object(b) ? b[key] : undefined, [...path, key]);
         } else result.push({ ...base, before: a, after: b, layout: true });

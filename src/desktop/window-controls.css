@@ -1,60 +1,31 @@
-/* Keep the canvas full-height; the invisible strip provides native window dragging. */
-.desktop-drag-region {
-  position: fixed;
-  inset: 0 52px auto 0;
-  height: 12px;
-  z-index: 2147483645;
-  background: transparent;
-  user-select: none;
-  -webkit-app-region: drag;
-}
-
-/* Only this narrow top edge catches the pointer while the controls are hidden. */
+/* Native pointer tracking reveals this strip at the actual 2-DIP top edge.
+   Buttons touch the top edge; their centres remain below the resize border. */
 .desktop-window-controls {
-  position: fixed;
-  top: 0;
-  right: 0;
-  width: 52px;
-  height: 12px;
-  z-index: 2147483646;
-  background: transparent;
-  outline: none;
-  user-select: none;
+  position: fixed; top: 0; right: 0; width: 116px; height: 0;
+  z-index: 2147483646; outline: none; user-select: none;
   -webkit-app-region: no-drag;
 }
-.desktop-window-controls:is(:hover, :focus-visible, :has(:focus-visible)) { height: 40px; }
+.desktop-window-controls[data-maximized='true'] { width: 80px; }
+.desktop-window-controls:is([data-visible='true'], :focus-visible, :has(:focus-visible)) { height: 32px; }
 .desktop-window-buttons {
-  position: absolute;
-  top: 4px;
-  right: 6px;
-  display: flex;
-  gap: 2px;
-  background: transparent;
-  opacity: 0;
-  visibility: hidden;
-  pointer-events: none;
-  transition: opacity 120ms ease;
+  position: absolute; top: 0; right: 0; display: flex; gap: 0; padding: 0 8px 0 0;
+  border: 0; border-radius: 0 0 0 6px; background: #102541d9;
+  opacity: 0; visibility: hidden; pointer-events: none;
+  transition: opacity 100ms ease;
 }
-.desktop-window-controls:is(:hover, :focus-visible, :has(:focus-visible)) .desktop-window-buttons {
-  opacity: 1;
-  visibility: visible;
-  pointer-events: auto;
+.desktop-window-controls:is([data-visible='true'], :focus-visible, :has(:focus-visible)) .desktop-window-buttons {
+  opacity: 1; visibility: visible; pointer-events: auto;
 }
 .desktop-window-button {
-  display: grid;
-  place-items: center;
-  width: 40px;
-  height: 32px;
-  padding: 0;
-  border: 0;
-  border-radius: 5px;
-  background: transparent;
-  box-shadow: none;
-  color: #cbd5e1;
-  cursor: default;
-  -webkit-app-region: no-drag;
+  display: grid; place-items: center; flex: 0 0 36px; width: 36px; min-width: 36px;
+  height: 32px; padding: 0; border: 0; border-radius: 0; background: transparent;
+  color: #d9e5f5; cursor: pointer; -webkit-app-region: no-drag;
+  transition: background 100ms, color 100ms;
 }
-.desktop-window-button:hover, .desktop-window-button:active { background: transparent; color: #fff; }
-.desktop-window-button:focus-visible { outline: 2px solid #93c5fd; outline-offset: -3px; }
-.desktop-window-button svg { pointer-events: none; filter: drop-shadow(0 1px 2px #020617); }
-@media (prefers-reduced-motion: reduce) { .desktop-window-buttons { transition: none; } }
+.desktop-window-button:hover { background: #9fcaff24; color: #fff; }
+.desktop-window-button:active { background: #9fcaff40; }
+.desktop-window-button:focus-visible { outline: 2px solid #b0d2ff; outline-offset: -2px; }
+.desktop-window-button svg { pointer-events: none; flex-shrink: 0; }
+.desktop-window-drag { cursor: grab; touch-action: none; }
+.desktop-window-drag[data-dragging='true'] { cursor: grabbing; background: #9fcaff40; }
+@media (prefers-reduced-motion: reduce) { .desktop-window-buttons, .desktop-window-button { transition: none; } }

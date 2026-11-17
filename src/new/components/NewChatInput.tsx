@@ -14,6 +14,7 @@ import { AiError, fileToBase64, useAction } from '@/ai/ui/common';
 import { AiInteractionView } from '@/ai/ui/AiTaskView';
 import { AiTargetRefs } from '@/ai/ui/AiTargetRefs';
 import { canvasMemberIds } from '@/ai/canvasScope';
+import { filterTargetGroups, targetGroupRefs } from '@/ai/targetGroups';
 import { flushCanvasEdits } from '../canvasEditFlush';
 import { trackDraftAction } from '@/ai/draftTransfers';
 
@@ -25,10 +26,16 @@ export function NewChatInput({ canvasId = 'qixue-draft-canvas', sessionId }: { c
   const minimal = isMinimalSession(session);
   const draftId = session?.id ?? `canvas:${canvasId}`;
   const draftState = useAiStore((state) => state.draftsBySession[draftId]);
-  const selection = useAiStore((state) => state.inputRefsByCanvas[canvasId]);
-  const removeInputRef = useAiStore((state) => state.removeInputRef);
-  const selected=useMemo(()=>{const members=snapshot?.graph?canvasMemberIds(snapshot.graph,canvasId):new Set<string>();
-    return minimal?[]:(selection??[]).filter(ref=>members.has(ref));},[selection,snapshot?.graph,canvasId,minimal]);
+  const removeInputGroup = useAiStore((state) => state.removeInputGroup);
+  const requestCanvasSelection = useAiStore((state) => state.requestCanvasSelection);
+  const targetGroups = useMemo(() => {
+    const members = snapshot?.graph ? canvasMemberIds(snapshot.graph, canvasId) : new Set<string>();
+    return minimal ? [] : filterTargetGroups(draftState?.targetGroups ?? [], members);
+  }, [draftState?.targetGroups, snapshot?.graph, canvasId, minimal]);
+  const selected = useMemo(() => targetGroupRefs(targetGroups), [targetGroups]);
+  const availableRefs = useMemo(() => new Set(selected), [selected]);
+  const displayedGroups = minimal ? [] : draftState?.targetGroups ?? [];
+  const missingRefCount = targetGroupRefs(displayedGroups).filter(ref => !availableRefs.has(ref)).length;
   const command = useAiStore((state) => state.command);
   const setDraft = useAiStore((state) => state.setDraft);
   const connection = useAiStore((state) => state.connection);
@@ -82,15 +89,17 @@ export function NewChatInput({ canvasId = 'qixue-draft-canvas', sessionId }: { c
     const sendIntent = intent ?? (targetTask?'amend':'new');
     const result = await command<Task>('input.send', { sessionId: currentSession.id, text: draft.text.trim(), clientMessageId,
       intent: sendIntent, ...(targetTask && sendIntent === 'amend' ? { targetTaskId: targetTask.id } : {}),
-      targetIds: [...selected], artifactIds: draft.artifactIds, modelSelection, progressSelection:draft.progressSelection,
+      targetIds: [...selected], targetGroups, artifactIds: draft.artifactIds, modelSelection, progressSelection:draft.progressSelection,
       ...(!temporary && useAiStore.getState().view==='canvas'?{presentationOwner,
         ...(playback?.taskId&&playback.cursor>=0?{viewedPart:{taskId:playback.taskId,part:playback.cursor,
           version:snapshot?.presentationParts?.find(p=>p.taskId===playback.taskId&&p.seq===playback.cursor)?.version}}:{})}:{}) } satisfies SendInput);
-    setDraft(currentSession.id, { text: '', pendingMessageId: undefined, artifactIds: [], progressSelection:[] });
+    const sentGroups = new Set(targetGroups.map(group => group.groupId));
+    setDraft(currentSession.id, { text: '', pendingMessageId: undefined, artifactIds: [], progressSelection:[],
+      targetGroups: (getDraft(currentSession.id).targetGroups ?? []).filter(group => !sentGroups.has(group.groupId)) });
     if (!temporary) usePlaybackStore.getState().set(canvasId, { taskId: result.id,
       cursor: result.presentation?.cursor ?? (result.id === playback?.taskId ? taskParts(useAiStore.getState().snapshot, result.id).at(-1)?.seq ?? 1 : 1),
       mode: 'follow', cameraFollow: true, followRequest: (usePlaybackStore.getState().byCanvas[canvasId]?.followRequest ?? 0) + 1 });
-    setNotice(targetTask?.id===result.id?'已补充当前任务。':'消息已发送。');
+    setNotice((targetTask?.id===result.id?'已补充当前任务。':'消息已发送。') + (missingRefCount ? `已忽略 ${missingRefCount} 个不在当前画布中的对象。` : ''));
   }));
 
   const upload = (files: File[]) => void uploadAction.run(() => trackDraftAction(async () => {
@@ -121,8 +130,10 @@ export function NewChatInput({ canvasId = 'qixue-draft-canvas', sessionId }: { c
     {snapshot && !snapshot.credentialConfigured && <p className="px-4 pt-2 ai-muted">API Key 尚未配置，请在左侧边栏的设置中填写。</p>}
     {session?.lifecycle === 'archived' && <p className="px-4 pt-2 ai-muted">此会话已归档，当前仅可查看历史。</p>}
     {uploadAction.busy && <p className="px-4 pt-2 ai-muted">正在解析附件，解析完成后即可发送（可以先继续输入）。</p>}
-    {session&&selected.length>0&&<div className="ai-composer-targets"><AiTargetRefs refs={selected} canvasId={canvasId} pending
-      removeDisabled={unavailable} onRemove={ref=>{removeInputRef(canvasId,ref);setDraft(draftId,{pendingMessageId:undefined});}}/></div>}
+    {session&&displayedGroups.length>0&&<div className="ai-composer-targets"><AiTargetRefs refs={selected} groups={displayedGroups} availableRefs={availableRefs} canvasId={canvasId} pending
+      onLocate={refs => { useAiStore.getState().setView('canvas'); requestCanvasSelection(canvasId, refs); }}
+      removeDisabled={unavailable} onRemoveGroup={groupId=>removeInputGroup(draftId,groupId)}/>
+      {!!missingRefCount&&<p role="status" className="ai-muted">有 {missingRefCount} 个对象已不在当前画布中，发送时将忽略这些对象。</p>}</div>}
     <textarea ref={input} rows={2} value={session?draft.text:''} disabled={!session || action.busy || session?.lifecycle === 'archived'}
       onChange={(event) => setDraft(draftId, { text: event.target.value, pendingMessageId: undefined })}
       onPaste={event=>{const files=Array.from(event.clipboardData.files).filter(f=>f.type.startsWith('image/'));if(files.length){event.preventDefault();if(!unavailable)upload(files);}}}

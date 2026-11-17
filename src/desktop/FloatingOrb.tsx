@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { BookOpen, MessagesSquare, X } from 'lucide-react';
 import { useAiStore } from '@/ai/client';
 import type { Session } from '@/ai/domain';
-import { isDesktopTemporary } from '@/ai/temporaryModes';
+import { isDesktopTemporary, temporaryLabel, temporaryNumber } from '@/ai/temporaryModes';
 import { closeTemporarySession, touchTemporarySession } from '@/ai/temporaryWindows';
 import { panelCommand, usePanelState } from './panelState';
 import './companion.css';
@@ -68,7 +68,7 @@ export function FloatingOrb() {
   }, []);
   const entries = [{ id: 'notebook', label: '用户笔记', kind: 'note' },
     ...(sessions.length < 3 ? [{ id: 'new', label: '新建极简悬浮会话', kind: 'create' }] : []),
-    ...sessions.map(session => ({ id: session.id, label: `悬浮 ${session.temporaryContext?.desktopNumber} · ${session.title}`, kind: 'session', number: session.temporaryContext?.desktopNumber }))];
+    ...sessions.map(session => ({ id: session.id, label: `${temporaryLabel(session)} · ${session.title}`, kind: 'session', number: temporaryNumber(session) }))];
   const angles = entries.map((_, index) => START + (END - START) * (index + 1) / (entries.length + 1));
   const arcs = [START, ...angles.map(angle => angle + 12)].map((start, index) => arc(start, index < angles.length ? angles[index] - 12 : END));
   const sx = ui.orb.flipX ? -1 : 1, sy = ui.orb.flipY ? -1 : 1;

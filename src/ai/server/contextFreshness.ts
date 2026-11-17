@@ -7,7 +7,6 @@ import { relationDependencyKey } from './graphRelationDependencies';
 import { subgraphKey, equivalentSubgraphVersion, type SubgraphPart } from './subgraphVersions';
 import { acknowledgedObservations, visibleWriteCalls } from './writeAcknowledgements';
 import { currentDirectoryObservation } from './directoryObservations';
-import { renderNoticeFacts } from './contextUpdates';
 import { allRetainedCalls, originResultId, visibleCallResult } from './readVisibility';
 import { canvasField, canvasKey, canvasFactCovered, factKey, canvasReadTools, canvasResultHasBody, canvasDeliveryValid, canvasObservationDelivery, visibleCanvasCallIds, deliveredCanvasFacts, fullyObservedNodeIds, type CanvasFact } from './canvasReadEvidence';
 import { currentRelationHashes } from './graphRelationDependencies';
@@ -211,13 +210,4 @@ export function canvasNoticeLabels(state:AppSnapshot,task:Task,change:Change,obs
   const fact=change.fact as CanvasFact|undefined;
   const range=fact?.start!==undefined?`[${fact.start},${fact.end??'?'}）`:'';
   return {kind,labels:[`${label}·${scope}${range}`],detail:readTool};
-}
-
-/** Each session compares its own visible read evidence with the current canvas. */
-export function appendCanvasFreshness(state: AppSnapshot, task: Task, stage: ContextStage,
-  encode:(id:string)=>string, context:GraphReadContext|undefined=state.graph?graphReadContext(state):undefined,
-  observations?:Observation[]): string[] {
-  if (!state.graph?.canvases.some(c => c.canvasId === task.canvasId)) return [];
-  return renderNoticeFacts([...pendingCanvasChanges(state,task,stage,context,observations).values()].map(({change,observation})=>
-    canvasNoticeLabels(state,task,change,observation,encode,context)));
 }

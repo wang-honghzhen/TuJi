@@ -8,6 +8,18 @@
 .graph-search-field button:hover { color:#e2edfa; background:#ffffff12; }
 .graph-search-field button:focus-visible,.graph-search-result:focus-visible,.canvas-search button:focus-visible,.graph-search-filters button:focus-visible { outline:2px solid #8eb6e7; outline-offset:2px; }
 .graph-search-inset { padding:8px 10px 5px; }
+.library-navigation-row { display:flex; align-items:center; gap:4px; padding:12px 8px 6px 10px; flex-shrink:0; min-width:0; }
+.library-navigation-row .sidebar-toggle { width:28px; height:32px; }
+.library-search-row { display:flex; align-items:center; padding:0 10px 7px; flex-shrink:0; }
+.library-search-row .graph-search-field { flex:1; padding:5px 8px; }
+.library-tabs { display:flex; flex:1; min-width:0; align-items:center; gap:3px; padding:3px; overflow-x:auto; border:1px solid #9ab6d326; border-radius:9px; background:#0b1523c9; scrollbar-width:thin; }
+.library-tabs > button { flex:1 0 auto; min-width:max-content; height:30px; padding:0 8px; border-radius:6px; font-size:12px; font-weight:500; color:#93a6bf; white-space:nowrap; }
+.library-tabs > button:hover { color:#e1edff; background:#a5c8f21a; }
+.library-tabs > button[aria-pressed=true] { color:#e0eeff; background:#294665; box-shadow:inset 0 0 0 1px #83b3ea45; }
+.library-tabs > button:focus-visible { outline:2px solid #a6cbfa; outline-offset:-2px; }
+.library-tabs > button > span { overflow:visible; }
+.library-tools { display:flex; align-items:center; justify-content:space-between; gap:8px; padding:2px 12px 7px; flex-shrink:0; }
+.review-tab-count { display:inline-flex; align-items:center; justify-content:center; flex-shrink:0; min-width:16px; height:16px; padding:0 4px; border-radius:5px; background:#d6a65b23; color:#f4cd89; font-size:10px; font-variant-numeric:tabular-nums; }
 .graph-search-filters { display:flex; gap:4px; padding:10px 12px; }
 .graph-search-filters button { padding:4px 10px; border-radius:6px; font-size:11px; color:#8fa0b6; }
 .graph-search-filters button[aria-pressed=true] { background:#86afdf1c; color:#c5dcf7; }

@@ -14,6 +14,7 @@ import { DomainError, requireValue, strings, text } from './errors';
 import { hash, now } from './repository';
 import { AI_STRUCTURE_BOUNDARY_MESSAGE, assertAiStructureBoundary } from './aiStructurePolicy';
 import { appendDesignEvaluation, canvasMode, designData, migrateProposalEvaluations, migrateProposalNode, modeOf } from '@/v3/design';
+import { prunePresentationPlacements } from '@/v3/presentationLayout';
 import type { GraphNodeRecord } from '@/v3/types';
 
 export function canvasOf(state: GraphState, canvasId: string): CanvasRecord {
@@ -62,7 +63,7 @@ export function semanticHashes(state: GraphState): Record<string, string> {
   }
   for (const canvas of state.canvases) {
     values[`canvases:${canvas.canvasId}:structure`] = hash([canvas.childIds, canvas.directories, canvas.excludedDocumentIds, canvas.nodeReferenceIds, canvas.isDraft]);
-    values[`canvases:${canvas.canvasId}:view`] = hash([canvas.placements, canvas.collapsed]);
+    values[`canvases:${canvas.canvasId}:view`] = hash([canvas.placements, canvas.collapsed, canvas.presentationPlacements]);
   }
   for (const edge of state.edges) values[`edges:${edge.edgeId}`] = hash(edge);
   return values;
@@ -81,7 +82,7 @@ export function resourcesFor(state: GraphState, canvasId: string, refs: Iterable
 
 const structureTypes = new Set(['createNode', 'createSubgraph', 'move', 'moveCanvasItems', 'reparentContent', 'deleteNode', 'deleteEdge', 'deleteSubgraph', 'deleteDocument', 'replaceDocument', 'registerDocument', 'importDocument', 'cleanupEdges']);
 export function planMutation(state: GraphState, canvasId: string, raw: Record<string, unknown>,
-  actor: 'user' | 'ai' = 'user'): { state: GraphState; id?: string; cleanedEdges: number; identityMap?: Record<string, string> } {
+  actor: 'user' | 'ai' = 'user', protectedIds?: ReadonlySet<string>): { state: GraphState; id?: string; cleanedEdges: number; identityMap?: Record<string, string> } {
   const command = structuredClone(raw); const kind = text(command.type, '操作类型', 80);
   if (kind === 'replaceDocument') requireValue(actor === 'user', '图文档替换仅由用户执行', 'USER_ONLY_MANAGEMENT');
   requireValue(command.designListPatch === undefined || kind === 'updateDesignNode', 'designListPatch仅用于updateDesignNode', 'INVALID_ARGUMENT');
@@ -162,8 +163,8 @@ export function planMutation(state: GraphState, canvasId: string, raw: Record<st
     } else if (kind === 'updateEdge') next = updateEdge(state, text(command.id, '边'), command.patch as EdgePatch);
     else if (kind === 'reconnectEdge') {
       requireValue(command.end === 'source' || command.end === 'target', '边端点无效'); next = reconnectEdge(state, text(command.id, '边'), command.end, text(command.nodeId, '节点'));
-    } else if (kind === 'moveBlock') next = moveBlock(state, canvasId, text(command.id, '对象'), text(command.parentId, '父对象'), command.point as { x: number; y: number });
-    else if (kind === 'toggleCollapse') next = toggleCollapse(state, canvasId, text(command.id, '对象'));
+    } else if (kind === 'moveBlock') next = moveBlock(state, canvasId, text(command.id, '对象'), text(command.parentId, '父对象'), command.point as { x: number; y: number }, protectedIds);
+    else if (kind === 'toggleCollapse') next = toggleCollapse(state, canvasId, text(command.id, '对象'), protectedIds);
     else if (kind === 'createCanvas') { next = createCanvas(state, text(command.name, '画布名称', 1000), canvasMode(command.mode)); createdId = next.canvases.at(-1)?.canvasId; }
     else if (kind === 'cloneCanvas') { next = cloneCanvas(state, canvasId, text(command.name, '画布名称', 1000)); createdId = next.canvases.at(-1)?.canvasId; }
     else if (kind === 'createDocument') { next = createDocument(state, text(command.name, '图文档名称', 1000), modeOf(canvasOf(state, canvasId))); createdId = Object.keys(next.documents).find(key => !state.documents[key]); }
@@ -184,7 +185,7 @@ export function planMutation(state: GraphState, canvasId: string, raw: Record<st
       }
       next = pruneInvalidEdges({ ...state, nodes, canvases: [...others, emptyCanvas(canvasId, source.canvasName, source.isDraft, modeOf(source))] });
     } else throw new DomainError('未开放的图操作', 'UNSUPPORTED_COMMAND');
-    next = compactEdges(commitStructure(next, state));
+    next = compactEdges(commitStructure(next, state, protectedIds));
     if (kind === 'moveBlock') next = recordPlacementIntent(next, canvasId, String(command.parentId), String(command.id), actor, Date.now());
     return { state: next, id: createdId, cleanedEdges: state.edges.length - next.edges.length };
   }); } catch (cause) {
@@ -198,7 +199,7 @@ export function planMutation(state: GraphState, canvasId: string, raw: Record<st
   }
 }
 /** Keep structure only; backgrounds belong to global personalization settings. */
-const canvasKeys = ['canvasId', 'canvasName', 'updatedAt', 'childIds', 'directories', 'placements', 'collapsed',
+const canvasKeys = ['canvasId', 'canvasName', 'updatedAt', 'childIds', 'directories', 'placements', 'collapsed', 'presentationPlacements',
   'excludedDocumentIds', 'nodeReferenceIds', 'isDraft', 'mode'];
 export function compactCanvasPresentation(state: GraphState): GraphState {
   let changed = false;
@@ -229,7 +230,7 @@ export function compactEdges<T extends { edges: GraphEdge[] }>(graph: T): T {
   return changed ? { ...graph, edges } : graph;
 }
 export function normalizedGraph(state: GraphState, previous?: GraphState): GraphState {
-  const next = compactEdges(normalizeCanvases(normalizeRegionLayout(migrateProposalEvaluations(state), previous)));
+  const next = prunePresentationPlacements(compactEdges(normalizeCanvases(normalizeRegionLayout(migrateProposalEvaluations(state), previous))));
   validateStructure(next); validateRegionLayout(next); return next;
 }
 function collectionsOf(state: GraphState) {

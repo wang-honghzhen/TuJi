@@ -1,4 +1,4 @@
-import type { ProtocolMessage, SourceRef } from './domain';
+import type { CanvasTargetGroup, ProtocolMessage, SourceRef } from './domain';
 
 export const AUTO_CONTEXT = Object.freeze({ recentGroups: 5, recentShare: .12,
   directoryShare: .05, directoryCacheShare: .02, trigger: .80, target: .65,
@@ -29,7 +29,7 @@ export interface Coverage { recordId: string; taskId: string; version: string; s
 export interface SummaryObjectBinding {key:string;kind:'node'|'document'|'edge'|'read';id:string;version?:string|number}
 export interface SummarySnapshot { id: string; version: string; semanticType: 'task' | 'artifact';
   stepIds?: string[]; inputUnitIds?: string[]; summaryRoundId?: string;
-  intermediateUserMessages?: Array<{ id:string; version:number; text:string; order:number }>;
+  intermediateUserMessages?: Array<{ id:string; version:number; text:string; order:number; targetGroups?:CanvasTargetGroup[] }>;
   retentionPolicyVersion?: number;
   text: string; coverage: Coverage[]; children: string[]; createdAt: string; sourceRefs: SourceRef[];
   objectBindings?:SummaryObjectBinding[];

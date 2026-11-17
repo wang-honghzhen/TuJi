@@ -3,7 +3,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { useId } from 'react';
 import { ArrowUpRight, ChevronDown, ChevronRight, FileText, Folder } from 'lucide-react';
 import { searchCanvas } from '../graphSearch';
-import { SearchField, SearchHighlight } from './SearchField';
+import { SearchField, SearchHighlight, type PanelSearchProps } from './SearchField';
 import type { CanvasRecord, GraphState } from '@/v3/types';
 import { getStructurePaths, getMoveTargets } from '@/v3/structure';
 import type { GraphActionRequest } from '../graphActions';
@@ -12,7 +12,7 @@ import { GraphNameLabel } from './GraphPathLabel';
 import { connectionLevel, nodeConnectionCounts } from '@/v3/nodeConnections';
 import { nodeAccents, subgraphAccent } from '../graphAppearance';
 
-interface Props {
+interface Props extends PanelSearchProps {
   canvas: CanvasRecord | null; state: GraphState | null;
   onNavigate: (id: string) => void;
   onAction: (request: GraphActionRequest) => void;
@@ -20,8 +20,9 @@ interface Props {
   onNotice: (message: string) => void;
   onOrganize?: (regionId: string) => void;
 }
-export function NewCanvasDirectoryPanel({ canvas, state, onNavigate, onAction, onMove, onNotice, onOrganize }: Props) {
-  const [query, setQuery] = useState('');
+export function NewCanvasDirectoryPanel({ canvas, state, onNavigate, onAction, onMove, onNotice, onOrganize, query: controlledQuery, onQueryChange, showSearch = true }: Props) {
+  const [localQuery, setLocalQuery] = useState('');
+  const query = controlledQuery ?? localQuery, setQuery = onQueryChange ?? setLocalQuery;
   const matches = useMemo(() => canvas && state ? searchCanvas(state, canvas, query, false) : [], [canvas, state, query]);
   const [closed, setClosed] = useState<Set<string>>(new Set());
   const [selected, setSelected] = useState<Set<string>>(new Set());
@@ -37,7 +38,7 @@ export function NewCanvasDirectoryPanel({ canvas, state, onNavigate, onAction, o
     while (parent) { if (closed.has(parent)) return false; parent = parents.get(parent); }
     return true;
   });
-  useEffect(() => { setSelected(new Set()); setActive(''); setClosed(new Set()); setMenu(null); setQuery(''); }, [canvas?.canvasId]);
+  useEffect(() => { setSelected(new Set()); setActive(''); setClosed(new Set()); setMenu(null); setLocalQuery(''); }, [canvas?.canvasId]);
   useEffect(() => { setSelected((ids) => new Set([...ids].filter((id) => paths.some((row) => row.id === id)))); }, [paths]);
   if (!canvas || !state) return null;
   const root = canvas.canvasId;
@@ -70,10 +71,10 @@ export function NewCanvasDirectoryPanel({ canvas, state, onNavigate, onAction, o
     setMenu({ position: { x: event.clientX, y: event.clientY }, items });
   };
   return <div className="h-full min-h-0 flex flex-col" data-canvas-directory onContextMenu={(event) => openMenu(event)}>
-    <div className="graph-search-inset" onContextMenu={event => event.stopPropagation()}><SearchField label="搜索当前目录中的节点和子图" placeholder="搜索节点、子图…" value={query} onChange={setQuery} onKeyDown={event => {
+    {showSearch && <div className="graph-search-inset" onContextMenu={event => event.stopPropagation()}><SearchField label="搜索当前目录中的节点和子图" placeholder="搜索节点、子图…" value={query} onChange={setQuery} onKeyDown={event => {
       if (event.key === 'Escape') setQuery('');
       if (event.key === 'Enter' && !event.nativeEvent.isComposing && matches[0]) onNavigate(matches[0].id);
-    }} /></div>
+    }} /></div>}
     <svg width="0" height="0" aria-hidden="true" className="absolute"><defs>
       <linearGradient id={gradientId}><stop stopColor="#60a5fa" /><stop offset="1" stopColor="#a78bfa" /></linearGradient>
       <linearGradient id={`${gradientId}-document`}><stop stopColor="#f4d27a" /><stop offset="1" stopColor="#f6aa55" /></linearGradient>

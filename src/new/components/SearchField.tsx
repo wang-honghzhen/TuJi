@@ -3,6 +3,14 @@ import type { KeyboardEventHandler } from 'react';
 import { Search, X } from 'lucide-react';
 import './search.css';
 
+export interface PanelSearchProps {
+  query?: string;
+  onQueryChange?: (value: string) => void;
+  showSearch?: boolean;
+}
+export type SidebarSearchKind = 'documents' | 'review' | 'directory';
+export type SidebarSearchValues = Record<SidebarSearchKind, string>;
+
 export const SearchField = forwardRef<HTMLInputElement, {
   value: string; onChange: (value: string) => void; label: string; placeholder?: string;
   autoFocus?: boolean; onKeyDown?: KeyboardEventHandler<HTMLInputElement>;

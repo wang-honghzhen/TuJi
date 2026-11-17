@@ -5,7 +5,7 @@
 .review-body{padding:0 12px 12px;min-height:0;overflow:auto;flex:1}
 .review-help{font-size:11px;color:#a7b7cd;margin:7px 0;overflow-wrap:anywhere}
 .review-round{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;margin:10px 0}
-.review-toolbar{display:flex;align-items:center;gap:8px}
+.review-toolbar{display:flex;align-items:center;flex-wrap:wrap;gap:6px}
 .review-round-tabs{display:flex;padding:2px;background:#0b1221;border-radius:7px;margin-right:auto}
 .review-round-tabs button{padding:5px 10px;border-radius:5px;color:#94a3b8;white-space:nowrap}
 .review-round-tabs button[aria-pressed=true]{color:#e2e8f0;background:#334155}

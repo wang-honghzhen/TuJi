@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { useAiStore } from '../client';
 import type { Session, TemporaryMode } from '../domain';
-import { isDesktopTemporary, temporaryMode, temporaryModeDescriptions } from '../temporaryModes';
+import { isDesktopTemporary, isIndependentTemporary, temporaryLabel, temporaryMode, temporaryModeDescriptions } from '../temporaryModes';
 import { AiChatPage } from './AiChatPage';
 import { AiHistoryPicker } from './AiHistoryPicker';
 import { AiError, useAction } from './common';
@@ -13,8 +13,8 @@ export function TemporaryChat({ session }: { session: Session }) {
   const current = snapshot?.sessions.find(s => s.id === enteredId && s.mode !== 'temporary' && s.lifecycle === 'active');
   const [choosing, setChoosing] = useState(false);
   const action = useAction(), mode = temporaryMode(session) ?? 'minimal';
-  const desktop = isDesktopTemporary(session);
-  const locked = desktop || !!session.temporaryContext?.lockedAt || !!snapshot?.tasks.some(t => t.sessionId === session.id);
+  const desktop = isDesktopTemporary(session), independent = isIndependentTemporary(session);
+  const locked = independent || !!session.temporaryContext?.lockedAt || !!snapshot?.tasks.some(t => t.sessionId === session.id);
   const busySource = snapshot?.tasks.some(t => t.sessionId === current?.id && t.status !== 'completed');
   const workspace = snapshot?.workspaces.find(w => w.id === session.workspaceId);
   const sourceId = session.temporaryContext?.sourceSessionId;
@@ -24,7 +24,7 @@ export function TemporaryChat({ session }: { session: Session }) {
   return <>
     <AiChatPage sessionId={session.id} canvasId={session.canvasId}
       headingSubtitle={mode !== 'minimal' && <span className="ai-temporary-source" data-ai-memory-source={sourceId}>记忆来源：{sourceTitle}</span>}
-      headingExtra={desktop ? <span className="utility-mode-label" title={temporaryModeDescriptions.minimal}>极简 · 悬浮 {session.temporaryContext?.desktopNumber}</span> :
+      headingActions={independent ? <span className="utility-mode-label" title={temporaryModeDescriptions.minimal}>{desktop ? `极简 · ${temporaryLabel(session)}` : '极简'}</span> :
         <select className="ai-button ai-temporary-select" aria-label="临时会话模式" data-ai-temporary-select value={mode} disabled={action.busy || locked}
           title={temporaryModeDescriptions[mode] + (locked ? ' 已开始对话，模式已锁定。' : '')} onChange={event => {
             const next = event.target.value as TemporaryMode;

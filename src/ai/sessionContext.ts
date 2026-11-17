@@ -136,7 +136,7 @@ export function sessionProgressRecords(state: AppSnapshot, sessionId: string): S
   for (const message of [...state.messages.filter(m => local.has(m.taskId)), ...memories.flatMap(m => m.messages)]) {
     if (message.phase === 'status') continue;
     records.push({id:message.id,taskId:message.taskId,stepId:message.stepId,complete:message.status==='complete',order:message.sequence??Date.parse(message.createdAt),kind:'message',
-      content:{role:message.role,text:message.text,version:message.version,createdAt:message.createdAt,targetRefs:message.targetRefs,sourceRefs:message.sourceRefs,attachments:message.attachments,selectedProgress:message.selectedProgress}});
+      content:{role:message.role,text:message.text,version:message.version,createdAt:message.createdAt,targetRefs:message.targetRefs,targetGroups:message.targetGroups,sourceRefs:message.sourceRefs,attachments:message.attachments,selectedProgress:message.selectedProgress}});
   }
   for (const call of [...state.toolCalls.filter(c => local.has(c.taskId)), ...memories.flatMap(m => m.toolCalls ?? [])])
     records.push({id:call.id,taskId:call.taskId,stepId:call.stepId,complete:['completed','rejected'].includes(call.status)&&call.result!==undefined,order:call.sequence??Date.parse(call.createdAt),kind:'tool_call',

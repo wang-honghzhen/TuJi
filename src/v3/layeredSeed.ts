@@ -13,8 +13,8 @@ import { BLOCK_GAP } from './types';
  * per depth — and nothing else. The caller keeps its own acceptance test, so a
  * seed can be rejected; the seed never writes positions by itself.
  *
- * Only acyclic input gets a rank assignment. A cyclic batch has no flow to
- * order, and inventing one would misrepresent the relations the AI just wrote.
+ * Feedback edges may run against the dominant flow. Dagre reverses them only
+ * in its temporary ranking graph; the application's edge directions are intact.
  */
 
 export type LayeredFlow = 'down' | 'up' | 'right' | 'left';
@@ -66,8 +66,6 @@ export function layeredLayout(
   ranker = 'tight-tree',
 ): LayeredLayout | undefined {
   if (nodes.length < 2) return undefined;
-  const ids = nodes.map(node => node.id);
-  if (!isAcyclic(ids, relations)) return undefined;
   const graph = new dagre.graphlib.Graph();
   graph.setGraph({ rankdir: RANKDIR[flow], nodesep: BLOCK_GAP, ranksep: BLOCK_GAP, marginx: 0, marginy: 0, ranker });
   graph.setDefaultEdgeLabel(() => ({}));

@@ -31,7 +31,7 @@ export function allEvidence(state:AppSnapshot,task:Task):Evidence[] {
   const calls=[...state.toolCalls.filter(c=>localTasks.has(c.taskId)),...memories.flatMap(m=>m.toolCalls??[])];
   const result:Evidence[]=[...reviewEvidence(state,task)];
   for(const m of messages)if(m.status!=='streaming'&&!m.presentationCallId&&m.phase!=='status'&&(m.role!=='assistant'||!!m.text.trim())) {
-    const text=JSON.stringify({role:m.role,text:m.text,targetRefs:m.targetRefs,attachments:m.attachments,selected_progress:m.selectedProgress,viewedPart:m.viewedPart,viewedPartUnavailable:m.viewedPartUnavailable});
+    const text=JSON.stringify({role:m.role,text:m.text,targetRefs:m.targetRefs,targetGroups:m.targetGroups,attachments:m.attachments,selected_progress:m.selectedProgress,viewedPart:m.viewedPart,viewedPartUnavailable:m.viewedPartUnavailable});
     result.push({id:m.id,taskId:m.taskId,stepId:m.stepId,version:digest([m.version,text]),text,sources:[{kind:'message',id:m.id,version:m.version}],user:m.role==='user',part:m.partSeq,order:m.sequence??Date.parse(m.createdAt),createdAt:m.createdAt});
   }
   for(const c of calls)if(['completed','rejected'].includes(c.status)&&c.result!==undefined){
@@ -186,7 +186,7 @@ export function currentEntries(state:AppSnapshot,task:Task,_clean=false,_readSte
   const replaced=(id:string)=>summaries.some(s=>s.coverage.some(c=>c.recordId===id&&records.some(r=>r.id===id&&coverageKey(c)===coverageKey(fullCoverage(r)))));
   const users=state.messages.filter(m=>m.taskId===task.id&&m.role==='user'&&m.status!=='streaming');
   for(const m of users){const r=records.find(r=>r.id===m.id);if(!r||m.id!==task.rootUserMessageId&&replaced(m.id))continue;entries.push({id:`current:${m.id}:${m.version}`,category:'current_request',coverage:[fullCoverage(r)],order:m.sequence??Date.parse(m.createdAt),
-    taskId:task.id,messages:[{role:'user',content:JSON.stringify({current_message:{id:m.id,content:m.text,selectedRefs:m.targetRefs,sources:m.sourceRefs,selected_progress:m.selectedProgress,
+    taskId:task.id,messages:[{role:'user',content:JSON.stringify({current_message:{id:m.id,content:m.text,selectedRefs:m.targetRefs,targetGroups:m.targetGroups,sources:m.sourceRefs,selected_progress:m.selectedProgress,
       ...(m.viewedPart?{viewedContent:viewedContent(state,m.viewedPart,allowed,r)}:m.viewedPartUnavailable?{viewedContent:{records:[],unavailable:true}}:{})}})}]});}
   // Evidence and the archive are fixed during this synchronous build. Validate
   // once here, rather than recursively rechecking every tree for every step.
@@ -262,7 +262,7 @@ export function snapshotEvidence(messages:ChatMessage[],calls:ToolCallRecord[],p
     const text=reviewDecisionText(d);result.push({id:d.id,taskId:d.changes[0]?.taskId??fallbackTaskId,version:digest(text),text,sources:[],user:false,order:Date.parse(d.createdAt),createdAt:d.createdAt});
   }
   for(const m of messages)if(m.status!=='streaming'&&!m.presentationCallId&&m.phase!=='status'){
-    const text=JSON.stringify({role:m.role,text:m.text,targetRefs:m.targetRefs,attachments:m.attachments,selected_progress:m.selectedProgress,viewedPart:m.viewedPart,viewedPartUnavailable:m.viewedPartUnavailable});
+    const text=JSON.stringify({role:m.role,text:m.text,targetRefs:m.targetRefs,targetGroups:m.targetGroups,attachments:m.attachments,selected_progress:m.selectedProgress,viewedPart:m.viewedPart,viewedPartUnavailable:m.viewedPartUnavailable});
     result.push({id:m.id,taskId:m.taskId,stepId:m.stepId,version:digest([m.version,text]),text,sources:[],user:m.role==='user',part:m.partSeq,order:m.sequence??0,createdAt:m.createdAt});
   }
   for(const c of calls)if(c.result!==undefined){const text=JSON.stringify({function:c.name,arguments:c.arguments,result:c.result,operationId:c.operationId});

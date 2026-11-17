@@ -8,6 +8,7 @@ if (process.isMainFrame) {
     command: (action, payload) => ipcRenderer.invoke('tuji:desktop', action, payload),
     hitTest: interactive => ipcRenderer.send('tuji:orb-hit-test', interactive),
     drag: phase => ipcRenderer.send('tuji:orb-drag', phase),
+    dragPanel: phase => { if (role === 'panel') ipcRenderer.send('tuji:window-drag', phase); },
     onOrbPointer: callback => {
       if (role !== 'orb') return () => {};
       const listener = (_event, pointer) => callback(pointer);
@@ -31,8 +32,14 @@ if (process.isMainFrame) {
   if (role === 'main') contextBridge.exposeInMainWorld('tujiWindow', Object.freeze({
     minimize: () => ipcRenderer.send('tuji:window-action', 'minimize'),
     toggleMaximize: () => ipcRenderer.send('tuji:window-action', 'toggle-maximize'),
+    drag: phase => ipcRenderer.send('tuji:window-drag', phase),
     close: () => ipcRenderer.send('tuji:window-action', 'close'),
     getState: () => ipcRenderer.invoke('tuji:window-state'),
+    onControlsPointer: callback => {
+      const listener = (_event, pointer) => callback(pointer);
+      ipcRenderer.on('tuji:window-controls-pointer', listener);
+      return () => ipcRenderer.removeListener('tuji:window-controls-pointer', listener);
+    },
     onStateChanged: callback => {
       const listener = (_event, state) => callback(state);
       ipcRenderer.on('tuji:window-state-changed', listener);

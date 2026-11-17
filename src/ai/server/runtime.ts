@@ -4,6 +4,7 @@ import { ATTACHMENT_TOOLS, attachmentRead } from './attachmentReads';
 import { attachmentLimits, attachmentBatchError, attachmentVision } from '../attachments';
 import { canvasDirectory } from '@/v3/canvas';
 import { graphTargetName } from '../toolDescriptions';
+import { normalizeInputTargets } from './inputTargetGroups';
 import type { RelationshipLayoutResult } from '@/v3/relationshipLayout';
 import type { GraphState } from '@/v3/types';
 import { allReviewChanges,reviewEntries,reviewUnitRefs } from '../changeReview';
@@ -37,13 +38,15 @@ import { planFrozenReads } from './frozenReadCommit';
 import { applyPatches,assertAiCommandRefs,assertAiObjectRefs,canvasOf,checkAiEffects,entity,graphDiff,memberIds,patchCanUndo,patchValue,planMutation,readableIds,resourcesFor,semanticHashes } from './graph';
 import { assertDesignQuery } from './graphQueries';
 import { graphQueryRead } from './graphQueryRead';
-import { graphLayoutVersion, layoutDependencyKey } from './graphLayoutDependencies';
+import { changedPlacementRefs, graphLayoutVersion, layoutDependencyKey } from './graphLayoutDependencies';
 import { assertMutationReadEvidence } from './graphMutationEvidence';
 import { acknowledgeDeletedGraphReads,advanceResponseReadHashes,assertGraphReadHashes,rememberGraphReadHashes,scopedGraphReadHashes,type GraphReadHashes } from './graphReadDependencies';
 import { canvasGraphReferences,emptyGraphReferences,graphReferenceCodec,rebindCanvasReferences,seedAddressableReferences,seedPayloadReferences,sessionGraphReferences,translateGraphPayload } from './graphReferences';
 import { summaryArchive } from './historyRepresentations';
 import { InputTokenEstimator,inputTokenSample,observedInputUpperBound,type InputTokenSample } from './inputTokenEstimator';
 import { planRelationshipLayout } from './layoutService';
+import { generationLayoutIds } from './generationLayout';
+import { activePlacementProtection, manualMoveBasis } from './manualLayout';
 import { minimalPreview,runMinimalChat } from './minimalChat';
 import { assertCompleteNodeRead,completeNodeEvidence,prepareNodeReadAdvances } from './nodeReadEvidence';
 import { deleteNotebookEntry,mutateNotebook,writableNotebook,writeAiNote } from './notebooks';
@@ -97,6 +100,7 @@ export class Runtime {
   private manifestReadDependencies = new WeakMap<ContextManifest, GraphReadHashes>();
   private editOccupancies = new Map<string, { field: string; expiresAt: number }>();
   private placementOccupancies = new Map<string, number>();
+  private pendingLayoutIntents = new Map<string, { operationId: string; requestHash: string }>();
   private proposalPlans = new Map<string, ProposalPlan>();
   private reviewPreviews = new Map<string, { canvasId: string; selectedIds: string[]; groupIds: string[]; action: ReviewAction; signature: string; expiresAt: number }>();
   private reviewRestarts = new Set<string>();
@@ -110,7 +114,8 @@ export class Runtime {
     if(!estimator){estimator=new InputTokenEstimator();this.inputTokenEstimators.set(sessionId,estimator);}
     return estimator;
   }
-  constructor(readonly repo: Repository, readonly modelCaller: ModelCaller = callModel, readonly webCaller: typeof callWeb = callWeb) {
+  constructor(readonly repo: Repository, readonly modelCaller: ModelCaller = callModel, readonly webCaller: typeof callWeb = callWeb,
+    private readonly layoutPlanner: typeof planRelationshipLayout = planRelationshipLayout) {
     migrateRetiredCanvasNotices(repo);
     if(repo.state.canvasVersionProtocol?.version!==1)return;
     repo.transaction(state => {
@@ -162,7 +167,8 @@ export class Runtime {
     const duplicate = this.repo.state.messages.find(m => m.id === `user:${session.id}:${requestId}`);
     if (duplicate) return this.getTask(duplicate.taskId);
     const members = isMinimalSession(session) ? new Set<string>() : memberIds(this.graph(), session.canvasId);
-    const targets = isMinimalSession(session)?[]:strings(input.targetIds ?? [], '选区').filter(ref => members.has(ref)), attached = strings(input.artifactIds ?? [], '附件');
+    const { targetIds: targets, targetGroups } = normalizeInputTargets(isMinimalSession(session) ? { targetIds: [] } : input, members);
+    const attached = strings(input.artifactIds ?? [], '附件');
     const workspace = this.repo.state.workspaces.find(w => w.id === session.workspaceId)!;
     const versions: Record<string, number> = {};
     for (const ref of attached) {
@@ -211,7 +217,7 @@ export class Runtime {
         task = { id: id('task:'), sessionId: session.id, workspaceId: workspace.id, canvasId: session.canvasId,
           rootUserMessageId: `user:${session.id}:${requestId}`, clientRequestId: requestId, instructionRevision: 1, appliedInstructionRevision: 0,
           status: 'queued', createdAt: now(), updatedAt: now(), modelSelection: input.modelSelection ? structuredClone(input.modelSelection) : undefined,
-          inputBindings: { targetIds: targets, artifactIds: attached, artifactVersions: versions },
+          inputBindings: { targetIds: targets, targetGroups: targetGroups ? structuredClone(targetGroups) : undefined, artifactIds: attached, artifactVersions: versions },
           readHashes: {},
           ...defaultTaskBudget(state.provider), usedTokens: 0, stepCount: 0, fencingToken: 0,
           relatedTaskId: input.intent === 'amend' ? input.targetTaskId : undefined };
@@ -219,7 +225,7 @@ export class Runtime {
         if (input.intent === 'amend' && input.targetTaskId) this.message(task, 'system', '原任务已结束，本条补充已保存为关联的新任务。', 'status');
       }
       state.messages.push({ id: `user:${session.id}:${requestId}`, workspaceId: workspace.id, taskId: task.id, role: 'user', text: body,
-        version: 1, status: 'complete', phase: amended ? 'amendment' : 'request', createdAt: now(), relatedOperationIds: [], targetRefs: targets,
+        version: 1, status: 'complete', phase: amended ? 'amendment' : 'request', createdAt: now(), relatedOperationIds: [], targetRefs: targets, targetGroups,
         targetNames:Object.fromEntries(targets.map(ref=>[ref,graphTargetName(state,ref,session.canvasId)])),
         sourceRefs: attached.map(ref => ({ kind: 'artifact' as const, id: ref, version: versions[ref] })), instructionRevision: task.instructionRevision });
       state.messages.at(-1)!.attachments = attached.map(ref => ({ kind: 'artifact' as const, id: ref, version: versions[ref] }));
@@ -244,7 +250,7 @@ export class Runtime {
       state.messages.find(message => message.id === `user:${session.id}:${requestId}`)!.sequence = this.repo.event(workspace.id, 'message.completed', { messageId: `user:${session.id}:${requestId}` }, task.id).globalSeq;
       if(!amended){
         const root=state.messages.find(m=>m.id===task.rootUserMessageId)!;
-        const isolatedTask={...task,inputBindings:{targetIds:task.inputBindings.targetIds,artifactIds:[],artifactVersions:{}}};
+        const isolatedTask={...task,inputBindings:{...task.inputBindings,artifactIds:[],artifactVersions:{}}};
         const minimal:AppSnapshot={...state,tasks:[isolatedTask],messages:[{...root,sourceRefs:[],attachments:[]}],
           toolCalls:[],steps:[],changes:[],snapshots:[],inheritanceEdges:[],artifacts:[],contextManifests:[],presentationParts:[],events:[],
           workspaces:[{id:workspace.id,sessionId:session.id,pinnedNotes:workspace.pinnedNotes,workNotes:[],snapshotIds:[],artifactIds:[]}]};
@@ -351,7 +357,7 @@ export class Runtime {
     const prior = this.getTask(taskId); requireValue(isTerminal(prior), '请先结束当前任务');
     const root = this.repo.state.messages.find(m => m.id === prior.rootUserMessageId)!;
     const result = this.send({ sessionId: prior.sessionId, text: `明确重新执行并先核对当前图与已执行差异。原请求：${root.text}`,
-      clientMessageId: id(), intent: 'new', targetIds: prior.inputBindings.targetIds,
+      clientMessageId: id(), intent: 'new', targetIds: prior.inputBindings.targetIds, targetGroups: prior.inputBindings.targetGroups ?? root.targetGroups,
       artifactIds: prior.inputBindings.artifactIds.filter(ref => this.repo.state.artifacts.some(a => a.id === ref && a.status !== 'deleted')), modelSelection: prior.modelSelection });
     this.repo.transaction(() => { result.relatedTaskId = prior.id; this.repo.event(result.workspaceId, 'task.linked', { relatedTaskId: prior.id }, result.id); });
     return result;
@@ -1448,17 +1454,26 @@ export class Runtime {
     checkAiEffects(before, planned, task.canvasId, memberIds(before, task.canvasId));
     // A child the plan newly put on the canvas has no user-authored position:
     // the AI writes a path, so the region has to place it on insertion.
-    const insertedIds = [...new Set([...memberIds(planned, task.canvasId)].filter(ref => !entity(before, ref)))];
+    const plannedMembers = memberIds(planned, task.canvasId);
+    const insertedIds = [...plannedMembers].filter(ref => !entity(before, ref));
+    const provisionalIds = generationLayoutIds(planned, task.canvasId, plannedMembers, task.id, this.repo.state.changes, insertedIds);
     const movableIds = [...new Set([
       ...insertedIds,
       ...commands.filter(command => ['move', 'moveCanvasItems', 'reparentContent', 'createSubgraph'].includes(String(command.type)))
         .flatMap(command => Array.isArray(command.ids) ? command.ids as string[] : []),
     ])];
-    const changedEdgeIds = planned.edges.filter(edge => !before.edges.some(old => old.edgeId === edge.edgeId && hash(old) === hash(edge))).map(edge => edge.edgeId);
+    const previousEdges = new Map(before.edges.map(edge => [edge.edgeId, edge]));
+    const changedEdgeIds = planned.edges.filter(edge => {
+      const old = previousEdges.get(edge.edgeId);
+      return !old || old.sourceNodeId !== edge.sourceNodeId || old.targetNodeId !== edge.targetNodeId ||
+        old.directed !== edge.directed || Boolean(old.removed) !== Boolean(edge.removed);
+    }).map(edge => edge.edgeId);
+    const nextEdgeIds = new Set(planned.edges.map(edge => edge.edgeId));
+    changedEdgeIds.push(...before.edges.filter(edge => !nextEdgeIds.has(edge.edgeId)).map(edge => edge.edgeId));
     const protectedIds = [...this.editOccupancies].filter(([, value]) => value.expiresAt > Date.now()).map(([ref]) => ref)
       .concat([...this.placementOccupancies].filter(([, time]) => time > Date.now()).map(([ref]) => ref));
-    if (movableIds.length || changedEdgeIds.length) planned = (await planRelationshipLayout(planned, { canvasId: task.canvasId,
-      mode: 'auto', movableIds, insertedIds, changedEdgeIds, permittedIds: [...allowed], protectedIds, solveTime: Date.now() }, this.active.get(task.id)?.controller.signal)).state;
+    if (movableIds.length || changedEdgeIds.length) planned = (await this.layoutPlanner(planned, { canvasId: task.canvasId,
+      mode: 'auto', movableIds, insertedIds, provisionalIds, changedEdgeIds, permittedIds: [...allowed], protectedIds, solveTime: Date.now() }, this.active.get(task.id)?.controller.signal)).state;
     this.guard(task);
     requireValue(graphLayoutVersion(before,task.canvasId)===graphLayoutVersion(this.graph(),task.canvasId),
       '规划所依赖的画布或共享文档已变化，请重新读取', 'VERSION_CONFLICT');
@@ -1477,21 +1492,18 @@ export class Runtime {
       for (const [key, value] of Object.entries(beforeHashes)) if (key === `${patch.collection}:${patch.id}` || key.startsWith(`${patch.collection}:${patch.id}:`)) {
         // A text change does not depend on pure layout. Layout/structure writes do.
         const old = patch.before as Record<string, unknown> | null, next = patch.after as Record<string, unknown> | null;
-        if (key.endsWith(':view') && old && next && hash([old.placements, old.collapsed]) === hash([next.placements, next.collapsed])) continue;
+        if (key.endsWith(':view') && old && next && hash([old.placements, old.collapsed, old.presentationPlacements]) === hash([next.placements, next.collapsed, next.presentationPlacements])) continue;
         expected[key] ??= value;
       }
     }
-    const placementRefs = patches.flatMap(p => {
-      const a = p.before as { placements?: Record<string, unknown> } | null, b = p.after as { placements?: Record<string, unknown> } | null;
-      return Object.keys(b?.placements ?? {}).filter(ref => hash(a?.placements?.[ref] ?? null) !== hash(b?.placements?.[ref] ?? null));
-    });
+    const placementRefs = changedPlacementRefs(patches);
     const affectedRefs = [...new Set([...patches.filter(p => p.collection !== 'canvases').map(p => p.id), ...placementRefs])];
     const affectedCanvasIds = before.canvases.filter(canvas => {
       const members = memberIds(before, canvas.canvasId); return affectedRefs.some(ref => members.has(ref)) || canvas.canvasId === task.canvasId;
     }).map(canvas => canvas.canvasId);
     const existing = this.repo.state.changes.find(c => c.operationId === call.operationId);
     if (existing) return { status: 'proposed', applied:false,nextAction:{tool:'graph_apply_changes',arguments:{changeSetId:existing.id}},changeSetId: existing.id, temporaryRefs: existing.temporaryRefs??{}, affectedRefs: existing.affectedRefs };
-    if (hash(before.canvases.map(c => c.placements)) !== hash(planned.canvases.map(c => c.placements)) ||
+    if (hash(before.canvases.map(c => [c.placements, c.presentationPlacements])) !== hash(planned.canvases.map(c => [c.placements, c.presentationPlacements])) ||
       hash(Object.values(before.documents).map(d => d.placements)) !== hash(Object.values(planned.documents).map(d => d.placements)))
       expected[layoutDependencyKey(task.canvasId)]=graphLayoutVersion(before,task.canvasId)!;
     const change: ChangeSet = { id: id('change:'), operationId: call.operationId, workspaceId: task.workspaceId, taskId: task.id, stepId: call.stepId,
@@ -1519,6 +1531,11 @@ export class Runtime {
       const editing = this.editOccupancies.get(ref); requireValue(!editing || editing.expiresAt <= Date.now(), '用户正在编辑此字段，请等待其保存后重新读取', 'USER_EDITING');
       requireValue((this.placementOccupancies.get(ref) ?? 0) <= Date.now(), '用户正在拖动此对象，请等待其定位后重新规划', 'USER_POSITIONING');
     }
+    const activePositions = activePlacementProtection(graph, task.canvasId,
+      [...this.editOccupancies].filter(([, value]) => value.expiresAt > Date.now()).map(([ref]) => ref)
+        .concat([...this.placementOccupancies].filter(([, time]) => time > Date.now()).map(([ref]) => ref)));
+    requireValue(changedPlacementRefs(change.patches).every(ref => !activePositions.has(ref)),
+      '用户正在编辑或拖动受影响对象，请等待后重新规划', 'USER_EDITING');
     const next = applyPatches(graph, change.patches); checkAiEffects(graph, next, task.canvasId, memberIds(this.graph(), task.canvasId));
     // Graph + change receipt + checkpoint + events are inside executeTool's one SQLite transaction.
     this.repo.state.graph = next; this.repo.state.graphRevision++; change.status = 'committed'; change.committedAt = now();
@@ -1554,7 +1571,7 @@ export class Runtime {
     const requestHash = hash([payload.canvasId, payload.command]);
     if (old) {
       requireValue(old.payload.requestHash === requestHash || old.payload.requestHash === hash([payload.canvasId,payload.command,old.payload.originSessionId??null]), '相同操作 ID 携带了不同参数', 'OPERATION_CONFLICT');
-      return { ok: true, id: old.payload.id, graphRevision: this.repo.state.graphRevision, repeated: true };
+      return { ok: true, id: old.payload.id, changeSetId: old.payload.changeSetId, graphRevision: this.repo.state.graphRevision, repeated: true };
     }
     const current = this.graph();
     for (const expected of payload.expectedFields ?? []) {
@@ -1563,28 +1580,77 @@ export class Runtime {
     }
     requireValue(payload.expectedGraphRevision === undefined || payload.expectedGraphRevision === this.repo.state.graphRevision, '画布已更新，请同步后重新操作', 'VERSION_CONFLICT');
     const revision = this.repo.state.graphRevision;
-    const result = planMutation(current, text(payload.canvasId, '画布'), payload.command, 'user');
+    const activePositions = (graph: GraphState) => activePlacementProtection(graph, payload.canvasId,
+      [...this.editOccupancies].filter(([, value]) => value.expiresAt > Date.now()).map(([ref]) => ref)
+        .concat([...this.placementOccupancies].filter(([, time]) => time > Date.now()).map(([ref]) => ref)));
+    const result = planMutation(current, text(payload.canvasId, '画布'), payload.command, 'user', activePositions(current));
+    const movedId = payload.command.type === 'moveBlock' ? String(payload.command.id) : undefined;
+    const expandedId = payload.command.type === 'toggleCollapse' && canvasOf(current, payload.canvasId).collapsed[String(payload.command.id)]
+      ? String(payload.command.id) : undefined;
+    const changedObject = movedId ?? expandedId;
+    const moveBasis = changedObject && manualMoveBasis(current, payload.canvasId, changedObject);
+    const intentKey = movedId ? JSON.stringify(['position', current.documents[String(payload.command.parentId)] ? 'document' : payload.canvasId,
+      payload.command.parentId, movedId]) : payload.command.type === 'toggleCollapse'
+        ? JSON.stringify(['collapse', payload.canvasId, payload.command.id]) : undefined;
+    if (intentKey) {
+      const pending = this.pendingLayoutIntents.get(intentKey);
+      requireValue(!pending || pending.operationId !== operationId || pending.requestHash === requestHash,
+        '相同操作 ID 携带了不同参数', 'OPERATION_CONFLICT');
+      this.pendingLayoutIntents.set(intentKey, { operationId, requestHash });
+    }
+    const releaseIntent = () => {
+      if (intentKey && this.pendingLayoutIntents.get(intentKey)?.operationId === operationId) this.pendingLayoutIntents.delete(intentKey);
+    };
+    const previousEdges = new Map(current.edges.map(edge => [edge.edgeId, edge]));
     const changedEdgeIds = result.state.edges.filter(edge => {
-      const old = current.edges.find(e => e.edgeId === edge.edgeId);
+      const old = previousEdges.get(edge.edgeId);
       return !old || old.sourceNodeId !== edge.sourceNodeId || old.targetNodeId !== edge.targetNodeId || old.directed !== edge.directed;
     }).map(edge => edge.edgeId);
-    if (changedEdgeIds.length && !result.identityMap) return planRelationshipLayout(result.state, { canvasId: payload.canvasId, mode: 'auto', changedEdgeIds, solveTime: Date.now(),
-      protectedIds: [...this.editOccupancies].filter(([, v]) => v.expiresAt > Date.now()).map(([ref]) => ref)
-        .concat([...this.placementOccupancies].filter(([, time]) => time > Date.now()).map(([ref]) => ref)), permittedIds: [...memberIds(result.state, payload.canvasId)], budgetMs: 12 })
-      .then(layout => {
+    if ((changedEdgeIds.length || changedObject && result.state.edges.some(edge => !edge.removed)) && !result.identityMap) {
+      const finish = (layout?: RelationshipLayoutResult) => {
         const old = this.repo.state.events.find(e => e.type === 'graph.user_committed' && e.payload.operationId === operationId);
         if (old) { requireValue(old.payload.requestHash === requestHash, '相同操作 ID 携带了不同参数', 'OPERATION_CONFLICT');
-          return { ok: true, id: old.payload.id as string | undefined, graphRevision: this.repo.state.graphRevision, repeated: true }; }
-        requireValue(!this.shuttingDown && revision === this.repo.state.graphRevision, '布局期间画布已更新，请同步后重新操作', 'VERSION_CONFLICT');
-        const moved = graphDiff(result.state, layout.state).flatMap(p => {
-          const a = p.before as { placements?: Record<string, unknown> } | null, b = p.after as { placements?: Record<string, unknown> } | null;
-          return Object.keys(b?.placements ?? {}).filter(ref => hash(a?.placements?.[ref] ?? null) !== hash(b?.placements?.[ref] ?? null));
-        });
-        requireValue(moved.every(ref => (this.editOccupancies.get(ref)?.expiresAt ?? 0) <= Date.now() && (this.placementOccupancies.get(ref) ?? 0) <= Date.now()),
-          '用户正在编辑或拖动受影响对象，请重新操作', 'USER_EDITING');
-        return this.commitUserMutation(payload, operationId, requestHash, current, { ...result, state: layout.state }, layout.stats.moved > 0);
-      });
-    return this.commitUserMutation(payload, operationId, requestHash, current, result);
+          return { ok: true, id: old.payload.id as string | undefined, changeSetId: old.payload.changeSetId,
+            graphRevision: this.repo.state.graphRevision, repeated: true }; }
+        requireValue(!this.shuttingDown, '应用正在关闭，请重新操作', 'VERSION_CONFLICT');
+        requireValue(!intentKey || this.pendingLayoutIntents.get(intentKey)?.operationId === operationId,
+          movedId ? '对象位置已变化：后一次拖动已取代本次操作' : '折叠状态已变化：后一次操作已取代本次展开', 'VERSION_CONFLICT');
+        if (revision !== this.repo.state.graphRevision) {
+          const latest = this.graph();
+          requireValue(changedObject && moveBasis && moveBasis === manualMoveBasis(latest, payload.canvasId, changedObject),
+            '布局期间对象或其父级位置已变化，请同步后重新操作', 'VERSION_CONFLICT');
+          // An unrelated edit need not discard the user's drop. Reapply only
+          // that intent to fresh state; the stale optional refinement is lost.
+          const fresh = planMutation(latest, payload.canvasId, payload.command, 'user', activePositions(latest));
+          return this.commitUserMutation(payload, operationId, requestHash, latest, fresh, true);
+        }
+        const active = activePositions(result.state);
+        const primaryConflict = changedObject && changedPlacementRefs(graphDiff(current, result.state))
+          .some(ref => ref !== movedId && active.has(ref));
+        if (primaryConflict) {
+          // Occupancy can change without changing the graph revision. Respect
+          // editors that started while the optional layout worker was running.
+          const fresh = planMutation(current, payload.canvasId, payload.command, 'user', activePositions(current));
+          return this.commitUserMutation(payload, operationId, requestHash, current, fresh, true);
+        }
+        const moved = layout ? changedPlacementRefs(graphDiff(result.state, layout.state)) : [];
+        const conflict = moved.some(ref => active.has(ref));
+        requireValue(changedObject || !conflict, '用户正在编辑或拖动受影响对象，请重新操作', 'USER_EDITING');
+        const accepted = layout && !conflict ? { ...result, state: layout.state } : result;
+        return this.commitUserMutation(payload, operationId, requestHash, current, accepted, Boolean(changedObject) || moved.length > 0);
+      };
+      return this.layoutPlanner(result.state, { canvasId: payload.canvasId, mode: 'auto', changedEdgeIds,
+        ...(changedObject ? { changedObjectIds: [changedObject], viewOnly: true } : {}), solveTime: Date.now(),
+        protectedIds: [...activePositions(result.state), ...(movedId ? [movedId] : [])],
+        permittedIds: [...memberIds(result.state, payload.canvasId)], budgetMs: changedObject ? 80 : 12 })
+        .then(finish, error => { if (!changedObject) throw error; return finish(); }).finally(releaseIntent);
+    }
+    const beforeCanvas = current.canvases.find(canvas => canvas.canvasId === payload.canvasId);
+    const afterCanvas = result.state.canvases.find(canvas => canvas.canvasId === payload.canvasId);
+    const expansionLayout = payload.command.type === 'toggleCollapse' &&
+      hash([beforeCanvas?.placements, beforeCanvas?.presentationPlacements]) !== hash([afterCanvas?.placements, afterCanvas?.presentationPlacements]);
+    try { return this.commitUserMutation(payload, operationId, requestHash, current, result, Boolean(movedId) || expansionLayout); }
+    finally { releaseIntent(); }
   }
   private commitUserMutation(payload: { canvasId: string; command: Record<string, unknown> }, operationId: string, requestHash: string,
     before: GraphState, result: ReturnType<typeof planMutation>, hasLayout = false) {
@@ -1604,8 +1670,10 @@ export class Runtime {
         const members = memberIds(result.state, payload.canvasId);
         for (const task of state.tasks.filter(task => task.canvasId === payload.canvasId && !isTerminal(task))) {
           task.fencingToken++; task.readHashes = {}; delete task.nodeReadEvidence; delete task.responseReadHashes;
-          task.inputBindings.targetIds = task.inputBindings.targetIds.map(ref =>
-            result.identityMap![ref] && !members.has(ref) ? result.identityMap![ref] : ref);
+          const rebind = (ref: string) => result.identityMap![ref] && !members.has(ref) ? result.identityMap![ref] : ref;
+          task.inputBindings.targetIds = task.inputBindings.targetIds.map(rebind);
+          const groups = task.inputBindings.targetGroups ?? state.messages.find(message => message.id === task.rootUserMessageId)?.targetGroups;
+          if (groups) task.inputBindings.targetGroups = groups.map(group => ({ ...group, targetIds: group.targetIds.map(rebind) }));
           delete task.interaction; delete task.waitReason;
           this.parkFailure(task, '图文档已替换为独立目录，短代指已延续；请继续任务以重新读取和核对副本。');
           interruptedTasks.push(task.id);
@@ -1644,7 +1712,7 @@ export class Runtime {
     requireValue(canvasDirectory(canvas, regionId) || before.documents[regionId] && memberIds(before, canvasId).has(regionId), '整理目录不在当前画布', 'OUT_OF_SCOPE');
     const request = (this.layoutRequests.get(canvasId) ?? 0) + 1; this.layoutRequests.set(canvasId, request);
     for (const [key, value] of this.layoutPreviews) if (value.expiresAt <= Date.now() || value.canvasId === canvasId) this.layoutPreviews.delete(key);
-    const result = await planRelationshipLayout(before, { canvasId, regionId, mode: 'organize', solveTime: Date.now(),
+    const result = await this.layoutPlanner(before, { canvasId, regionId, mode: 'organize', solveTime: Date.now(),
       permittedIds: [...memberIds(before, canvasId)], protectedIds: [...this.editOccupancies].filter(([, v]) => v.expiresAt > Date.now()).map(([ref]) => ref)
         .concat([...this.placementOccupancies].filter(([, time]) => time > Date.now()).map(([ref]) => ref)) });
     requireValue(!this.shuttingDown && this.layoutRequests.get(canvasId) === request && this.repo.state.graphRevision === graphRevision,
@@ -1668,11 +1736,11 @@ export class Runtime {
     requireValue(preview && preview.expiresAt > Date.now(), '整理预览已过期，请重新生成', 'STALE_CHANGE');
     requireValue(preview.graphRevision === this.repo.state.graphRevision, '预览之后画布已更新，请重新生成', 'VERSION_CONFLICT');
     const patches = graphDiff(preview.before, preview.result.state);
-    const movedRefs = patches.flatMap(p => {
-      const a = p.before as { placements?: Record<string, unknown> } | null, b = p.after as { placements?: Record<string, unknown> } | null;
-      return Object.keys(b?.placements ?? {}).filter(ref => hash(a?.placements?.[ref] ?? null) !== hash(b?.placements?.[ref] ?? null));
-    });
-    requireValue(movedRefs.every(ref => (this.editOccupancies.get(ref)?.expiresAt ?? 0) <= Date.now() && (this.placementOccupancies.get(ref) ?? 0) <= Date.now()), '用户正在编辑或拖动受影响对象，请重新生成预览', 'USER_EDITING');
+    const movedRefs = changedPlacementRefs(patches);
+    const activePositions = activePlacementProtection(preview.before, preview.canvasId,
+      [...this.editOccupancies].filter(([, value]) => value.expiresAt > Date.now()).map(([ref]) => ref)
+        .concat([...this.placementOccupancies].filter(([, time]) => time > Date.now()).map(([ref]) => ref)));
+    requireValue(movedRefs.every(ref => !activePositions.has(ref)), '用户正在编辑或拖动受影响对象，请重新生成预览', 'USER_EDITING');
     const changeSetId = id('change:');
     this.repo.transaction(state => {
       protectReviewWrites(state, preview.before, preview.result.state);

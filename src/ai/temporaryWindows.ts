@@ -3,6 +3,16 @@ import type { Session } from './domain';
 import { panelCommand } from '@/desktop/panelState';
 
 let opening: Promise<Session> | undefined;
+/** Home chats remain available when entering or switching canvases. */
+export function openGlobalTemporarySession(): Promise<Session> {
+  if (opening) return opening;
+  opening = (async () => {
+    const session = await useAiStore.getState().command<Session>('temporary.createGlobal');
+    await panelCommand('open-panel', { tab: session.id });
+    return session;
+  })().finally(() => { opening = undefined; });
+  return opening;
+}
 /** Each explicit creation gets a tab in the shared panel, up to three per canvas. */
 export function openTemporarySession(canvasId: string, options: { sourceSessionId?: string; taskIds?: string[]; point?: { x: number; y: number } } = {}): Promise<Session> {
   if (opening) return opening;

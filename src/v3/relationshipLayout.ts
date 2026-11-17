@@ -7,13 +7,17 @@ import type { LayoutRegion, ProjectedRelation } from './relationProjection';
 import { chooseInsertionPoint, inferGrowthDirection } from './insertionPlacement';
 import type { DirectionSample, GrowthDirection, InsertionNeighbour } from './insertionPlacement';
 import { packMembers } from './packingLayout';
-import { layeredLayout } from './layeredSeed';
-import type { LayeredFlow, LayeredRelation } from './layeredSeed';
+import type { LayeredFlow } from './layeredSeed';
+import { structuralCandidates } from './structuralLayout';
+import { measureArrangement } from './arrangementMetrics';
 import type { GraphState, Placement, Point, Rect } from './types';
 import { BLOCK_GAP } from './types';
-import { manualProtection } from './placementPolicy';
 import { choosePorts, portPoint, pointOnRoute } from './edgeGeometry';
 import { routeAroundObstacles } from './obstacleRouter';
+import { getHierarchyIndex } from './hierarchyIndex';
+import { layoutRelatedView } from './relatedViewLayout';
+import { relationEndpointGeometry } from './relationEndpointGeometry';
+import { refineEndpointPlacements } from './endpointRefinement';
 export { manualProtection } from './placementPolicy';
 
 export interface RelationshipLayoutOptions {
@@ -24,9 +28,16 @@ export interface RelationshipLayoutOptions {
   protectedIds?: string[];
   permittedIds?: string[];
   changedEdgeIds?: string[];
+  /** Objects moved or expanded by the user; also follows their internal edge endpoints. */
+  changedObjectIds?: string[];
+  /** Keep shared canonical placements intact; adjust only this canvas's view. */
+  viewOnly?: boolean;
   /** Children that arrived without a position (the AI writes a path, never a point). */
   insertedIds?: string[];
+  /** Unsettled members of the current generation, across tool submissions. */
+  provisionalIds?: string[];
   solveTime: number;
+  /** Soft refinement budget. The inexpensive coverage pass always finishes. */
   budgetMs?: number;
   maxIterations?: number;
 }
@@ -45,7 +56,7 @@ export interface LayoutStats {
 export interface RelationshipLayoutResult { state: GraphState; stats: LayoutStats }
 
 /** Below this a batch is placed one child at a time: a rank assignment costs more than it returns. */
-const LAYERED_SEED_MIN = 5;
+const LAYERED_SEED_MIN = 3;
 const FLOW: Record<GrowthDirection, LayeredFlow> = { right: 'right', down: 'down', left: 'left', up: 'up' };
 
 export interface ArrangementMetrics { score: number; crossings: number; area: number }
@@ -57,46 +68,46 @@ export function improvesArrangement(before: ArrangementMetrics, after: Arrangeme
   if (after.crossings > before.crossings) return false;
   return after.score <= before.score - Math.max(.5, Math.abs(before.score) * .01);
 }
-const center = (p: Point, size: Rect) => ({ x: p.x + size.width / 2, y: p.y + size.height / 2 });
 const distance = (a: Point, b: Point) => Math.hypot(a.x - b.x, a.y - b.y);
 const blank = (size: Rect): Rect => ({ x: 0, y: 0, width: size.width, height: size.height });
-function hitsRect(a: Point, b: Point, rect: Rect) {
-  let low = 0, high = 1;
-  for (const [origin, delta, min, max] of [[a.x, b.x - a.x, rect.x, rect.x + rect.width], [a.y, b.y - a.y, rect.y, rect.y + rect.height]]) {
-    if (!delta) { if (origin <= min || origin >= max) return false; continue; }
-    const x = (min - origin) / delta, y = (max - origin) / delta;
-    low = Math.max(low, Math.min(x, y)); high = Math.min(high, Math.max(x, y));
-    if (high <= low) return false;
-  }
-  return true;
-}
-function crossing(a: Point, b: Point, c: Point, d: Point) {
-  const side = (p: Point, q: Point, r: Point) => (q.x - p.x) * (r.y - p.y) - (q.y - p.y) * (r.x - p.x);
-  return side(a, b, c) * side(a, b, d) < 0 && side(c, d, a) * side(c, d, b) < 0;
-}
 
 /** The bounded solver never mutates ownership, calls rendering, or evaluates external relations inside a child. */
 export function layoutRelationships(input: GraphState, options: RelationshipLayoutOptions): RelationshipLayoutResult {
-  const started = performance.now(), deadline = started + (options.budgetMs ?? (options.mode === 'auto' ? 16 : 120));
+  if (options.viewOnly) return layoutRelatedView(input, options);
+  const started = performance.now(), deadline = started + (options.budgetMs ?? (options.mode === 'auto' ? 160 : 300));
   const stats: LayoutStats = { regions: 0, candidates: 0, moved: 0, elapsedMs: 0, exhausted: false };
   const protectedIds = new Set(options.protectedIds), permitted = options.permittedIds && new Set(options.permittedIds);
+  // Editing or dragging a child also fixes its visible ancestors. Otherwise a
+  // parent move would bypass the child's protection without changing its local
+  // coordinates. Shared document mounts are protected in every affected canvas.
+  if (protectedIds.size) {
+    const hierarchy = getHierarchyIndex(input), queue = [...protectedIds];
+    const protect = (id?: string) => { if (id && !protectedIds.has(id)) { protectedIds.add(id); queue.push(id); } };
+    for (let head = 0; head < queue.length; head++) {
+      const id = queue[head];
+      protect(hierarchy.nodeParents.get(id)); protect(hierarchy.documentParents.get(id));
+      for (const parents of hierarchy.canvasParents.values()) protect(parents.get(id));
+    }
+  }
   const movable = new Set(options.movableIds), changedEdges = new Set(options.changedEdgeIds);
-  const inserted = new Set(options.insertedIds ?? []);
+  const inserted = new Set([...(options.provisionalIds ?? []), ...(options.insertedIds ?? [])]);
   const projection = getRelationProjection(input);
   let state = input;
   // A directory whose children carry no relations has nothing for the relation
   // solver to weigh: it is tidied into reading order instead. Organising is the
   // only operation allowed to do this, and never the AI's automatic pass.
   if (options.mode === 'organize' && options.regionId) {
-    const packed = packUnrelatedChildren(state, options, projection);
+    const packed = packUnrelatedChildren(state, { ...options, protectedIds: [...protectedIds] }, projection);
     if (packed.moved) { state = packed.state; stats.packed = packed.moved; stats.regions += 1; }
   }
   const regions = [...projection.values()].filter(region =>
     (!region.canvasId || region.canvasId === options.canvasId) && (!options.regionId || region.id === options.regionId) &&
-    (options.mode === 'organize' || region.relations.some(r => movable.has(r.source) || movable.has(r.target) || r.edgeIds.some(id => changedEdges.has(id)))))
+    (options.mode === 'organize' || region.relations.some(r => movable.has(r.source) || movable.has(r.target) || inserted.has(r.source) || inserted.has(r.target) || r.edgeIds.some(id => changedEdges.has(id)))))
     .sort((a, b) => b.depth - a.depth || a.key.localeCompare(b.key));
   for (const region of regions) {
-    if (performance.now() >= deadline) { stats.exhausted = true; break; }
+    // The deadline bounds refinement, not coverage: every affected directory
+    // still receives its linear structural pass, even when earlier ones ran long.
+    if (performance.now() >= deadline) stats.exhausted = true;
     const canvas = state.canvases.find(c => c.canvasId === (region.canvasId ?? options.canvasId)); if (!canvas) continue;
     const doc = region.canvasId ? undefined : state.documents[region.id];
     const ids = (doc ? [...doc.childNodeIds, ...doc.childDocumentIds] : canvasDirectory(canvas, region.id)?.childIds ?? []).slice().sort();
@@ -104,71 +115,45 @@ export function layoutRelationships(input: GraphState, options: RelationshipLayo
     const geometry = getNaturalGeometry(state);
     const sizes = new Map(ids.map(id => [id, state.nodes[id] ? nodeGeometry(state.nodes[id]) :
       state.documents[id] ? geometry.document(id) : geometry.directory(canvas, id)]));
-    const relations = region.relations.filter(r => sizes.has(r.source) && sizes.has(r.target)).slice(0, 180);
+    const relations = region.relations.filter(r => sizes.has(r.source) && sizes.has(r.target));
     if (!relations.length) continue;
     const incident = new Set(relations.flatMap(r => [r.source, r.target]));
+    const touched = new Set(relations.filter(r => r.edgeIds.some(edge => changedEdges.has(edge))).flatMap(r => [r.source, r.target]));
     const candidates = ids.filter(id => incident.has(id) && !protectedIds.has(id) && (!permitted || permitted.has(id)) &&
-      (options.mode === 'organize' || movable.has(id) || (!positions[id]?.manualAnchor && positions[id]?.source !== 'manual' &&
-        relations.some(r => (r.source === id || r.target === id) && r.edgeIds.some(edge => changedEdges.has(edge))))))
-      .slice(0, options.mode === 'auto' ? 16 : 100);
-    // Insertion is cheap and independent of the stochastic budget, so every
-    // inserted child is anchored even when the region exceeds the trial cap.
+      !positions[id]?.manualAnchor && positions[id]?.source !== 'manual' &&
+      (options.mode === 'organize' || movable.has(id) || inserted.has(id) || touched.has(id)));
+    // Every provisional child participates, independent of the refinement
+    // budget. A partial batch must not strand later members at their first slot.
     // A child the user positioned is never inserted: its intent outranks layout.
-    const anchorIds = inserted.size ? ids.filter(id => inserted.has(id) && incident.has(id) &&
+    const anchorIds = options.mode === 'organize' ? candidates : inserted.size ? ids.filter(id => inserted.has(id) && incident.has(id) &&
       !protectedIds.has(id) && (!permitted || permitted.has(id)) &&
       positions[id]?.source !== 'manual' && !positions[id]?.manualAnchor) : [];
     if (!candidates.length && !anchorIds.length) continue;
     stats.regions++;
-    const initial = { ...positions }; let best = { ...positions };
+    const initial = { ...positions }; let best = initial;
     const root = Boolean(region.canvasId) && region.id === canvas.canvasId;
-    const obstacleIds = [...new Set([...candidates, ...ids.slice(0, 120)])];
-    const points = (r: ProjectedRelation, p: Record<string, Placement>) => [center(p[r.source], sizes.get(r.source)!), center(p[r.target], sizes.get(r.target)!)] as const;
+    const obstacleIds = ids;
+    const endpoints = relationEndpointGeometry(state, canvas, ids, sizes, relations, false);
+    const scoreCache = new WeakMap<Record<string, Placement>, number>();
     const score = (p: Record<string, Placement>) => {
-      let value = 0;
-      const lines = relations.map(r => points(r, p));
-      relations.forEach((r, i) => { value += distance(...lines[i]) / 180 * r.weight; });
-      relations.forEach((r, i) => {
-        for (const id of obstacleIds) if (id !== r.source && id !== r.target && hitsRect(...lines[i], { ...sizes.get(id)!, ...p[id] })) value += 5 * r.weight;
-      });
-      for (let i = 0; i < lines.length; i++) for (let j = i + 1; j < lines.length; j++) {
-        const a = relations[i], b = relations[j];
-        if (a.source === b.source || a.source === b.target || a.target === b.source || a.target === b.target) continue;
-        if (crossing(...lines[i], ...lines[j])) value += 8;
-      }
-      for (const id of candidates) {
-        const movement = distance(p[id], initial[id]) / 180;
-        // An inserted child has no mental-map history, so moving it is free.
-        // Every other child keeps the displacement cost that stabilises the layout.
-        value += movement * (inserted.has(id) ? 0 : movable.has(id) ? .08 : options.mode === 'auto' ? 1.5 : .4);
-        const anchor = initial[id].manualAnchor ?? (initial[id].source === 'manual' ? initial[id] : undefined);
-        if (anchor) value += distance(p[id], anchor) / 180 * manualProtection(initial[id], options.solveTime) * (options.mode === 'organize' ? .15 : 1);
-      }
-      const right = Math.max(0, ...ids.map(id => p[id].x + sizes.get(id)!.width));
-      const bottom = Math.max(0, ...ids.map(id => p[id].y + sizes.get(id)!.height));
-      return value + right * bottom / (180 * 180) * .04;
+      const cached = scoreCache.get(p); if (cached !== undefined) return cached;
+      let value = measureArrangement(ids, sizes, p, relations, endpoints.nested ? endpoints : undefined).score;
+      for (const id of candidates) value += distance(p[id], initial[id]) / 180 *
+        (inserted.has(id) ? 0 : movable.has(id) ? .05 : options.mode === 'auto' ? 2 : .05);
+      scoreCache.set(p, value); return value;
     };
-    const baselineScore = score(initial);
-    const crossingsOf = (p: Record<string, Placement>) => {
-      const lines = relations.map(r => points(r, p)); let count = 0;
-      for (let i = 0; i < lines.length; i++) for (let j = i + 1; j < lines.length; j++) {
-        const a = relations[i], b = relations[j];
-        if (a.source === b.source || a.source === b.target || a.target === b.source || a.target === b.target) continue;
-        if (crossing(...lines[i], ...lines[j])) count++;
-      }
-      return count;
-    };
-    const areaOf = (p: Record<string, Placement>) => {
-      const right = Math.max(0, ...ids.map(id => p[id].x + sizes.get(id)!.width));
-      const bottom = Math.max(0, ...ids.map(id => p[id].y + sizes.get(id)!.height));
-      return Math.round(right * bottom);
-    };
+    const baselineMetrics = measureArrangement(ids, sizes, initial, relations, endpoints.nested ? endpoints : undefined);
+    const baselineScore = baselineMetrics.score;
+    scoreCache.set(initial, baselineScore);
     // The region's own reading direction steers where an arriving child lands,
     // so an addition to a top-down flow continues downward instead of sideways.
     // Only an insertion needs it, so the region pays for it only then.
-    const settled = anchorIds.length ? ids.filter(id => !inserted.has(id) && positions[id]) : [];
+    const anchorSet = new Set(anchorIds);
+    const settled = anchorIds.length ? ids.filter(id => !anchorSet.has(id) && positions[id]) : [];
     const settledSet = new Set(settled);
     const samples: DirectionSample[] = [];
     if (settled.length) for (const relation of relations) {
+      if (relation.directed === false) continue;
       if (!settledSet.has(relation.source) || !settledSet.has(relation.target)) continue;
       const sourceSize = sizes.get(relation.source), targetSize = sizes.get(relation.target);
       const source = initial[relation.source], target = initial[relation.target];
@@ -182,14 +167,14 @@ export function layoutRelationships(input: GraphState, options: RelationshipLayo
     const direction = inferGrowthDirection(samples, settledExtent);
     const settledRects = settled.map(id => ({ ...sizes.get(id)!, ...initial[id] }));
     // A child that arrived without coordinates is placed beside its strongest
-    // same-region partner before any stochastic search. New children carry no
+    // same-region partner before local refinement. New children carry no
     // mental-map cost, so the placement is deterministic, never moves a settled
     // sibling, and never leaves the region it belongs to.
     const anchorInserted = (skip?: ReadonlySet<string>) => {
       for (const id of anchorIds) {
         if (skip?.has(id)) continue;
         const current = positions[id]; if (!current) continue;
-        if (performance.now() >= deadline) { stats.exhausted = true; return; }
+        if (performance.now() >= deadline) stats.exhausted = true;
         const size = sizes.get(id)!;
         const neighbours: InsertionNeighbour[] = [];
         for (const relation of relations) {
@@ -217,17 +202,15 @@ export function layoutRelationships(input: GraphState, options: RelationshipLayo
         stats.candidates++;
       }
     };
-    // A batch of new children that already carries its own structure is a rank
-    // assignment problem, not a slot problem: seed it, then let the same bounded
-    // acceptance test keep or discard the seed.
+    // Compare whole structural candidates before considering individual slots.
     let seeded: ReadonlySet<string> | undefined;
-    if (options.mode === 'auto' && anchorIds.length >= LAYERED_SEED_MIN) {
-      const cluster = seedLayeredCluster({ anchorIds, sizes, relations, positions: best, settled: settledRects, flow: direction, root, deadline });
-      if (cluster) { best = cluster.best; seeded = cluster.placed; stats.seeded = cluster.count; }
+    if (anchorIds.length >= LAYERED_SEED_MIN) {
+      const cluster = seedLayeredCluster({ anchorIds, sizes, relations, positions: best, settled: settledRects, flow: direction, root, deadline, score });
+      if (cluster) { best = cluster.best; seeded = cluster.placed; stats.seeded = (stats.seeded ?? 0) + cluster.count; }
     }
     anchorInserted(seeded);
     let bestScore = score(best), iterations = 0;
-    for (let pass = 0; pass < 3; pass++) for (const id of candidates) {
+    for (let pass = 0; pass < (seeded ? 0 : 2); pass++) for (const id of candidates) {
       if (performance.now() >= deadline || iterations >= (options.maxIterations ?? 500)) { stats.exhausted = true; break; }
       const size = sizes.get(id)!; const current = best[id];
       const maxMove = movable.has(id) ? 1600 : options.mode === 'auto' ? 160 : 800;
@@ -254,6 +237,11 @@ export function layoutRelationships(input: GraphState, options: RelationshipLayo
         if (value < bestScore - .12) { best = proposed; bestScore = value; }
       }
     }
+    if (endpoints.nested && performance.now() < deadline) {
+      const refined = refineEndpointPlacements({ ids, sizes, relations, endpoints, positions: best, movable: candidates,
+        root, deadline, score });
+      best = refined.positions; bestScore = score(best); stats.candidates += refined.trials;
+    }
     const changed = [...new Set([...candidates, ...anchorIds])]
       .filter(id => best[id] && initial[id] && (best[id].x !== initial[id].x || best[id].y !== initial[id].y));
     if (!changed.length) continue;
@@ -261,14 +249,14 @@ export function layoutRelationships(input: GraphState, options: RelationshipLayo
     // baseline on the same measure: more crossings or a negligible gain is
     // discarded instead of shipped. The user keeps the arrangement they had.
     if (options.mode === 'organize') {
-      const before = { score: baselineScore, crossings: crossingsOf(initial), area: areaOf(initial) };
-      const after = { score: bestScore, crossings: crossingsOf(best), area: areaOf(best) };
+      const before = { ...baselineMetrics, score: baselineScore };
+      const after = { ...measureArrangement(ids, sizes, best, relations, endpoints.nested ? endpoints : undefined), score: bestScore };
       stats.crossingsBefore = before.crossings; stats.crossingsAfter = after.crossings;
       stats.areaBefore = before.area; stats.areaAfter = after.area;
       if (!improvesArrangement(before, after)) { stats.rejected = true; continue; }
     }
     // Only the finalist receives a bounded routing check; no labels or render model are involved.
-    if (performance.now() + 4 < deadline) {
+    if (!seeded && performance.now() + 4 < deadline) {
       const selected = relations.filter(r => changed.includes(r.source) || changed.includes(r.target)).slice(0, 4);
       const routeCost = (p: Record<string, Placement>) => {
         let cost = 0;
@@ -291,7 +279,7 @@ export function layoutRelationships(input: GraphState, options: RelationshipLayo
     if (doc) state = { ...state, documents: { ...state.documents, [doc.documentId]: { ...doc, placements: best, rev: doc.rev + 1,
       metadata: { ...doc.metadata, updatedAt: new Date(options.solveTime).toISOString() } } } };
     else state = { ...state, canvases: state.canvases.map(c => c === canvas ? { ...c, placements: best, updatedAt: new Date(options.solveTime).toISOString() } : c) };
-    state = normalizeRegionLayout(state, input);
+    state = normalizeRegionLayout(state, input, protectedIds);
   }
   stats.moved = Object.values(state.documents).reduce((count, doc) => count + Object.keys(doc.placements).filter(id =>
     doc.placements[id].x !== input.documents[doc.documentId]?.placements[id]?.x || doc.placements[id].y !== input.documents[doc.documentId]?.placements[id]?.y).length, 0) +
@@ -300,6 +288,7 @@ export function layoutRelationships(input: GraphState, options: RelationshipLayo
       return count + Object.keys(canvas.placements).filter(id => canvas.placements[id].x !== old?.placements[id]?.x || canvas.placements[id].y !== old?.placements[id]?.y).length;
     }, 0);
   stats.elapsedMs = performance.now() - started;
+  if (performance.now() > deadline) stats.exhausted = true;
   return { state, stats };
 }
 
@@ -351,11 +340,8 @@ function packUnrelatedChildren(
   return { state: next, moved: packed.moved.length };
 }
 
-/**
- * Rank assignment for a batch that arrives already related. Returns placements
- * for the whole cluster, or undefined when the batch is cyclic, too small, or
- * not an actual structure. The caller's acceptance test still decides.
- */
+/** Whole-region candidates preserve a batch's structure while keeping all
+ * settled/manual siblings fixed. Geometry is compared before publishing. */
 function seedLayeredCluster(input: {
   anchorIds: readonly string[];
   sizes: ReadonlyMap<string, Rect>;
@@ -365,59 +351,61 @@ function seedLayeredCluster(input: {
   flow: GrowthDirection | undefined;
   root: boolean;
   deadline: number;
+  score: (positions: Record<string, Placement>) => number;
 }): { best: Record<string, Placement>; placed: ReadonlySet<string>; count: number } | undefined {
   const inside = new Set(input.anchorIds);
-  if (input.deadline - performance.now() < 2) return undefined; // no budget left to rank
-  const internal: LayeredRelation[] = [];
-  for (const relation of input.relations) {
-    if (relation.source === relation.target) continue;
-    if (!inside.has(relation.source) || !inside.has(relation.target)) continue;
-    internal.push({ source: relation.source, target: relation.target, weight: relation.weight });
-  }
+  const internal = input.relations.filter(edge => inside.has(edge.source) && inside.has(edge.target));
   if (!internal.length) return undefined;
-  const participants = [...new Set(internal.flatMap(relation => [relation.source, relation.target]))].sort();
+  const participants = [...new Set(internal.flatMap(edge => [edge.source, edge.target]))].sort();
   if (participants.length < LAYERED_SEED_MIN) return undefined;
-  const layout = layeredLayout(participants.map(id => ({ id, ...input.sizes.get(id)! })), internal,
-    input.flow ? FLOW[input.flow] : 'down');
-  if (!layout) return undefined;
-  if (performance.now() >= input.deadline) return undefined;
   const member = new Set(participants);
-  // The batch belongs beside whatever it links to: the child with the heaviest
-  // relation to settled content decides where the whole cluster is anchored.
-  const external = new Map<string, { other: string; weight: number }>();
-  for (const relation of input.relations) {
-    const source = member.has(relation.source), target = member.has(relation.target);
-    if (source === target) continue;
-    const id = source ? relation.source : relation.target, other = source ? relation.target : relation.source;
-    const current = external.get(id);
-    if (!current || relation.weight > current.weight || (relation.weight === current.weight && other < current.other))
-      external.set(id, { other, weight: relation.weight });
+  const fixed = [...input.settled, ...input.anchorIds.filter(id => !member.has(id)).map(id => ({ ...input.sizes.get(id)!, ...input.positions[id] }))];
+  const external = input.relations.filter(edge => member.has(edge.source) !== member.has(edge.target));
+  const candidates = structuralCandidates(participants.map(id => ({ id, ...input.sizes.get(id)! })), internal,
+    input.flow ? FLOW[input.flow] : 'down', input.deadline);
+  let winner: Record<string, Placement> | undefined, bestScore = Infinity;
+  for (const candidate of candidates) {
+    const positions = new Map(candidate.positions);
+    const entry = external.slice().sort((a, b) => b.weight - a.weight || a.source.localeCompare(b.source) || a.target.localeCompare(b.target))[0];
+    let delta = { x: Math.min(...participants.map(id => input.positions[id].x)), y: Math.min(...participants.map(id => input.positions[id].y)) };
+    if (entry) {
+      const id = member.has(entry.source) ? entry.source : entry.target, other = id === entry.source ? entry.target : entry.source;
+      const otherSize = input.sizes.get(other)!, partner = input.positions[other];
+      const slot = chooseInsertionPoint(blank(input.sizes.get(id)!),
+        [{ id: other, rect: { ...otherSize, ...partner }, weight: entry.weight }],
+        new RectangleIndex([...fixed]), { x: 0, y: 0 }, BLOCK_GAP, input.flow ?? 'right');
+      delta = { x: slot.x - positions.get(id)!.x, y: slot.y - positions.get(id)!.y };
+    }
+    if (!input.root) { delta.x = Math.max(0, delta.x); delta.y = Math.max(0, delta.y); }
+    // A partially generated large graph can have hundreds of unrelated initial
+    // placeholders. Reserve one clear block for its connected component rather
+    // than repeatedly searching through that field for every individual card.
+    if (fixed.length >= 32 && !external.length) {
+      const occupied = new RectangleIndex([...fixed]);
+      const block = { width: candidate.width, height: candidate.height };
+      if (occupied.collides({ ...block, ...delta }, BLOCK_GAP)) {
+        const right = Math.max(...fixed.map(rect => rect.x + rect.width)), bottom = Math.max(...fixed.map(rect => rect.y + rect.height));
+        const alternatives = [{ x: delta.x, y: bottom + BLOCK_GAP }, { x: right + BLOCK_GAP, y: delta.y }];
+        if (input.root) alternatives.push({ x: delta.x, y: Math.min(...fixed.map(rect => rect.y)) - block.height - BLOCK_GAP },
+          { x: Math.min(...fixed.map(rect => rect.x)) - block.width - BLOCK_GAP, y: delta.y });
+        alternatives.sort((a, b) => distance(a, delta) - distance(b, delta));
+        delta = alternatives[0];
+      }
+    }
+    const occupied = new RectangleIndex([...fixed]), best = { ...input.positions };
+    const order = participants.slice().sort((a, b) => positions.get(a)!.y - positions.get(b)!.y || positions.get(a)!.x - positions.get(b)!.x || a.localeCompare(b));
+    for (const id of order) {
+      const wanted = positions.get(id)!, size = blank(input.sizes.get(id)!);
+      const point = nearestRegionSpace(size, { x: Math.round(wanted.x + delta.x), y: Math.round(wanted.y + delta.y) }, occupied, input.root);
+      best[id] = { ...input.positions[id], ...point }; occupied.add({ ...size, ...point });
+    }
+    const score = input.score(best);
+    if (score < bestScore) { winner = best; bestScore = score; }
   }
-  const positions = new Map(layout.positions);
-  const entry = [...external.entries()].sort((a, b) => b[1].weight - a[1].weight || a[0].localeCompare(b[0]))[0];
-  const settle = (delta: Point) => { for (const [id, point] of positions) positions.set(id, { x: point.x + delta.x, y: point.y + delta.y }); };
-  const entrySize = entry && input.sizes.get(entry[0]);
-  const partner = entry && input.positions[entry[1].other];
-  const partnerSize = entry && input.sizes.get(entry[1].other);
-  if (entry && entrySize && partner && partnerSize) {
-    const slot = chooseInsertionPoint(blank(entrySize),
-      [{ id: entry[1].other, rect: { ...blank(partnerSize), x: partner.x, y: partner.y }, weight: entry[1].weight }],
-      new RectangleIndex([...input.settled]), { x: 0, y: 0 }, BLOCK_GAP, input.flow ?? 'right');
-    const seed = positions.get(entry[0])!;
-    settle({ x: slot.x - seed.x, y: slot.y - seed.y });
-  } else if (input.settled.length) {
-    settle({ x: Math.max(...input.settled.map(rect => rect.x + rect.width)) + BLOCK_GAP, y: Math.min(...input.settled.map(rect => rect.y)) });
-  }
-  // Keep the seeded children legal without dissolving the rank structure: only
-  // a child that actually collides is nudged, the rest keep their rank slot.
-  const occupied = new RectangleIndex([...input.settled]);
-  const best: Record<string, Placement> = { ...input.positions };
-  const order = [...participants].sort((a, b) => positions.get(a)!.y - positions.get(b)!.y || positions.get(a)!.x - positions.get(b)!.x || a.localeCompare(b));
-  for (const id of order) {
-    const size = blank(input.sizes.get(id)!);
-    const point = nearestRegionSpace(size, positions.get(id)!, occupied, input.root);
-    best[id] = { ...input.positions[id], ...point };
-    occupied.add({ ...size, ...point });
-  }
-  return { best, placed: new Set(participants), count: participants.length };
+  if (!winner) return undefined;
+  // Provisional coordinates are disposable, but a new structure must still
+  // improve the readable geometry. This also makes repeated commits stable.
+  if (bestScore >= input.score(input.positions as Record<string, Placement>) - .12)
+    return { best: input.positions as Record<string, Placement>, placed: member, count: 0 };
+  return { best: winner, placed: member, count: participants.length };
 }

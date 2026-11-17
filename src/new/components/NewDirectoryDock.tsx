@@ -8,14 +8,14 @@ import { reviewEntries, reviewDecisionCount } from '@/ai/changeReview';
 
 type TabProps = { active: boolean; onClick: () => void; source: string };
 function PanelTab({ panel, active, onClick, source, count = 0 }: TabProps & { panel: DockablePanel; count?: number }) {
-  const label = panel === 'directory' ? '目录' : 'AI 修改', Icon = panel === 'directory' ? FolderTree : Sparkles;
+  const label = panel === 'directory' ? '目录' : '待审核提交', Icon = panel === 'directory' ? FolderTree : Sparkles;
   return <button type="button" data-directory-tab={panel === 'directory' ? source : undefined} data-review-tab={panel === 'review' ? source : undefined}
     aria-pressed={active} data-active={active} aria-label={`${label}${count ? `，待决策 ${count} 项` : ''}`}
     onClick={() => { if (directoryClickAllowed()) onClick(); }} onPointerDown={e => beginPanelDockDrag(panel, e)}
     title={`${label}${count ? ` · 待决策 ${count} 项` : ''} · 拖到侧栏合并，拖到内侧边缘独立停靠`}
     className={`relative flex-1 min-w-0 h-8 flex items-center justify-center gap-1 rounded-lg text-[12px] font-medium cursor-grab active:cursor-grabbing ${active ? 'bg-blue-500/20 text-blue-100 ring-1 ring-inset ring-blue-400/40' : 'text-slate-400 hover:bg-white/5 hover:text-slate-200'}`}>
     <Icon size={13} className="shrink-0" /><span className="truncate">{label}</span>
-    {count > 0 && <span data-review-pending={count} aria-hidden="true" className="absolute right-1 top-1 h-1.5 w-1.5 rounded-full bg-amber-300" />}
+    {count > 0 && <span data-review-pending={count} aria-hidden="true" className="review-tab-count">{count > 99 ? '99+' : count}</span>}
   </button>;
 }
 export const DirectoryTab = (props: TabProps) => <PanelTab {...props} panel="directory" />;
@@ -29,7 +29,7 @@ function PanelDock({ panel, canvasId = null, children }: { panel: DockablePanel;
   const s = useNewUiStore(), review = panel === 'review';
   const placement = review ? s.reviewPlacement : s.directoryPlacement, width = review ? s.reviewWidth : s.directoryWidth;
   const drag = review ? s.reviewDrag : s.directoryDrag, target = review ? s.reviewDockPreview : s.dockPreview;
-  const label = review ? 'AI 修改' : '目录';
+  const label = review ? '待审核提交' : '目录';
   const left = detachedPanelOffset(s, panel, 'after-left'), right = detachedPanelOffset(s, panel, 'before-right');
   const detached = placement === 'after-left' || placement === 'before-right';
   const snapped = target !== null;

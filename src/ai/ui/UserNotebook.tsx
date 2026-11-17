@@ -2,11 +2,13 @@ import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { ArrowLeft, ArrowUp, BookOpen, Check, ChevronLeft, ChevronRight, FilePlus, Folder, FolderPlus, MoreHorizontal, Plus, Search, Trash2, X } from 'lucide-react';
 import { useAiStore } from '../client';
 import type { UserNotePage } from '../domain';
+import { userNoteDirectoryPages } from '../userNotes';
 import { AiError, useAction } from './common';
 import { UserNoteEditor, type UserNoteEditorHandle } from './UserNoteEditor';
 import { panelCommand, setPanelReading, usePanelState } from '@/desktop/panelState';
 import type { NotebookTab } from '@/desktop/api';
 import { noteDirectoryPath, notePreview, noteSnippet } from './notebookNavigation';
+import { UserNoteTransferDialog, UserNoteReorderDialog } from './UserNoteDialogs';
 import './userNotebook.css';
 
 const searchHighlights = new Map<string, { pageId: string; query: string }>();
@@ -20,7 +22,7 @@ export function UserNotebook({ tabId = 'notebook' }: { tabId?: string }) {
   const directory = directories.find(d => d.id === directoryId), path = noteDirectoryPath(directories, directoryId);
   const contentView = global || (tab?.kind === 'pages' && !!directory);
   const children = directories.filter(d => (d.parentId ?? '') === directoryId);
-  const localPages = directoryId ? pages.filter(p => p.directoryId === directoryId) : [];
+  const localPages = directoryId ? userNoteDirectoryPages(pages, directoryId, directories) : [];
   const visiblePages = global ? pages : localPages;
   const page = visiblePages.find(p => p.id === (global ? ui.notePageId : tab?.pageId)) ?? visiblePages[0];
   const index = Math.max(0, visiblePages.findIndex(p => p.id === page?.id)), globalNumber = page ? pages.indexOf(page) + 1 : 0;
@@ -29,6 +31,7 @@ export function UserNotebook({ tabId = 'notebook' }: { tabId?: string }) {
   const [creating, setCreating] = useState(false), [name, setName] = useState('');
   const [picking, setPicking] = useState(false), [chosen, setChosen] = useState<string[]>([]), [pickerQuery, setPickerQuery] = useState('');
   const [menu, setMenu] = useState<string>();
+  const [transferPageId, setTransferPageId] = useState<string>(), [reorderPageId, setReorderPageId] = useState<string>();
   const [editorToolbar, setEditorToolbar] = useState<HTMLDivElement | null>(null);
   const editor = useRef<UserNoteEditorHandle>(null), paper = useRef<HTMLDivElement>(null), pageInput = useRef<HTMLInputElement>(null), searchInput = useRef<HTMLInputElement>(null);
   const readingKey = contentView && page ? (global ? 'note:' + page.id : 'note:' + tabId + ':' + page.id) : 'directory:' + tabId;
@@ -51,7 +54,8 @@ export function UserNotebook({ tabId = 'notebook' }: { tabId?: string }) {
   };
   const openDirectory = async (id: string, newTab = true, pageId?: string, highlight?: string) => {
     await editor.current?.flush();
-    const firstPage = id ? useAiStore.getState().snapshot?.userNotePages?.find(p => p.directoryId === id) : undefined;
+    const latest = useAiStore.getState().snapshot;
+    const firstPage = id ? userNoteDirectoryPages(latest?.userNotePages ?? [], id, latest?.userNoteDirectories ?? [])[0] : undefined;
     const containsPages = !!pageId || !!firstPage;
     if (containsPages || newTab || global) {
       const next: NotebookTab = { id: 'note-view:' + crypto.randomUUID(), directoryId: id, kind: containsPages ? 'pages' : 'directory', pageId: pageId ?? firstPage?.id };
@@ -144,7 +148,7 @@ export function UserNotebook({ tabId = 'notebook' }: { tabId?: string }) {
     {needle ? <div className="note-scroll new-scroll" role="region" aria-label="笔记搜索结果">
       <div className="note-section-label">{results.length} 个匹配页面 <span>全部笔记</span></div>
       {results.map(result => {
-        const local = pages.filter(p => p.directoryId === result.directoryId).findIndex(p => p.id === result.id) + 1;
+        const local = userNoteDirectoryPages(pages, result.directoryId ?? '', directories).findIndex(p => p.id === result.id) + 1;
         return <button type="button" className="note-result" key={result.id} onClick={() => void action.run(() => openResult(result))}>
           <span className="note-result-heading">全局第 {pages.indexOf(result) + 1} 页 <ChevronRight size={14} /></span>
           <span className="note-result-path">{result.directoryId ? noteDirectoryPath(directories, result.directoryId) + ' · 目录内第 ' + local + ' 页' : '未归类'}</span>
@@ -197,22 +201,23 @@ export function UserNotebook({ tabId = 'notebook' }: { tabId?: string }) {
     {contentView && <div className="note-content-view" hidden={!!needle || picking}>
       <div className="paper-page-toolbar note-page-toolbar"><div className="note-page-controls">
         <button type="button" className="note-icon" aria-label="上一页笔记" disabled={action.busy || index === 0 || !page} onClick={() => void action.run(() => changePage(visiblePages[index - 1].id))}><ChevronLeft size={17} /></button>
-        <span className="paper-page-counter">{global ? '第' : '目录内第'} {pageEdit !== undefined ? <input ref={pageInput} className="paper-page-number" aria-label="用户笔记页码" inputMode="numeric" value={pageEdit}
+        <span className="paper-page-counter">第 {pageEdit !== undefined ? <input ref={pageInput} className="paper-page-number" aria-label="用户笔记页码" inputMode="numeric" value={pageEdit}
           onChange={e => setPageEdit(e.target.value)} onBlur={finishPage} onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); finishPage(); } if (e.key === 'Escape') setPageEdit(undefined); }} />
           : <button className="paper-page-number" data-user-note-current-page disabled={!page} aria-label={'第 ' + (page ? index + 1 : 0) + ' 页，点击修改页码'} onClick={() => setPageEdit(String(index + 1))}>{page ? index + 1 : 0}</button>}
-          页 <span data-user-note-page-total>/ {visiblePages.length}</span></span>
+          <span data-user-note-page-total>/ {visiblePages.length}</span> 页</span>
         <button type="button" className="note-icon" aria-label="下一页笔记" disabled={action.busy || !page || index >= visiblePages.length - 1} onClick={() => void action.run(() => changePage(visiblePages[index + 1].id))}><ChevronRight size={17} /></button>
       </div><div className="note-page-actions">
         <button type="button" className="note-text-button" disabled={action.busy} onClick={() => void action.run(createPage)}><Plus size={15} />新建一页</button>
         <div className="note-menu-anchor" data-note-menu><button className="note-icon" aria-label="笔记页操作" title="笔记页操作" onClick={() => setMenu(menu ? undefined : 'page')}><MoreHorizontal size={18} /></button>
           {menu === 'page' && <div className="note-menu" role="menu">
+            <button role="menuitem" disabled={!page || action.busy} onClick={() => void action.run(async () => { await editor.current?.flush(); setTransferPageId(page!.id); setMenu(undefined); })}><FolderPlus size={14} />将此页添加到...</button>
+            {!global && <button role="menuitem" disabled={!page || localPages.length < 2 || action.busy} onClick={() => { setReorderPageId(page!.id); setMenu(undefined); }}><ArrowUp size={14} />改变当前页顺序</button>}
             {!global && <button role="menuitem" onClick={() => { setPicking(true); setMenu(undefined); }}><Plus size={14} />放入现有页</button>}
             {page?.directoryId && <button role="menuitem" onClick={() => void action.run(removePage)}><ArrowLeft size={14} />将当前页移出目录</button>}
             <button role="menuitem" className="note-danger" disabled={!page} onClick={() => void action.run(deletePage)}><Trash2 size={14} />删除当前页</button>
           </div>}
         </div>
       </div></div>
-      {global && <div className="note-page-context">{page?.directoryId ? noteDirectoryPath(directories, page.directoryId) : '未归类'}</div>}
       <div className="utility-paper-scroll new-scroll" ref={paper} onScroll={e => recordScroll(e.currentTarget.scrollTop)}>
         {page ? <div className="notebook-paper paper-user-page" data-user-notebook-page={page.id}>
           <UserNoteEditor key={page.id} ref={editor} page={page} label={'用户笔记第 ' + globalNumber + ' 页'} toolbarTarget={editorToolbar} highlight={searchHighlights.get(tabId)?.pageId === page.id ? searchHighlights.get(tabId)?.query : undefined}
@@ -220,10 +225,12 @@ export function UserNotebook({ tabId = 'notebook' }: { tabId?: string }) {
             uploadImage={dataUrl => command('userNote.image.upload', { dataUrl }, { reportError: false })} onDelete={deletePage} />
         </div> : <div className="note-empty"><BookOpen size={30} /><strong>这里还没有笔记</strong><p>新建一页，或从未归类笔记中放入。</p><button className="note-primary" onClick={() => void action.run(createPage)}><Plus size={15} />新建一页</button></div>}
       </div><footer className="note-footer note-editor-footer">
-        <span className="note-paste-hint">Ctrl+V 粘贴图片</span>
+        <span className="note-page-location" title={page?.directoryId ? noteDirectoryPath(directories, page.directoryId) : '未分类'}>{page?.directoryId ? noteDirectoryPath(directories, page.directoryId) : '未分类'}</span>
         <span className="note-global-page">{!global && page ? '全局第 ' + globalNumber + ' 页' : ''}</span>
         <div ref={setEditorToolbar} />
       </footer>
     </div>}
+    {transferPageId && <UserNoteTransferDialog pageId={transferPageId} flush={() => editor.current?.flush() ?? Promise.resolve()} onClose={() => setTransferPageId(undefined)} />}
+    {reorderPageId && <UserNoteReorderDialog pageId={reorderPageId} directoryId={directoryId} onClose={() => setReorderPageId(undefined)} />}
   </section>;
 }

@@ -7,7 +7,7 @@ export function resolvePresentationTargets(graph: GraphState | null | undefined,
   if (!graph || !refs.length) return { available, missing, outside, notice: '' };
   const canvas = graph.canvases.find(item => item.canvasId === canvasId);
   const members = new Set(canvas ? getCanvasPaths(graph, canvas).map(item => item.id) : []);
-  const edges = new Map(graph.edges.map(edge => [edge.edgeId, edge]));
+  const edges = new Map(graph.edges.filter(edge => !edge.removed).map(edge => [edge.edgeId, edge]));
   const unique = new Set(refs);
   for (const id of unique) {
     const edge = edges.get(id);

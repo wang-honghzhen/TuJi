@@ -16,7 +16,7 @@ import { NewAiReplyPanel } from './components/NewAiReplyPanel';
 import { NewChatInput } from './components/NewChatInput';
 import { trackCanvasMutation } from './canvasEditFlush';
 import { AiTemporarySidebar } from '@/ai/ui/AiTemporarySidebar';
-import { openTemporarySession } from '@/ai/temporaryWindows';
+import { openGlobalTemporarySession, openTemporarySession } from '@/ai/temporaryWindows';
 import { DraftCanvasLeaveDialog } from './components/DraftCanvasLeaveDialog';
 import { CanvasCreateDialog } from './components/CanvasCreateDialog';
 import { NameDialog } from './components/NameDialog';
@@ -39,6 +39,8 @@ import { uiAudio } from './uiAudio';
 import { installUiSoundEvents } from './uiSoundEvents';
 import { DEFAULT_SOUND_SETTINGS } from '@/shared/soundSettings';
 import { GraphAppearanceProvider } from './graphAppearance';
+import { searchCanvas } from './graphSearch';
+import type { SidebarSearchKind, SidebarSearchValues } from './components/SearchField';
 
 const expandButtonClass = (visible: boolean) => `absolute top-3 z-30 ${visible ? 'opacity-100' : 'opacity-0 pointer-events-none'}`;
 /** Browser records are the one-time migration source. Records written by an older format
@@ -98,7 +100,6 @@ export default function NewApp() {
   const [actionRequest, setActionRequest] = useState<GraphActionRequest | null>(null);
   const [organizeRegionId, setOrganizeRegionId] = useState<string | null>(null);
   const [layoutPreviewGraph, setLayoutPreviewGraph] = useState<GraphState | null>(null);
-  const [lastLayoutChange, setLastLayoutChange] = useState<string | null>(null);
   const [pendingTransfer, setPendingTransfer] = useState<{ command: StructureCommand; conflicts: StructureConflict[]; revision: string } | null>(null);
   const [focusRequest, setFocusRequest] = useState<CanvasFocusRequest | null>(null), [notice, setNotice] = useState('');
   const focusSequence = useRef(0);
@@ -106,6 +107,10 @@ export default function NewApp() {
   const toggleLeftSidebar = useNewUiStore(s => s.toggleLeftSidebar), toggleRightSidebar = useNewUiStore(s => s.toggleRightSidebar);
   const isResizing = useNewUiStore(s => s.isResizing), previewCanvasId = useNewUiStore(s => s.previewCanvasId);
   const insets = useSidebarInsets();
+  const directoryPlacement = useNewUiStore(s => s.directoryPlacement), reviewPlacement = useNewUiStore(s => s.reviewPlacement);
+  const [sidebarSearches, setSidebarSearches] = useState<SidebarSearchValues>({ documents: '', review: '', directory: '' });
+  const setSidebarSearch = (kind: SidebarSearchKind, value: string) => setSidebarSearches(old => ({ ...old, [kind]: value }));
+  useEffect(() => { setSidebarSearches({ documents: '', review: '', directory: '' }); }, [activeCanvasId]);
   useEffect(() => useAiStore.getState().connect(), []);
   useEffect(() => { if (snapshot && !snapshot.graph) void migrateBrowserData()
     .then(result => { if (result.skipped) setSkippedLegacy(result.skipped); })
@@ -117,7 +122,7 @@ export default function NewApp() {
     }
   }, [graphState, activeCanvasId]);
   useEffect(() => { if (!notice) return; const timer = window.setTimeout(() => setNotice(''), 5500); return () => clearTimeout(timer); }, [notice]);
-  useEffect(() => { setActionRequest(null); setPendingTransfer(null); setFocusRequest(null); setOrganizeRegionId(null); setLayoutPreviewGraph(null); setLastLayoutChange(null); }, [activeCanvasId]);
+  useEffect(() => { setActionRequest(null); setPendingTransfer(null); setFocusRequest(null); setOrganizeRegionId(null); setLayoutPreviewGraph(null); }, [activeCanvasId]);
   useEffect(() => {
     if (view !== 'canvas' || !composer.current) { setComposerBottomInset(0); return; }
     const element = composer.current;
@@ -129,7 +134,7 @@ export default function NewApp() {
 
   const canvas = graphState?.canvases.find(c => c.canvasId === activeCanvasId) ?? null;
   const visibleDocuments = useMemo(() => graphState && canvas ? getCanvasDocumentIds(graphState, canvas) : new Set<string>(), [graphState?.documents, canvas]);
-  const documents = useMemo(() => graphState && canvas ? listDocumentMeta(graphState).filter(doc => modeOf(graphState.documents[doc.documentId]) === modeOf(canvas)) : [], [graphState?.documents, graphState?.edges, canvas?.mode]);
+  const documents = useMemo(() => graphState && canvas ? listDocumentMeta(graphState).filter(doc => modeOf(graphState.documents[doc.documentId]) === modeOf(canvas)) : [], [graphState?.documents, graphState?.edges, canvas?.canvasId, canvas?.mode]);
   const rootDocumentIds = useMemo(() => graphState ? getRootDocumentIds(graphState) : [], [graphState?.documents]);
   const canvases = useMemo(() => graphState ? graphState.canvases.filter(c => !c.isDraft).sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)) : [], [graphState?.canvases]);
   const navigate = (id: string, forceSelect = false) => { useAiStore.getState().setView('canvas'); setFocusRequest({ id, forceSelect, sequence: ++focusSequence.current }); };
@@ -139,7 +144,7 @@ export default function NewApp() {
       const current = useAiStore.getState().snapshot; if (!current?.graph) throw new Error('数据尚未加载');
       const result = await useAiStore.getState().command<GraphMutationResult & { cleanedEdges?: number; graphRevision: number; changeSetId?: string }>('graph.mutate',
         { canvasId, command, operationId, expectedFields, expectedGraphRevision: current.graphRevision });
-      if (result.changeSetId) setLastLayoutChange(result.changeSetId); return result;
+      return result;
     });
     mutationQueue.current = operation.catch(() => undefined); return trackCanvasMutation(canvasId,operation);
   };
@@ -217,8 +222,9 @@ export default function NewApp() {
     const result = await executeGraph({ type: 'createDocument', name }); setNaming(null); if (result?.id) add(result.id);
   };
   const createNewCanvas = () => setCreatingCanvas(true);
-  const directoryPanel = <NewCanvasDirectoryPanel canvas={canvas} state={graphState} onNavigate={navigate} onAction={openAction} onMove={moveDirectoryItems} onNotice={setNotice} onOrganize={setOrganizeRegionId} />;
-  const reviewPanel = <CanvasReviewPanel canvasId={canvas.canvasId} />;
+  const directoryPanel = <NewCanvasDirectoryPanel canvas={canvas} state={graphState} onNavigate={navigate} onAction={openAction} onMove={moveDirectoryItems} onNotice={setNotice} onOrganize={setOrganizeRegionId}
+    query={sidebarSearches.directory} onQueryChange={value => setSidebarSearch('directory', value)} showSearch={directoryPlacement !== 'right'} />;
+  const reviewPanel = <CanvasReviewPanel canvasId={canvas.canvasId} query={sidebarSearches.review} onQueryChange={value => setSidebarSearch('review', value)} showSearch={reviewPlacement !== 'right'} />;
   const stageState = layoutPreviewGraph ?? graphState;
   const stageCanvas = stageState.canvases.find(c => c.canvasId === activeCanvasId) ?? canvas;
   return <CanvasBackgroundProvider><GraphAppearanceProvider state={graphState}><div className="relative w-screen h-screen bg-space-950 text-slate-200 overflow-hidden">
@@ -226,7 +232,7 @@ export default function NewApp() {
     <main className={`absolute inset-0 z-10 min-w-0 h-full`}>
       {view === 'canvas' || canvas.isDraft ? <>
         <NewStageLayer state={stageState} canvas={stageCanvas} graphRevision={snapshot?.graphRevision??0} onAddDocument={add} onAction={openAction} onOrganize={setOrganizeRegionId} focusRequest={focusRequest} composerBottomInset={composerBottomInset}
-          onCreateTemporary={canvas.isDraft?undefined:point => { void openTemporarySession(canvas.canvasId, { point }).catch(cause => setNotice(cause instanceof Error ? cause.message : '无法打开临时会话')); }}
+          onCreateTemporary={point => { void (canvas.isDraft ? openGlobalTemporarySession() : openTemporarySession(canvas.canvasId, { point })).catch(cause => setNotice(cause instanceof Error ? cause.message : '无法打开临时会话')); }}
           onPlacementOccupancy={(refId, active) => {
             const request = placementQueue.current.catch(() => undefined).then(() => useAiStore.getState().command('graph.positioning', { refId, active }));
             placementQueue.current = request; return request;
@@ -274,7 +280,12 @@ export default function NewApp() {
       onSettings={() => { useNewUiStore.getState().setPreviewCanvasId(null); useAiStore.getState().setSettingsOpen(true); }} /></div>
     <div className={`absolute inset-y-0 right-0 z-30`}><NewRightSidebar documents={documents} rootDocumentIds={rootDocumentIds}
       activeDocumentIds={[...visibleDocuments]}
-      onAddDocument={add} onCreateDocument={() => setNaming('document')} directoryPanel={directoryPanel} reviewPanel={reviewPanel} canvasId={canvas.canvasId} /></div>
+      onAddDocument={add} onCreateDocument={() => setNaming('document')} directoryPanel={directoryPanel} reviewPanel={reviewPanel} canvasId={canvas.canvasId}
+      searches={sidebarSearches} onSearchChange={setSidebarSearch} onSearchEnter={kind => {
+        if (kind !== 'directory') return;
+        const first = searchCanvas(graphState, canvas, sidebarSearches.directory, false)[0];
+        if (first) navigate(first.id);
+      }} /></div>
     <NewReviewDock canvasId={canvas.canvasId}>{reviewPanel}</NewReviewDock>
     <AiTemporarySidebar canvasId={canvas.canvasId} />
     {previewCanvasId && !graphState.canvases.find(c=>c.canvasId===previewCanvasId)?.isDraft && <NewSessionGraphOverlay canvasId={previewCanvasId} currentCanvasId={activeCanvasId} onSelect={(canvasId,sessionId) => openCanvas(canvasId,false,sessionId)} />}
@@ -294,11 +305,8 @@ export default function NewApp() {
         if (result.ok) { setPendingTransfer(null); setActionRequest(null); } return result; }} />}
     {organizeRegionId && <LayoutOrganizeDialog state={graphState} canvas={canvas} graphRevision={snapshot?.graphRevision ?? 0} initialRegionId={organizeRegionId}
       onInspect={id => setFocusRequest({ id, sequence: ++focusSequence.current })}
-      onPreview={setLayoutPreviewGraph} onClose={() => { setOrganizeRegionId(null); setLayoutPreviewGraph(null); }} onCommitted={setLastLayoutChange} />}
-    {lastLayoutChange && !organizeRegionId && <button data-layout-undo type="button" className="fixed bottom-20 right-8 z-[190] rounded-lg border border-slate-600 bg-slate-950/95 px-3 py-2 text-xs text-blue-100" onClick={() => {
-      void useAiStore.getState().command('graph.undo', { changeSetId: lastLayoutChange }).then(() => { setLastLayoutChange(null); setNotice('已撤销目录整理'); })
-        .catch(cause => setNotice(cause instanceof Error ? cause.message : '撤销失败'));
-    }} title="撤销上次布局及其关联操作">撤销上次布局操作</button>}
+      onPreview={setLayoutPreviewGraph} onClose={() => { setOrganizeRegionId(null); setLayoutPreviewGraph(null); }} />}
+
     <AiSettingsDialog />
     {connection !== 'connected' && <div role="status" className="fixed top-3 left-1/2 -translate-x-1/2 z-[210] rounded border border-amber-400/30 bg-slate-950/95 px-3 py-2 text-xs text-amber-200">本地服务连接中；正在恢复记录…</div>}
     {notice && <div role="status" data-graph-notice className="fixed bottom-24 left-1/2 -translate-x-1/2 z-[210] max-w-lg rounded-xl border border-slate-600 bg-slate-950/95 px-4 py-3 text-xs text-slate-200 shadow-lg pointer-events-none">{notice}</div>}
