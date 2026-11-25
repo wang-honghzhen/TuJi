@@ -1,5 +1,5 @@
 import type { GraphReadContext } from './graphReadContext';
-import { graphQueryDependency } from './graphQueries';
+import { graphQueryDependency, isBodyRangeQuery, queryReadWith } from './graphQueries';
 import type { GraphState } from '@/v3/types';
 import type { FrozenRead, Observation } from '../contextState';
 import type { ProtocolMessage, SourceRef, Task, ToolCallRecord } from '../domain';
@@ -9,7 +9,7 @@ import { requireValue } from './errors';
 import { semanticHashes } from './graph';
 import { hash } from './repository';
 import { currentRelationHashes, relationDependency, relationDependencyKey } from './graphRelationDependencies';
-import { captureSubgraphHashes, subgraphDependency } from './subgraphVersions';
+import { captureSubgraphHashes, subgraphDependency, subgraphKey } from './subgraphVersions';
 import { fullyObservedNodeIds } from './canvasReadEvidence';
 import { currentLayoutHashes, layoutDependencyCanvas } from './graphLayoutDependencies';
 
@@ -102,18 +102,25 @@ export function rememberGraphReadHashes(task: Task, hashes: GraphReadHashes, his
   }
 }
 
-export function advanceResponseReadHashes(task: Task, before: GraphState, after: GraphState): void {
+export function advanceResponseReadHashes(task: Task, before: GraphState, after: GraphState, writtenFields?:GraphReadHashes): void {
   // A successful write confirms only its exact before -> after transitions.
   // Other bindings, including ones already changed by the user, remain intact.
   const bindings=[task.readHashes,task.responseReadHashes?.hashes].filter((v):v is GraphReadHashes=>!!v);
-  const keys=[...new Set(bindings.flatMap(v=>Object.keys(v)))];
+  const textBindings=task.responseReadHashes?.textFieldBindings;
+  const keys=[...new Set([...bindings.flatMap(v=>Object.keys(v)),...Object.keys(textBindings??{})])];
   const old = { ...semanticHashes(before), ...currentRelationHashes(before, keys) };
   const current = { ...semanticHashes(after), ...currentRelationHashes(after, keys) };
+  // Repeated writes in the same response can reuse exactly the old fields they
+  // already knew, including a whole body changed by a successful text patch.
+  if(textBindings)for(const [key,version] of Object.entries(textBindings))if(old[key]===version){
+    if(current[key]===undefined)delete textBindings[key];else textBindings[key]=current[key];
+  }
   for(const expected of bindings) {
     for (const key of Object.keys(expected)) if (expected[key] === old[key] && old[key] !== current[key]) {
       if (current[key] === undefined) delete expected[key]; else expected[key] = current[key];
     }
-    for (const [key, version] of Object.entries(current)) if (!key.endsWith(':view') && old[key] !== version && expected[key] === undefined) expected[key] = version;
+    if(writtenFields)Object.assign(expected,writtenFields);
+    else for (const [key, version] of Object.entries(current)) if (!key.endsWith(':view') && old[key] !== version && expected[key] === undefined) expected[key] = version;
   }
 }
 
@@ -136,7 +143,15 @@ export function graphReadDependenciesCurrent(graph: GraphState, read: FrozenRead
 
 export function dependencyIdentity(key: string) {
   const layout=layoutDependencyCanvas(key);if(layout)return {kind:'canvases',refId:layout};
-  const query=graphQueryDependency(key);if(query)return {kind:'canvases',refId:query.canvasId};
+  const saved=graphQueryDependency(key);
+  if(saved){
+    const {query,canvasId}=saved, refId=query.arguments.refId;
+    if(isBodyRangeQuery(query))return {kind:'body',refId:String(refId)};
+    if(query.tool==='graph_read_dependencies' && typeof query.arguments.edgeId==='string')
+      return {kind:'dependencyEdge',refId:query.arguments.edgeId,queryOwner:refId as string};
+    if(typeof refId==='string')return {kind:'query',refId};
+    return {kind:'canvases',refId:canvasId};
+  }
   const subgraph=subgraphDependency(key);if(subgraph)return {kind:'subgraphs',refId:subgraph.refId,part:subgraph.part};
   const relation = relationDependency(key);
   if (relation) return { kind: 'relations', refId: relation.refId };
@@ -144,47 +159,71 @@ export function dependencyIdentity(key: string) {
   return { kind: match?.[1], refId: match?.[2] };
 }
 
-/** Explicitly scoped proposals still protect command targets, their relations and active progress. */
+export const textFieldsOnly = (commands:Record<string,unknown>[]) => commands.length>0 && commands.every(c=>
+  (c?.type==='updateSubgraphText'||c?.type==='updateNodeText') && typeof c.id==='string' && (c.field==='name'||c.field==='content'));
+
+/** Destructive/structural edits keep their subtree and relation fences. Plain
+ * text edits instead fence the written field and its permission scope. */
 export function scopedGraphReadHashes(graph: GraphState, task: Task, commands: Record<string, unknown>[],
   extraRefs: string[] | undefined, activeRefs: string[] = []): GraphReadHashes {
-  if (extraRefs === undefined) return { ...task.readHashes };
-  const selected = new Set([...extraRefs, ...activeRefs]);
+  const textOnly=textFieldsOnly(commands);
+  if (!textOnly && extraRefs === undefined) return { ...task.readHashes };
+  const selected = new Set([...(extraRefs??[]), ...(textOnly ? [] : activeRefs)]);
   const visit = (value: unknown, key = ''): void => {
     if (typeof value === 'string' && ['id','parentId','nodeId','sourceNodeId','targetNodeId','ids','memberIds','subjectIds','addMemberIds','removeMemberIds','addSubjectIds','removeSubjectIds'].includes(key)) selected.add(value);
     else if (Array.isArray(value)) value.forEach(item => visit(item, key));
     else if (value && typeof value === 'object') Object.entries(value).forEach(([name, item]) => visit(item, name));
   };
-  commands.forEach(command => visit(command));
   const members = canvasMemberIds(graph, task.canvasId), index = canvasIndex(graph, task.canvasId, members);
-  const queue = [...selected];
-  for (let at = 0; at < queue.length; at++) for (const child of index.rows.get(queue[at])?.children ?? [])
-    if (!selected.has(child)) { selected.add(child); queue.push(child); }
-  for (const edge of graph.edges) if (selected.has(edge.sourceNodeId) || selected.has(edge.targetNodeId)) selected.add(edge.edgeId);
-  for (const ref of [...selected]) {
-    const edge = graph.edges.find(e => e.edgeId === ref);
-    if (edge) { selected.add(edge.sourceNodeId); selected.add(edge.targetNodeId); }
+  if(!textOnly){
+    commands.forEach(command=>visit(command));
+    const queue=[...selected];
+    for (let at = 0; at < queue.length; at++) for (const child of index.rows.get(queue[at])?.children ?? [])
+      if (!selected.has(child)) { selected.add(child); queue.push(child); }
+    for (const edge of graph.edges) if (selected.has(edge.sourceNodeId) || selected.has(edge.targetNodeId)) selected.add(edge.edgeId);
+    for (const ref of [...selected]) {
+      const edge = graph.edges.find(e => e.edgeId === ref);
+      if (edge) { selected.add(edge.sourceNodeId); selected.add(edge.targetNodeId); }
+    }
   }
-  for (const ref of extraRefs) {
+  for (const ref of extraRefs??[]) {
     requireValue(members.has(ref), '操作依据不在当前画布范围', 'OUT_OF_SCOPE', { failedRefs: [ref], executed: false });
     requireValue(Object.keys(task.readHashes ?? {}).some(key => dependencyIdentity(key).refId === ref),
       '操作依据尚未读取', 'READ_REQUIRED', { failedRefs: [ref], executed: false, readWith: { tool: 'graph_read', arguments: { refs: [ref] } } });
   }
-  return Object.fromEntries(Object.entries(task.readHashes ?? {}).filter(([key]) => {
+  const hashes=Object.fromEntries(Object.entries(task.readHashes ?? {}).filter(([key]) => {
     const identity = dependencyIdentity(key);
+    if(identity.queryOwner && selected.has(identity.queryOwner))return true;
+    if(textOnly)return !!identity.refId&&selected.has(identity.refId);
     const group=subgraphDependency(key);
     if(group)return selected.has(group.refId);
     // Structural reads are conservative: structural operations may affect descendants not named in the command.
     return identity.kind === 'canvases' || key.endsWith(':structure') || !!identity.refId && selected.has(identity.refId);
   }));
+  if(textOnly)for(const command of commands){
+    const id=String(command.id);
+    requireValue(id!==task.canvasId,'AI不能改写画布根目录','ROOT_READ_ONLY');
+    requireValue(index.rows.get(id)?.readable,'目标不属于当前画布','OUT_OF_SCOPE');
+    requireValue(index.rows.get(id)?.kind===(command.type==='updateSubgraphText'?'subgraph':'node'),'请按目标类型修改节点或普通子图，图文档层由用户管理','USER_ONLY_MANAGEMENT');
+    // assertMutationReadEvidence additionally proves the exact prior field was delivered.
+    for(const part of [command.field==='name'?'name':'body','editScope'] as const){
+      const key=subgraphKey(task.canvasId,id,part);
+      const bound=task.responseReadHashes?.textFieldBindings?.[key];
+      if(bound)hashes[key]=bound;else Object.assign(hashes,captureSubgraphHashes(index,[id],part));
+    }
+  }
+  return hashes;
 }
 
 export function assertGraphReadHashes(graph: GraphState, expected: GraphReadHashes, message: string, canvasId?: string): void {
-  const current = { ...semanticHashes(graph), ...currentRelationHashes(graph, Object.keys(expected)), ...currentLayoutHashes(graph,Object.keys(expected)) };
+  const keys=Object.keys(expected),wholeRecords=keys.some(key=>/^(nodes|edges|documents|canvases):/.test(key));
+  const current = { ...(wholeRecords?semanticHashes(graph):{}), ...currentRelationHashes(graph,keys), ...currentLayoutHashes(graph,keys) };
   const members = canvasId ? canvasMemberIds(graph, canvasId) : undefined;
   const unavailable = (key: string) => {
     const { kind, refId } = dependencyIdentity(key);
+    const scope=relationDependency(key)??subgraphDependency(key)??graphQueryDependency(key);
     return current[key] === undefined || Boolean(members && refId && kind !== 'canvases' && !members.has(refId))
-      || Boolean(canvasId && (relationDependency(key)??subgraphDependency(key)) && (relationDependency(key)??subgraphDependency(key))!.canvasId !== canvasId);
+      || Boolean(canvasId && scope && scope.canvasId!==canvasId);
   };
   const conflicts = Object.entries(expected).filter(([key, version]) => current[key] !== version || unavailable(key)).map(([key, expectedVersion]) => {
     const { kind, refId } = dependencyIdentity(key), inaccessible = unavailable(key);
@@ -193,10 +232,12 @@ export function assertGraphReadHashes(graph: GraphState, expected: GraphReadHash
       currentVersion: inaccessible ? null : current[key], ...(inaccessible ? { unavailable: true } : {}),
       ...(kind === 'relations' ? { dependency: 'incident_edges' } : {}),
       ...(group?{dependency:['directory','path','owner'].includes(group.part)?'directory_data':'direct_data'}:{}),
-      readWith: graphQueryDependency(key) && !inaccessible ? graphQueryDependency(key)!.query : kind === 'canvases' || inaccessible ? { tool: 'graph_read_subgraph', arguments: {} }
-        : group ? ['name','design'].includes(group.part)?{tool:'graph_read_object_field',arguments:{refId:group.refId,field:group.part}}:graph.nodes[group.refId]?{tool:'graph_read',arguments:{refs:[group.refId]}}:
+      readWith: graphQueryDependency(key) && !inaccessible ? queryReadWith(graphQueryDependency(key)!.query) : kind === 'canvases' || inaccessible ? { tool: 'graph_read_subgraph', arguments: {} }
+        : group?.part==='body'?{tool:graph.nodes[group.refId]?'graph_read_node_content':'graph_read_directory_content',arguments:{refId:group.refId,current:true}}
+        : group?.part==='editScope'?{tool:'graph_read',arguments:{refs:[group.refId]}}
+        : group ? ['name','design'].includes(group.part)?{tool:'graph_read_object_field',arguments:{refId:group.refId,field:group.part,current:true}}:graph.nodes[group.refId]?{tool:'graph_read',arguments:{refs:[group.refId]}}:
           {tool:['directory','path','owner'].includes(group.part)?'graph_read_directory':'graph_read_subgraph',arguments:refId===canvasId?{}:{refId}}
-        : kind === 'relations' ? { tool: 'graph_read_node_edges', arguments: { refId } }
+        : kind === 'relations' ? { tool: 'graph_read_node_edges', arguments: { refId, current:true } }
         : { tool: 'graph_read', arguments: { refs: refId ? [refId] : [] } } };
   });
   requireValue(!conflicts.length, message, 'VERSION_CONFLICT', {

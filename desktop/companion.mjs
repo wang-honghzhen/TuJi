@@ -5,6 +5,7 @@ import { attachWindowDrag } from './window-controls.mjs';
 
 const CHANNEL = 'tuji:desktop';
 const ORB_SIZE = 280, HALF = ORB_SIZE / 2, RADIUS = 28;
+const RESPONSE_TIMEOUT_MS = 15000, SAVE_TIMEOUT_MS = 125000;
 const clamp = (n, low, high) => Math.max(low, Math.min(n, high));
 
 /** One owner for window visibility and editing. Renderers never open native windows. */
@@ -12,14 +13,16 @@ export function createCompanion({ main, origin, preload, icon, directory, secure
   const settingsPath = path.join(directory, 'desktop-profile', 'companion.json');
   let saved = {};
   try { const value = JSON.parse(fs.readFileSync(settingsPath, 'utf8')); if (value && typeof value === 'object' && !Array.isArray(value)) saved = value; } catch { /* First run or disposable UI cache. */ }
-  const state = { ready: true, host: 'none', background: false, detached: false, used: !!saved.used,
+  const state = { ready: true, host: 'none', background: false, detached: false, panelExitId: 0, used: !!saved.used,
     activeTab: typeof saved.activeTab === 'string' ? saved.activeTab : 'notebook', canvasId: '',
     width: clamp(Number(saved.width) || 520, 360, 1200), notePageId: saved.notePageId ?? '',
     noteTabs: Array.isArray(saved.noteTabs) ? saved.noteTabs : [], noteDirectoryId: saved.noteDirectoryId ?? '',
+    dockedAiCanvases: Array.isArray(saved.dockedAiCanvases) ? saved.dockedAiCanvases.filter(id => typeof id === 'string') : [],
     drafts: saved.drafts ?? {}, reading: saved.reading ?? {}, enteredSessionByCanvas: {},
     orb: { flipX: false, flipY: false, dock: '' } };
   const windows = new Map([[main.webContents.id, { role: 'main', window: main }]]);
   let orb, panel, tray, quitting = false, transition = false, queue = Promise.resolve(), saveTimer;
+  let lastTransition, closing, reporting = false, panelLoading, finishPanelExit;
   let orbPointerTimer, lastOrbPointer, lastOrbPointerAt = 0;
   let orbCenter = saved.orbCenter, detachedBounds = saved.detachedBounds, dragStart, token = 0;
   const pending = new Map();
@@ -29,7 +32,7 @@ export function createCompanion({ main, origin, preload, icon, directory, secure
     const tmp = `${settingsPath}.tmp`;
     fs.writeFileSync(tmp, JSON.stringify({ used: state.used, activeTab: state.activeTab, width: state.width,
       notePageId: state.notePageId, noteTabs: state.noteTabs, noteDirectoryId: state.noteDirectoryId,
-      drafts: state.drafts, reading: state.reading, orbCenter, detachedBounds }));
+      drafts: state.drafts, reading: state.reading, dockedAiCanvases: state.dockedAiCanvases, orbCenter, detachedBounds }));
     fs.renameSync(tmp, settingsPath);
   }
   function publish() {
@@ -43,22 +46,56 @@ export function createCompanion({ main, origin, preload, icon, directory, secure
     return entry;
   }
   function enqueue(fn) {
-    const work = queue.then(async () => { transition = true; try { return await fn(); } finally { transition = false; } });
+    if (closing || quitting) return Promise.resolve();
+    if (lastTransition?.fn === fn) return lastTransition.work;
+    const work = queue.then(async () => {
+      transition = true;
+      try { return await fn(); }
+      finally { transition = false; if (lastTransition?.work === work) lastTransition = undefined; }
+    });
+    lastTransition = { fn, work };
     queue = work.catch(() => undefined); return work;
   }
-  function report(cause) {
-    if (!quitting) dialog.showMessageBox(main, { type: 'error', title: '图记', message: '内容尚未保存，窗口已保留', detail: String(cause?.message ?? cause) });
+  async function report(cause) {
+    if (quitting || reporting) return;
+    reporting = true;
+    try {
+      await dialog.showMessageBox(state.host === 'panel' ? panel : main, { type: 'error', title: '图记',
+        message: '内容尚未保存，窗口已保留', detail: String(cause?.message ?? cause) });
+    } finally { reporting = false; }
   }
   async function prepare(window) {
-    if (!window || window.isDestroyed() || window.webContents.isLoadingMainFrame()) return;
+    if (!window || window.isDestroyed() || !window.webContents.getURL()) return;
+    const contents = window.webContents;
+    if (contents.isCrashed()) throw new Error('编辑窗口已停止响应，无法确认保存。');
+    const throttled = contents.getBackgroundThrottling();
     const requestId = ++token;
-    await new Promise((resolve, reject) => {
-      const timer = setTimeout(() => { pending.delete(requestId); reject(new Error('保存等待超时，请检查编辑内容后重试。')); }, 15000);
-      pending.set(requestId, { sender: window.webContents.id, resolve, reject, timer });
-      window.webContents.send('tuji:desktop-prepare', requestId);
-    });
+    let timer, deadline;
+    if (throttled) contents.setBackgroundThrottling(false);
+    try {
+      await new Promise((resolve, reject) => {
+        const heartbeat = () => {
+          clearTimeout(timer);
+          timer = setTimeout(() => reject(new Error('编辑窗口未响应保存请求，请返回窗口检查后重试。')), RESPONSE_TIMEOUT_MS);
+        };
+        heartbeat();
+        // Allow the renderer its normal two-minute command timeout. If a save
+        // never settles, keep the editor accessible and let the user retry.
+        deadline = setTimeout(() => reject(new Error('编辑内容仍在等待保存，请查看编辑窗口并在操作完成后重试。')), SAVE_TIMEOUT_MS);
+        pending.set(requestId, { sender: contents.id, resolve, reject, heartbeat });
+        contents.send('tuji:desktop-prepare', requestId);
+      });
+    } catch (error) {
+      if (!contents.isDestroyed()) contents.send('tuji:desktop-prepare-ended', requestId);
+      throw error;
+    } finally {
+      clearTimeout(timer); clearTimeout(deadline); pending.delete(requestId);
+      if (throttled && !contents.isDestroyed()) contents.setBackgroundThrottling(true);
+    }
   }
-  const owner = () => state.host === 'panel' ? panel : main;
+  // A background main window completed its save barrier before being hidden.
+  // The orb never owns an editor. Only a visible editing host can hand one off.
+  const owner = () => state.host === 'panel' ? panel : state.background ? undefined : main;
   function display() { return screen.getDisplayNearestPoint(orbCenter ?? screen.getCursorScreenPoint()); }
   function positionOrb(point = orbCenter, snap = false) {
     const area = screen.getDisplayNearestPoint(point ?? screen.getCursorScreenPoint()).workArea;
@@ -96,9 +133,19 @@ export function createCompanion({ main, origin, preload, icon, directory, secure
     // Page zoom in the editor must never move the orb away from its native hit
     // coordinates. Electron otherwise shares zoom across this same origin.
     window.webContents.setZoomMode(role === 'orb' ? 'disabled' : 'isolated');
-    window.on('close', event => { if (!quitting) { event.preventDefault(); void enqueue(hidePanel).catch(report); } });
+    window.on('close', event => {
+      if (quitting) return;
+      event.preventDefault();
+      if (reporting) return;
+      if (role === 'panel' && state.host === 'panel') void enqueue(hidePanel).catch(report);
+      else if (role === 'orb' && state.background && state.host === 'none') void enqueue(showMain).catch(report);
+    });
     window.once('closed', () => windows.delete(contentsId));
-    await window.loadURL(`${origin}/?desktop=${role}`);
+    try { await window.loadURL(`${origin}/?desktop=${role}`); }
+    catch (error) {
+      if (!window.isDestroyed()) window.destroy();
+      throw error;
+    }
     return window;
   }
   async function ensureOrb() {
@@ -125,16 +172,20 @@ export function createCompanion({ main, origin, preload, icon, directory, secure
     }
     return orb;
   }
+  async function createPanel() {
+    const window = await makeWindow('panel', { width: state.width, height: 760, minWidth: 360, minHeight: 360,
+      transparent: true, backgroundColor: '#00000000', hasShadow: false, alwaysOnTop: true, maximizable: false });
+    if (quitting) { window.destroy(); return; }
+    panel = window;
+    attachWindowDrag(panel, origin, () => state.detached && state.host === 'panel' && !transition);
+    panel.on('resize', () => { if (!transition && panel.isVisible()) { state.width = panel.getBounds().width;
+      if (state.detached) detachedBounds = panel.getBounds(); publish(); } });
+    panel.on('move', () => { if (!transition && state.detached && panel.isVisible()) detachedBounds = panel.getBounds(); });
+  }
   async function ensurePanel() {
-    if (!panel) {
-      panel = await makeWindow('panel', { width: state.width, height: 760, minWidth: 360, minHeight: 360,
-        backgroundColor: '#080f1d', alwaysOnTop: true, maximizable: false });
-      attachWindowDrag(panel, origin, () => state.detached && state.host === 'panel' && !transition);
-      panel.on('resize', () => { if (!transition && panel.isVisible()) { state.width = panel.getBounds().width;
-        if (state.detached) detachedBounds = panel.getBounds(); publish(); } });
-      panel.on('move', () => { if (!transition && state.detached && panel.isVisible()) detachedBounds = panel.getBounds(); });
-    }
-    return panel;
+    if (panel) return;
+    panelLoading ??= createPanel().finally(() => { panelLoading = undefined; });
+    await panelLoading;
   }
   function positionPanel() {
     const area = (state.background ? display() : screen.getDisplayMatching(main.getBounds())).workArea;
@@ -149,43 +200,77 @@ export function createCompanion({ main, origin, preload, icon, directory, secure
   }
   async function hideMain() {
     if (quitting || state.background) return;
-    await prepare(owner());
+    try {
+      await ensureOrb();
+      if (state.host === 'panel') await prepare(panel);
+      await prepare(main);
+    } catch (error) {
+      if (main.isMinimized()) main.restore();
+      throw error;
+    }
     state.background = true; state.host = 'none'; state.detached = false;
     panel?.hide(); main.hide();
-    await ensureOrb(); publish(); orb.showInactive();
+    publish(); orb.showInactive();
+    // Load the hidden renderer while the orb is available. A click during
+    // startup shares the load, and a failed preload can be retried on click.
+    void ensurePanel().catch(() => undefined);
   }
   async function showMain() {
-    await prepare(owner());
-    state.background = false; state.host = 'none'; state.detached = false;
-    orb?.hide(); panel?.hide(); publish();
+    if (state.host === 'panel') await prepare(panel);
+    if (state.background || state.host === 'panel') {
+      state.background = false; state.host = 'none'; state.detached = false;
+      orb?.hide(); panel?.hide(); publish();
+    }
     if (main.isMinimized()) main.restore(); main.show(); main.focus();
   }
   async function openPanel(tab) {
+    if (state.background || state.detached) await ensurePanel();
     await prepare(owner());
     if (typeof tab === 'string' && tab.length < 200) state.activeTab = tab;
     state.used = true;
     if (state.background || state.detached) {
-      await ensurePanel(); positionPanel(); state.host = 'panel'; orb?.hide(); publish();
+      positionPanel(); state.host = 'panel'; orb?.hide(); publish();
       panel.show(); panel.focus();
     } else { state.host = 'main'; publish(); }
   }
   async function hidePanel() {
+    if (state.host === 'none') return;
     await prepare(owner());
-    // Let the renderer finish the outward slide before hiding its native surface.
+    const nativeExit = state.host === 'panel';
+    if (nativeExit) state.panelExitId = ++token;
     state.host = 'none'; publish();
-    await new Promise(resolve => setTimeout(resolve, 210));
-    panel?.hide();
+    if (nativeExit) {
+      // A renderer that unmounted or stopped responding must not strand the orb.
+      await new Promise(resolve => {
+        const timeout = setTimeout(resolve, 850);
+        finishPanelExit = () => { clearTimeout(timeout); resolve(); };
+      });
+      state.panelExitId = 0; finishPanelExit = undefined;
+      panel.hide();
+    }
     if (state.background) { await ensureOrb(); orb.showInactive(); }
   }
   async function toggleDetach() {
+    const detached = !state.detached;
+    if (state.background || detached) await ensurePanel();
     await prepare(owner());
-    state.detached = !state.detached;
+    state.detached = detached;
     if (!state.background && !state.detached) { panel?.hide(); state.host = 'main'; publish(); }
-    else { await ensurePanel(); positionPanel(); state.host = 'panel'; publish(); panel.show(); panel.focus(); }
+    else { positionPanel(); state.host = 'panel'; publish(); panel.show(); panel.focus(); }
   }
   ipcMain.handle(CHANNEL, (event, action, payload = {}) => {
     const { role } = trusted(event);
     if (action === 'get-state') return state;
+    if (action === 'panel-slide-ended') {
+      if (role === 'panel' && state.panelExitId === payload.id) finishPanelExit?.();
+      return;
+    }
+    if (action === 'set-canvas-ai-dock') {
+      if (role !== 'main' || typeof payload.canvasId !== 'string' || !payload.canvasId || typeof payload.docked !== 'boolean') throw new Error('无效的画布侧页设置');
+      const canvases = new Set(state.dockedAiCanvases);
+      if (payload.docked) canvases.add(payload.canvasId); else canvases.delete(payload.canvasId);
+      state.dockedAiCanvases = [...canvases]; publish(); return state;
+    }
     if (action === 'forget-tab') {
       if (typeof payload.id !== 'string' || payload.id.length > 200) throw new Error('无效的标签');
       delete state.drafts[payload.id]; delete state.reading[payload.id];
@@ -219,10 +304,14 @@ export function createCompanion({ main, origin, preload, icon, directory, secure
       return state;
     });
   });
-  ipcMain.on('tuji:desktop-prepared', (event, requestId, error) => {
+  function pendingSave(event, requestId) {
     try { trusted(event); } catch { return; }
-    const entry = pending.get(requestId); if (!entry || entry.sender !== event.sender.id) return;
-    pending.delete(requestId); clearTimeout(entry.timer);
+    const entry = pending.get(requestId);
+    if (entry?.sender === event.sender.id) return entry;
+  }
+  ipcMain.on('tuji:desktop-preparing', (event, requestId) => pendingSave(event, requestId)?.heartbeat());
+  ipcMain.on('tuji:desktop-prepared', (event, requestId, error) => {
+    const entry = pendingSave(event, requestId); if (!entry) return;
     if (error) entry.reject(new Error(String(error))); else entry.resolve();
   });
   ipcMain.on('tuji:orb-hit-test', (event, interactive) => {
@@ -236,8 +325,8 @@ export function createCompanion({ main, origin, preload, icon, directory, secure
     else if (phase === 'end') { const dragging = dragStart; dragStart = undefined; if (dragging) positionOrb(orbCenter, true); }
     else if (phase === 'cancel') dragStart = undefined;
   });
-  main.on('close', event => { if (!quitting) { event.preventDefault(); void enqueue(hideMain).catch(report); } });
-  main.on('minimize', () => { if (!quitting) void enqueue(hideMain).catch(report); });
+  main.on('close', event => { if (!quitting) { event.preventDefault(); if (!reporting) void enqueue(hideMain).catch(report); } });
+  main.on('minimize', () => { if (!quitting && !reporting) void enqueue(hideMain).catch(report); });
   main.on('restore', () => { if (state.background && !transition) void enqueue(showMain).catch(report); });
   const displayChanged = () => { if (orb) positionOrb(orbCenter, true); if (panel && state.host === 'panel') positionPanel(); };
   screen.on('display-metrics-changed', displayChanged); screen.on('display-removed', displayChanged);
@@ -246,11 +335,17 @@ export function createCompanion({ main, origin, preload, icon, directory, secure
     { type: 'separator' }, { label: '退出', click: () => { void quit(); } }]));
   tray.on('click', () => { void enqueue(showMain).catch(report); });
   return {
-    showMain: () => enqueue(showMain),
-    async beforeQuit() {
-      await queue;
-      await prepare(owner()); if (state.host === 'panel') await prepare(main);
-      persist(); quitting = true; clearTimeout(saveTimer); clearInterval(orbPointerTimer); tray.destroy();
+    showMain: () => enqueue(showMain).catch(report),
+    beforeQuit() {
+      if (closing) return closing;
+      // Finish accepted transfers first. A restore/close during the quit
+      // barrier must not transfer editing to a new host behind that barrier.
+      closing = queue.then(async () => {
+        if (state.host === 'panel') await prepare(panel);
+        await prepare(main);
+        persist(); quitting = true; clearTimeout(saveTimer); clearInterval(orbPointerTimer); tray.destroy();
+      }).finally(() => { closing = undefined; });
+      return closing;
     },
     destroy() { quitting = true; clearTimeout(saveTimer); clearInterval(orbPointerTimer); if (tray && !tray.isDestroyed()) tray.destroy(); orb?.destroy(); panel?.destroy(); }
   };

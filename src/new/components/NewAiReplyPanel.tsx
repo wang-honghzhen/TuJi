@@ -1,7 +1,6 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { ChevronLeft, ChevronRight, LocateFixed } from 'lucide-react';
 import { activeTask, getSession, sessionTasks, useAiStore } from '@/ai/client';
-import type { Task } from '@/ai/domain';
 import { presentationOwner, taskParts, usePlaybackStore } from '@/ai/presentationClient';
 import { presentationRows } from '@/ai/presentation';
 import { AiMessageView, AiToolGroup } from '@/ai/ui/AiTaskView';
@@ -43,7 +42,6 @@ export function NewAiReplyPanel({canvasId='qixue-draft-canvas'}:{canvasId?:strin
   }, [canvasId, part?.id]);
   useLayoutEffect(()=>{if(editing){numberInput.current?.focus();numberInput.current?.select();}},[!!editing]);
   useEffect(()=>{edit.current=undefined;setEditing(undefined);},[canvasId,task?.id]);
-  const control=(action:string,extra:object={})=>task?command<Task['presentation']>('presentation.control',{taskId:task.id,owner:presentationOwner,action,...extra}).catch(()=>undefined):Promise.resolve(undefined);
   // Only the main reply panel activates playback. Record pickers never mount this panel.
   // Serialize navigation so a slow older request cannot overwrite the latest direction.
   const synchronize=(taskId=task?.id,stillCurrent=()=>true)=>{
@@ -79,18 +77,23 @@ export function NewAiReplyPanel({canvasId='qixue-draft-canvas'}:{canvasId?:strin
     window.addEventListener('focus',update);window.addEventListener('blur',update);document.addEventListener('visibilitychange',update);document.addEventListener('focusin',update);document.addEventListener('focusout',update);
     return()=>{window.removeEventListener('focus',update);window.removeEventListener('blur',update);document.removeEventListener('visibilitychange',update);document.removeEventListener('focusin',update);document.removeEventListener('focusout',update);};
   },[]);
-  useEffect(()=>{
-    if(!task||task.presentation?.owner!==presentationOwner||task.presentation.mode!=='follow'||!part?.sealed||paused||mode!=='follow'||!visible||typing||editing||syncing||playback?.interactionBusy||connection!=='connected')return;
-    let cancelled=false,timer:ReturnType<typeof setTimeout>|undefined;
-    void control('show',{seq:part.seq,epoch}).then(result=>{if(cancelled||result?.visiblePart?.seq!==part.seq||result.visiblePart.epoch!==epoch)return;
-      timer=setTimeout(()=>{
-        if(cancelled)return;
-        if(index<parts.length-1)setPlayback(canvasId,{cursor:parts[index+1].seq});
-        else if(task.presentation?.round)void control('ack',{seq:part.seq,epoch,stepId:task.presentation.round.stepId,revision:task.presentation.round.revision});
-      },part.dwellMs+80);
-    });
-    return()=>{cancelled=true;if(timer)clearTimeout(timer);};
-  },[task?.id,task?.presentation?.owner,task?.presentation?.mode,part?.id,part?.sealed,part?.dwellMs,part?.version,index,parts.length,paused,mode,visible,typing,!!editing,syncing,playback?.interactionBusy,connection,epoch,task?.presentation?.round?.lastSeq]);
+  const following = task?.presentation?.owner === presentationOwner && task.presentation.mode === 'follow'
+    && mode === 'follow' && visible && !paused && !typing && !editing && !syncing && !playback?.interactionBusy && connection === 'connected';
+  const nextSeq = parts[index + 1]?.seq;
+  const dwellUntil = useRef(0);
+  useEffect(() => {
+    if (following && task && part?.sealed)
+      void command('presentation.control', { taskId: task.id, owner: presentationOwner, action: 'show', seq: part.seq, epoch }).catch(() => undefined);
+  }, [following, task?.id, part?.id, part?.sealed, epoch]);
+  useEffect(() => {
+    // A later part may arrive at any time. Only the displayed part starts a new reading interval.
+    dwellUntil.current = following && part?.sealed ? performance.now() + part.dwellMs + 80 : 0;
+  }, [following, part?.id, part?.sealed, part?.version, part?.dwellMs, epoch]);
+  useEffect(() => {
+    if (!dwellUntil.current || nextSeq === undefined) return;
+    const timer = setTimeout(() => setPlayback(canvasId, { cursor: nextSeq }), Math.max(0, dwellUntil.current - performance.now()));
+    return () => clearTimeout(timer);
+  }, [following, part?.id, part?.sealed, part?.version, part?.dwellMs, epoch, nextSeq, canvasId, setPlayback]);
   useEffect(()=>{useAiStore.getState().setReplyTargetRefs(canvasId,part?.targets??[]);
     return()=>useAiStore.getState().setReplyTargetRefs(canvasId,[]);
   },[part?.id,part?.version,canvasId]);
@@ -116,7 +119,8 @@ export function NewAiReplyPanel({canvasId='qixue-draft-canvas'}:{canvasId?:strin
       {targetStatus.notice&&<p className="canvas-reply-target-notice" role="status" data-presentation-target-notice>{targetStatus.notice}</p>}
       <div className="ai-column">{displayedRows.map(row=>row.calls
         ? <div key={row.id} data-action-status><AiToolGroup calls={row.calls}/></div>
-        : row.message?<AiMessageView key={row.id} message={row.message} canvasId={canvasId} sessionId={session?.id}/>:null)}</div>
+        : row.message?<AiMessageView key={row.id} message={row.message} canvasId={canvasId} sessionId={session?.id}
+          onNavigate={refs => useAiStore.getState().requestCanvasSelection(canvasId, refs, 'ai', part?.id)} />:null)}</div>
     </div>
     <nav className="canvas-reply-navigation" aria-label="回复分段" data-presentation-navigation>
       <button type="button" className="canvas-reply-nav-button" aria-label="上一段" title="上一段 · 停止跟随" disabled={index===0} onClick={()=>navigate(parts[index-1].seq)}><ChevronLeft size={18}/></button>

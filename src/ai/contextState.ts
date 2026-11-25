@@ -26,13 +26,19 @@ export interface RetentionDraft { fence: string; receiptIds: string[]; removedTe
 export interface DirectoryRegion { data: unknown; tokens: number; observation: Observation; drafts: FrozenRead[];
   canvasId: string; budget: number }
 export interface Coverage { recordId: string; taskId: string; version: string; start: number; end: number }
-export interface SummaryObjectBinding {key:string;kind:'node'|'document'|'edge'|'read';id:string;version?:string|number}
+export interface SummaryObjectBinding {key:string;kind:'node'|'document'|'edge'|'read';id:string;version?:string|number;
+  fieldRead?: {recordId:string;pointerId:string;page:number;field:string;start?:number;end?:number;total?:number;sliceVersion?:string} }
 export interface SummarySnapshot { id: string; version: string; semanticType: 'task' | 'artifact';
   stepIds?: string[]; inputUnitIds?: string[]; summaryRoundId?: string;
   intermediateUserMessages?: Array<{ id:string; version:number; text:string; order:number; targetGroups?:CanvasTargetGroup[] }>;
   retentionPolicyVersion?: number;
   text: string; coverage: Coverage[]; children: string[]; createdAt: string; sourceRefs: SourceRef[];
   objectBindings?:SummaryObjectBinding[];
+  /** Verified field markers, including the basis inherited from nested summaries. */
+  fieldDependencies?:SummaryObjectBinding[];
+  /** Prior scoped citations omitted on recompression. These verify the extent of the
+   * original read without subscribing the parent summary to omitted fields. */
+  omittedFieldSources?:Array<{recordId:string;key:string}>;
   /** Program-derived provenance, independent of optional markers in model prose. */
   sourceBindings?:SummaryObjectBinding[];
   artifactId?: string; artifactVersion?: number }
@@ -69,11 +75,17 @@ export interface Observation { id: string; callId?: string; taskId: string; canv
   /** Restored evidence is usable only while every exact archive fragment is visible together. */
   archiveProof?: { pointerId: string; recordId: string; version: string; pages: number[] };
   canvasFacts?: import('./server/canvasReadEvidence').CanvasFact[];
+  /** Ownership and sharing scope at field delivery, separate from its visible value. */
+  textScopes?: Record<string,string>;
+  /** Frozen field handles can expire without implying the corresponding value was displayed. */
+  continuationHashes?: Record<string,string>;
+  /** Complete paths actually shown in this delivery. Hash-only legacy reads omit this. */
+  observedPaths?: Record<string, Array<{refId:string;name:string}>>;
   /** Semantic components of aggregate stamps. These are dependencies, not delivered bodies. */
   canvasVersionDependencies?: Record<string,import('./server/canvasReadEvidence').CanvasFact[]>;
   canvasPage?: {pointerId:string;page:number;totalPages:number};
-  fileTransitions?:Array<{key:string;before?:string;after?:string}>;
-  fileVersions?: Record<string,string>;
+  /** One part of a frozen subgraph's list of direct nodes. */
+  memberListPage?: {refId:string;part:number;total:number;version:string};
   evidenceUnknown?: boolean;
   provenEmpty?:boolean;
   /** System directory views are visible only while their owning region is displayed. */
@@ -91,7 +103,6 @@ export interface Observation { id: string; callId?: string; taskId: string; canv
   readHashes?: Record<string, string>; graphReadDependenciesVersion?: number }
 /** Private evidence attached to a successful write, never a replacement for frozen read bodies. */
 export interface GraphWriteAcknowledgement {
-  fileTransitions?:Array<{key:string;before?:string;after?:string}>;
   commandCallIds?: string[];
   advances: Array<{ observationId: string; expected: string; observation: Observation }>;
   observations: Observation[];
@@ -110,7 +121,7 @@ export interface FrozenRead { id: string; taskId: string; callId: string; canvas
   originResultIds?: string[];
   pageBudget?: number;
   queryKey?:string;
-  searchSelection?: { scope?: 'node_names'; totalMatches: number; selectedMatches: number; countOnly?: boolean; countComplete?: boolean };
+  searchSelection?: { scope?: 'node_names' | 'path' | 'children'; totalMatches: number; selectedMatches: number; countOnly?: boolean; countComplete?: boolean };
   readFormatVersion?:number; coverage?:import('./server/readCoverage').ReadCoverage;
   historyViewVersion?: number;
   /** Navigation only, created with new history snapshots; never delivered source coverage. */

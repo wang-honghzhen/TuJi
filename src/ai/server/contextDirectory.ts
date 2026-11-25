@@ -3,10 +3,9 @@ import type { FrozenRead } from '../contextState';
 import { AUTO_CONTEXT } from '../contextState';
 import { inputCapacity } from '../memory';
 import { estimateTokens } from '../tokens';
-import { digest, graphIndex, observe } from './directGraph';
-import { childDirectories, directoryCard, type DirectoryNode } from './directoryRead';
-import { expandTree, treeListBranch } from './treeExpansion';
-import { subgraphVersion } from './subgraphVersions';
+import { digest, graphIndex, observe, observeDirectoryDisplay } from './directGraph';
+import { childDirectories, directoryCard, directoryListBranch, type DirectoryNode } from './directoryRead';
+import { expandTree } from './treeExpansion';
 import { GRAPH_READ_DEPENDENCIES_VERSION } from './graphReadDependencies';
 import { GRAPH_READ_LIMITS, checkFrozenStorage, resourceLimit } from './graphReadLimits';
 import { READ_FORMAT_VERSION, readCoverage } from './readCoverage';
@@ -37,8 +36,7 @@ export function prepareDirectoryView(state: AppSnapshot, task: Task, options: {
   const result = expandTree(root.id, id => options.mode === 'children' && id !== root.id ? [] : childDirectories(index,id),
     id => directoryCard(index,id), tree => directoryMessageTokens(frame(tree as DirectoryNode)) <= options.budget, 'childrenState',
     (id, ids, rows) => {
-      const branch = treeListBranch(id,ids,rows,pageBudget,
-        items => ({kind:'directory_children',scope:id,directoryVersion:subgraphVersion(index,id,'directory'),listOnly:true,totalChildren:ids.length,items}),fitsPage);
+      const branch = directoryListBranch(index,id,ids,rows,pageBudget,fitsPage);
       if (branch) branch.id = `read:directory-${digest([options.viewId,id,branch.pages,pageBudget]).slice(0,32)}`;
       return branch;
     });
@@ -47,7 +45,7 @@ export function prepareDirectoryView(state: AppSnapshot, task: Task, options: {
   const drafts: FrozenRead[] = result.branches.map(branch => {
     const pageObservations = branch.pages.map(page => {
       const refs = (page.items as Record<string,unknown>[] ?? []).flatMap(row => typeof row.refId === 'string' ? [row.refId] : []);
-      const observation = observe(state,task,index,[branch.parentId,...refs],[],true); observation.sources=[]; return observation;
+      return observeDirectoryDisplay(state,task,index,[branch.parentId,...refs],[],page);
     });
     const snapshotObservation = observe(state,task,index,[branch.parentId,...branch.childIds],[branch.parentId],true);
     snapshotObservation.sources=[];
@@ -59,7 +57,7 @@ export function prepareDirectoryView(state: AppSnapshot, task: Task, options: {
       createdAt:new Date().toISOString(),expiresAt:Date.now()+GRAPH_READ_LIMITS.ttlMs};
   });
   checkFrozenStorage([],drafts);
-  const observation=observe(state,task,index,result.refs,shown,true);observation.sources=[];
+  const observation=observeDirectoryDisplay(state,task,index,result.refs,shown,result.tree);
   return {tree:result.tree as DirectoryNode,canvasId:task.canvasId,rootRefId:root.id,currentPath,observation,drafts};
 }
 

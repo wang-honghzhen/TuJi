@@ -5,7 +5,8 @@ export function canvasInteractionBlocked(target?: EventTarget | null, checkText 
   if (document.getElementById('root')?.inert || document.querySelector('[data-ai-settings-page], [aria-modal="true"]')) return true;
   if (!checkText) return false;
   const editable = (value: EventTarget | null | undefined) => value instanceof Element
-    && !!value.closest('input, textarea, select, [contenteditable="true"], [role="textbox"], [role="menu"]');
+    && ((value instanceof HTMLElement && value.isContentEditable) ||
+      !!value.closest('input, textarea, select, [role="textbox"], [role="combobox"], [role="searchbox"], [role="menu"]'));
   return editable(target) || editable(document.activeElement);
 }
 

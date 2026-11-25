@@ -202,7 +202,11 @@ export const UserNoteEditor = forwardRef<UserNoteEditorHandle, Props>(function U
     if (imageOperation.current) return imageOperation.current.then(() => flushRef.current());
     if (importing.current) return importing.current.then(() => flushRef.current());
     if (pending.current) return pending.current;
-    if (same(current.current, saved.current.blocks) || composing.current) return Promise.resolve();
+    if (composing.current) return Promise.resolve();
+    if (same(current.current, saved.current.blocks)) {
+      setStatus('saved');
+      return Promise.resolve();
+    }
     setStatus('saving'); setError('');
     pending.current = (async () => {
       while (!same(current.current, saved.current.blocks) && !composing.current) {
@@ -211,8 +215,10 @@ export const UserNoteEditor = forwardRef<UserNoteEditorHandle, Props>(function U
         saved.current = { blocks: userNoteBlocks(result), version: result.version };
         if (current.current === next) { current.current = saved.current.blocks; if (mounted.current) setBlocks(current.current); }
       }
-      if (mounted.current) setStatus('saved');
-    })().catch(cause => { if (mounted.current) { setStatus('editing'); setError(cause instanceof Error ? cause.message : '保存失败，编辑内容仍保留在这里'); } throw cause; }).finally(() => { pending.current = undefined; });
+    })().catch(cause => { if (mounted.current) setError(cause instanceof Error ? cause.message : '保存失败，编辑内容仍保留在这里'); throw cause; }).finally(() => {
+      pending.current = undefined;
+      if (mounted.current) setStatus(same(current.current, saved.current.blocks) ? 'saved' : 'editing');
+    });
     return pending.current;
   };
   flushRef.current = flush;
@@ -222,7 +228,7 @@ export const UserNoteEditor = forwardRef<UserNoteEditorHandle, Props>(function U
     if (props.page.version <= saved.current.version || pending.current || importing.current || !same(current.current, saved.current.blocks)) return;
     const next = userNoteBlocks(props.page); saved.current = { blocks: next, version: props.page.version }; current.current = next; setBlocks(next); setStatus('saved');
     history.current = { past: [], future: [], group: '', at: 0 };
-  }, [props.page.version, props.page.blocks, props.page.text]);
+  }, [props.page.version, props.page.blocks, props.page.text, status, uploading]);
   const undo = (redo = false) => {
     if (uploading || imageOperation.current) return; const h = history.current, source = redo ? h.future : h.past, target = redo ? h.past : h.future, next = source.pop();
     if (!next) return; target.push(structuredClone(current.current)); h.group = ''; change(next, '', false); setSelected(undefined); renderHistory(value => value + 1);

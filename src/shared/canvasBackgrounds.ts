@@ -1,6 +1,6 @@
 export type CanvasBackgroundId = 'starry-sky' | 'white-grid' | 'custom';
 export const DEFAULT_BACKGROUND: CanvasBackgroundId = 'starry-sky';
-export const BUILTIN_BACKGROUND_URL = '/backgrounds/starry-sky.png';
+export const BUILTIN_BACKGROUND_URL = '/backgrounds/starry-sky.webp';
 export const MAX_BACKGROUND_BYTES = 12 * 1024 * 1024;
 export interface PersonalizationSettings {
   canvasBackgroundId: CanvasBackgroundId;

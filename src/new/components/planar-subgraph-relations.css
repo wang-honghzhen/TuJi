@@ -1,0 +1,28 @@
+.planar-relation, .planar-relation-count { color: var(--relation-count-color); }
+.planar-relation-line {
+  opacity: var(--relation-rest-opacity);
+  stroke-width: 1.25;
+  stroke-dasharray: 4 5;
+  stroke-linecap: round;
+}
+.planar-relation-count { opacity: var(--relation-count-opacity); }
+.planar-relation-endpoint {
+  fill: currentColor;
+  stroke: color-mix(in srgb, currentColor 65%, white);
+  opacity: .38;
+}
+[data-workspace-background='white-grid'] .planar-relation-endpoint { stroke: white; }
+
+/* Chromium outlines the whole SVG group even after a mouse click.
+   The focused route and count below follow the geometry of the relation. */
+.planar-relation:focus, .planar-relation-count:focus { outline: none; }
+.planar-relation-count:is([data-active], :focus-visible) { color: var(--relation-active); }
+.planar-relation-count[data-selected="true"] { color: var(--relation-selected); }
+.planar-relation:is([data-active], :focus-visible, [data-selected="true"]) .planar-relation-endpoint { opacity: .65; }
+.planar-relation:is([data-active], :focus-visible, [data-selected="true"]) .planar-relation-line {
+  opacity: 1;
+  stroke-width: 2.2;
+  stroke-dasharray: none;
+}
+.planar-relation-count:is([data-active], :focus-visible, [data-selected="true"]) { opacity: 1; }
+.planar-relation[data-neighbor-focus] .planar-relation-line { opacity:1; stroke:var(--neighbor-focus-ink); stroke-width:3; }

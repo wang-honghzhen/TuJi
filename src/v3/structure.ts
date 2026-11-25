@@ -1,7 +1,7 @@
 import { canvasDirectories, canvasDirectory, canvasDirectoryEntries } from './canvas';
 import { graphIdAllocator } from './ids';
 import { buildRenderModel, findFreeDocumentPlacement } from './layout';
-import { commitStructure, prepareDocumentAddition, pruneInvalidEdges, removeDocument } from './storage';
+import { commitStructure, deleteEdge, prepareDocumentAddition, pruneInvalidEdges, removeDocument } from './storage';
 import { documentParents, getDocumentTree, structureRevision, type DocumentTree } from './documentTrees';
 import { copyAsSubgraph } from './snapshots';
 import type { CanvasRecord, GraphRecord, GraphState, Placement, Point } from './types';
@@ -90,12 +90,12 @@ export function ownershipNotice(state: GraphState, canvas: CanvasRecord, ids: st
   return count ? `${count} 个节点将从图文档归属转为当前画布局部节点。其他引用原图文档的画布将不再包含这些节点；节点和关系数据会保留。` : null;
 }
 
-export function applyStructureCommand(state: GraphState, canvasId: string, command: StructureCommand): StructureResult {
+export function applyStructureCommand(state: GraphState, canvasId: string, command: StructureCommand, protectedIds?: ReadonlySet<string>): StructureResult {
   const source = state.canvases.find((item) => item.canvasId === canvasId); if (!source) throw new Error('画布不存在');
   if (command.type === 'importDocument' && state.documents[command.id] && modeOf(source) !== modeOf(state.documents[command.id])) throw new Error('探索与设计图文档不能互相引入');
-  if (command.type === 'deleteEdge' && state.edges.find(edge => edge.edgeId === command.id)?.membershipFor) throw new Error('请在组合详情中移除成员方案');
   const revision = structureRevision(state);
   if (command.resolution && command.resolution.revision !== revision) throw new Error('目录结构已变化，请重新发起操作并确认');
+  if (command.type === 'deleteEdge') return { state: deleteEdge(state, command.id), cleanedEdges: 0 };
   if (command.type === 'importDocument' && command.mode === 'reference') {
     return { state: commitStructure(prepareDocumentAddition(state, canvasId, command.id, command.point), state), id: command.id, cleanedEdges: 0 };
   }
@@ -289,7 +289,21 @@ export function applyStructureCommand(state: GraphState, canvasId: string, comma
       else next.documents[createdId] = { documentId: createdId, kind: 'subgraph', mode: modeOf(canvas), name: command.name.trim(), childNodeIds: [], childDocumentIds: [], placements: {}, rev: 1,
         metadata: { createdAt: now, updatedAt: now, version: '3.0', description: command.content } };
       attach(createdId, command.parentId, anchor);
-      for (const id of ids) relocate(id, createdId, world.get(id)!);
+      for (const id of ids) {
+        relocate(id, createdId, world.get(id)!);
+        // Grouping changes the local coordinate system. Keep an existing
+        // member's manual intent in the new frame, including overlapping
+        // cards the user placed deliberately. Copies have their own placement.
+        const oldParent = parents.get(id)!;
+        const old = (state.documents[oldParent]?.placements ?? source.placements)[id];
+        const grouped = next.documents[createdId]?.placements ?? canvas.placements;
+        const local = grouped[id];
+        if (local && old && (old.source === 'manual' || old.manualAnchor)) {
+          grouped[id] = { ...local, source: old.source, lastManualAt: old.lastManualAt,
+            ...(old.manualAnchor ? { manualAnchor: { x: local.x + (old.manualAnchor.x - old.x),
+              y: local.y + (old.manualAnchor.y - old.y) } } : {}) };
+        }
+      }
     }
   } else if (command.type === 'move' || command.type === 'moveCanvasItems' || command.type === 'reparentContent') {
     const selected = normalizeStructureSelection(state, source, command.ids);
@@ -298,7 +312,6 @@ export function applyStructureCommand(state: GraphState, canvasId: string, comma
     if (command.type === 'reparentContent' && selected.some(viewOnly)) throw new Error('这次操作只改变画布展示位置，请使用 moveCanvasItems');
     move(selected, command.parentId);
   }
-  else if (command.type === 'deleteEdge') next.edges = next.edges.filter((edge) => edge.edgeId !== command.id);
   else if (command.type === 'deleteNode') {
     if (!natural.membership.has(command.id) || !next.nodes[command.id]) throw new Error('节点不存在');
     remove(command.id, true);
@@ -364,7 +377,10 @@ export function applyStructureCommand(state: GraphState, canvasId: string, comma
     Object.keys(item.collapsed).forEach((id) => { if (!members.has(id)) delete item.collapsed[id]; });
   }
   const cleaned = pruneInvalidEdges(next);
-  return { state: commitStructure(cleaned, state), id: createdId, cleanedEdges: next.edges.length - cleaned.edges.length };
+  const placed = (command.type === 'createNode' || command.type === 'createSubgraph') && command.point;
+  const frame = placed ? { canvasId, ancestors: new Set(pathRows.find(row => row.id === command.parentId)?.segments.map(segment => segment.id)) }
+    : undefined;
+  return { state: commitStructure(cleaned, state, placed ? protectedIds : undefined, frame), id: createdId, cleanedEdges: next.edges.length - cleaned.edges.length };
 }
 
 /** Detach only this canvas's projection and replace it with an independent local branch. */
@@ -386,7 +402,11 @@ function replaceDocumentWithDirectory(state: GraphState, source: CanvasRecord, d
     const anchor = buildRenderModel(state, source, { zoom: 1, ignoreCollapse: true, skipEdges: true }).blocks.find(b => b.id === documentId)?.anchor;
     canvas.placements[fresh] = { x: anchor?.x ?? 0, y: anchor?.y ?? 0, source: 'auto' };
   }
-  for (const [oldId, newId] of mapping) if (source.collapsed[oldId]) canvas.collapsed[newId] = true;
+  for (const [oldId, newId] of mapping) {
+    if (source.collapsed[oldId]) canvas.collapsed[newId] = true;
+    const offset = source.spatialLayerOffsets?.[oldId];
+    if (offset) (canvas.spatialLayerOffsets ??= {})[newId] = offset;
+  }
   delete canvas.placements[documentId]; delete canvas.collapsed[documentId];
   canvas.updatedAt = new Date().toISOString();
   return { state: commitStructure(next, state), id: fresh, identityMap: Object.fromEntries(mapping), cleanedEdges: 0 };

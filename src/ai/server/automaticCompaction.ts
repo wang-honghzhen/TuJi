@@ -7,7 +7,7 @@ import { contextCapacity } from '../contextCapacity';
 import { ensureSessionContext, residentSessionTaskIds } from '../sessionContext';
 import { estimateTokens } from '../tokens';
 import { Repository } from './repository';
-import { callModel, requestTokens, type ModelRequest } from './providers';
+import { callModel, ProviderError } from './providers';
 import { summaryConnection } from './apiConfiguration';
 import { digest } from './directGraph';
 import { allEvidence, summaryArchive } from './historyRepresentations';
@@ -17,8 +17,9 @@ import { noticeDue, noticeMaintenanceReasons } from './noticeMaintenance';
 import { createDirectoryMaintenance, evictDirectoryCacheEntry } from './directoryCache';
 import { createSummaryMaintenance, evictSummaryRegion } from './summaryRegions';
 import { createCanvasMaintenance } from './canvasRefresh';
-import { taskSummaryUnits, boundedSummaryInput, acceptTaskSummaries, summaryStorageBenefit, TASK_SUMMARY_INSTRUCTIONS, taskSummaryBudget, summaryInputWeight, type TaskSummaryInput } from './taskSummaryEngine';
-import { allocateSummaryRanges, summaryRangeRequest, bindSummaryRangeResponse } from './taskSummaryRanges';
+import { taskSummaryUnits, acceptTaskSummaries, summaryStorageBenefit, taskSummaryBudget, type TaskSummaryInput } from './taskSummaryEngine';
+import { packSummaryRequest } from './taskSummaryPacking';
+import { bindSummaryRangeResponse, summarySegments } from './taskSummaryRanges';
 import { selectProjectedSummaries, summaryProjectionBenefits } from './summaryAdmission';
 
 interface PrepareOptions {repo:Repository;task:Task;caller:typeof callModel;signal:AbortSignal;guard:()=>void;
@@ -30,13 +31,26 @@ interface PrepareOptions {repo:Repository;task:Task;caller:typeof callModel;sign
 function summaryInputFence(repo:Repository,task:Task,inputs:TaskSummaryInput[]):string {
   const state=repo.state,workspace=state.workspaces.find(w=>w.id===task.workspaceId)!;
   const session=state.sessions.find(s=>s.id===task.sessionId),records=allEvidence(state,task),archive=summaryArchive(state,task);
+  const byId=new Map(records.map(record=>[record.id,record]));
+  const evidence=inputs.map(input=>{
+    const live=taskSummaryUnits(state,task,input.taskId);
+    const unitsById=new Map(live.units.map(unit=>[unit.id,unit]));
+    const selected=input.units.flatMap(unit=>unitsById.get(unit.id)??[]);
+    // New siblings or an inserted failed step can invalidate a range while
+    // every individual record previously sent still has the same version.
+    const segments=summarySegments({...live,units:selected},records);
+    return [input.taskId,live.initialMessage,segments,input.units.map(unit=>[
+      unit.id,unitsById.get(unit.id)?.coverage,unit.summaryId?archive.find(s=>s.id===unit.summaryId):undefined,
+      unit.coverage.map(span=>{
+        const record=byId.get(span.recordId);
+        return [span,record&&[record.taskId,record.version,record.text,record.sources,record.order]];
+      })
+    ])];
+  });
   return digest([task.instructionRevision,state.provider,task.modelSelection,repo.summaryConnection?.provider,
     task.inputBindings,[session?.canvasId,session?.mode,session?.lifecycle,session?.temporaryContext],
     workspace.snapshotIds.map(id=>{const s=state.snapshots.find(s=>s.id===id);return [id,s?.contentHash,s?.revoked];}),
-    inputs.map(input=>[input.taskId,taskSummaryUnits(state,task,input.taskId).initialMessage,
-      input.units.map(unit=>[unit.id,unit.summaryId?archive.find(s=>s.id===unit.summaryId):undefined,
-        unit.coverage.map(span=>{const r=records.find(r=>r.id===span.recordId&&r.taskId===span.taskId);
-          return [span,r&&[r.version,r.text,r.sources,r.order]];})])])]);
+    evidence]);
 }
 
 export function progressRegionTokens(manifest:ContextManifest){
@@ -137,7 +151,7 @@ export async function prepareAutomaticContext(options:PrepareOptions):Promise<Co
   const budgets=taskSummaryBudget(capacity),active=new Set<'history'|'progress'>();
   const first=progressRegionTokens(candidate);
   if(first.history>budgets.high)active.add('history');if(first.progress>budgets.high)active.add('progress');
-  const noBenefit=new Set<string>();
+  const attemptedMaterial=new Set<string>();
   const evictOldest=()=>{
     const oldest=resident.find(id=>id!==task.id);if(!oldest)return false;
     resident=resident.filter(id=>id!==oldest);candidate=build('refactor','capacity');return true;
@@ -157,59 +171,64 @@ export async function prepareAutomaticContext(options:PrepareOptions):Promise<Co
     const selection=needHistory?resident.filter(id=>id!==task.id&&(counts[id]??0)<2):[];
     if(needCurrent)selection.unshift(task.id);
     const connection=summaryConnection(repo,task.modelSelection),provider={...connection.provider,maxOutputTokens:Math.min(connection.provider.maxOutputTokens,4096)};
-    let inputBudget=contextCapacity(provider).inputCapacity-estimateTokens(TASK_SUMMARY_INSTRUCTIONS)-1024;
-    const inputs:TaskSummaryInput[]=[];
-    for(const taskId of selection){
-      const raw=taskSummaryUnits(materialState,task,taskId),signature=digest(raw.units.map(u=>[u.id,u.coverage]));
-      if(noBenefit.has(signature))continue;
-      const bounded=boundedSummaryInput(raw,inputBudget);
-      if(bounded){inputs.push(bounded);inputBudget-=estimateTokens(JSON.stringify({initialMessage:bounded.initialMessage,
-        referenceCatalog:bounded.referenceCatalog,executionFunctionGuide:bounded.executionFunctionGuide,units:bounded.units.map(u=>({id:u.id,weight:u.weight,content:u.content}))}));}
-      if(inputs.length>=3)break;
+    const signatures=new Map<string,string>();
+    function* availableInputs(){
+      for(const taskId of new Set(selection)){
+        const raw=taskSummaryUnits(materialState,task,taskId),signature=digest(raw.units.map(u=>[u.id,u.coverage]));
+        if(attemptedMaterial.has(signature))continue;
+        signatures.set(taskId,signature);
+        yield raw;
+      }
     }
+    const rangeRecords=allEvidence(materialState,task);
+    const remainingInput=task.maxTokens-task.usedTokens-provider.maxOutputTokens;
+    const taskBudgetRestrictsInput=remainingInput<contextCapacity(provider).inputCapacity;
+    const {inputs,plan:rangePlan,wire:request,tokens,eligible}=packSummaryRequest(provider,availableInputs(),rangeRecords,remainingInput);
     if(!inputs.length){
+      if(signatures.size){
+        const reason=!eligible?'no_legal_range':taskBudgetRestrictsInput?'task_token_budget':'input_capacity';
+        repo.transaction(()=>repo.event(task.workspaceId,'context.summary_skipped',{reason,taskIds:[...signatures.keys()]},task.id));
+        for(const signature of signatures.values())attemptedMaterial.add(signature);
+      }
       if((needHistory||candidate.error||candidate.requestTokens>target)&&evictOldest())continue;
-      return lowerBound(candidate,'当前任务受保护步骤、初始消息或无收益内容仍无法容纳；已保留全部原文，请调整模型容量后继续。');
+      if(eligible&&taskBudgetRestrictsInput)return lowerBound(candidate,'摘要所需任务用量预算不足；任务与原文已保留。');
+      return lowerBound(candidate,eligible?'完整摘要范围与背景无法容纳在摘要模型输入容量内；已保留全部原文。':
+        '当前任务受保护步骤或不可继续整理的内容仍无法容纳；已保留全部原文，请调整模型容量后继续。');
     }
     if(calls>=AUTO_CONTEXT.maxCalls||task.maxSteps-task.stepCount-(task.memoryCalls??0)<=1){
       if(evictOldest())continue;
       return lowerBound(candidate,'摘要所需模型调用预算不足且必需内容仍无法容纳；任务与原文已保留。');
     }
-    const rangeRecords=allEvidence(materialState,task);
-    let rangePlan=allocateSummaryRanges(inputs,rangeRecords);
-    const makeRequest=():ModelRequest=>({messages:[{role:'system',content:TASK_SUMMARY_INSTRUCTIONS},
-      {role:'user',content:JSON.stringify(summaryRangeRequest(rangePlan))}],tools:[]});
-    let request=makeRequest(),tokens=requestTokens(provider,request);
-    while(tokens>contextCapacity(provider).inputCapacity&&inputs.length){
-      const last=inputs.at(-1)!;
-      if(summaryInputWeight(last.units.slice(0,-1))>=2)last.units.pop();else inputs.pop();
-      rangePlan=allocateSummaryRanges(inputs,rangeRecords);
-      request=makeRequest();tokens=requestTokens(provider,request);
-    }
-    if(!inputs.length||!rangePlan.ranges.length){
-      if(evictOldest())continue;
-      return lowerBound(candidate,'完整步骤与摘要背景无法容纳在摘要模型输入容量内；已保留全部原文。');
-    }
     if(tokens+provider.maxOutputTokens+task.usedTokens>task.maxTokens){
       if(evictOldest())continue;
       return lowerBound(candidate,'摘要所需任务用量预算不足且必需内容仍无法容纳；任务与原文已保留。');
     }
+    if(Date.now()-started>=AUTO_CONTEXT.maxDurationMs)break;
     const sourceFence=summaryInputFence(repo,task,inputs),roundId=randomUUID();calls++;
-    const inputSignatures=inputs.map(input=>digest(taskSummaryUnits(materialState,task,input.taskId).units.map(u=>[u.id,u.coverage])));
     repo.transaction(()=>{task.memoryCalls=(task.memoryCalls??0)+1;task.usedTokens+=tokens+provider.maxOutputTokens;
       repo.event(task.workspaceId,'context.compaction_started',{roundId,phase:'summary'},task.id);});
     let accepted:SummarySnapshot[]=[];
-    let commitFailed=false;
+    let commitFailed=false,invalidReferences=0,reason='no_output';
     let summaryStatus:'completed'|'failed'|'cancelled'|'skipped'='skipped';
     try{
       const response=await caller({...provider,timeoutMs:Math.max(1,Math.min(provider.timeoutMs,AUTO_CONTEXT.maxDurationMs-(Date.now()-started)))},connection.credential,request,{signal});
-      guard();repo.transaction(()=>{task.usedTokens+=(response.outputTokens??estimateTokens(response.text))-provider.maxOutputTokens;});
+      // Settle usage even if a new user instruction arrived during this call.
+      // The original reservation already includes the locally estimated input and output cap.
+      const usage=(n:unknown)=>typeof n==='number'&&Number.isSafeInteger(n)&&n>=0?n:undefined;
+      const inputUsage=usage(response.inputTokens),outputUsage=usage(response.outputTokens);
+      repo.transaction(()=>{
+        const live=repo.state.tasks.find(t=>t.id===task.id);
+        if(live)live.usedTokens+=(inputUsage&&inputUsage>0?inputUsage:tokens)-tokens
+          +(outputUsage??estimateTokens(response.text))-provider.maxOutputTokens;
+      });
+      guard();
       // The await can outlive any maintenance snapshot, even when the summary's
       // immutable historical inputs are unchanged. Never reuse those memo tables.
       resetMaintenance();candidate=build('refactor','capacity');trim();
-      if(sourceFence!==summaryInputFence(repo,task,inputs))continue;
+      if(sourceFence!==summaryInputFence(repo,task,inputs)){reason='source_changed';continue;}
       const output=JSON.parse(response.text.replace(/^```(?:json)?\s*/,'').replace(/\s*```$/,''));
-      const proposals=acceptTaskSummaries(materialState,task,inputs,bindSummaryRangeResponse(rangePlan,output,inputs,rangeRecords),roundId);
+      const proposals=acceptTaskSummaries(materialState,task,inputs,bindSummaryRangeResponse(rangePlan,output,inputs,rangeRecords),roundId,()=>{invalidReferences++;});
+      reason=proposals.length?'no_projection_savings':invalidReferences?'invalid_reference':'no_output';
       if(proposals.length){
         if(sourceFence!==summaryInputFence(repo,task,inputs))throw new Error('摘要来源已变化');
         const owner=repo.state.workspaces.find(w=>w.id===task.workspaceId)!,prior=owner.summaries;
@@ -252,18 +271,19 @@ export async function prepareAutomaticContext(options:PrepareOptions):Promise<Co
           if(!committed){owner.summaries=prior;directoryMaintenance=baseDirectory;summaryMaintenance=baseSummary;canvasMaintenance=baseCanvas;}
         }
       }
-      if(accepted.length)summaryStatus='completed';
+      if(accepted.length){summaryStatus='completed';reason=invalidReferences?'partial_invalid_reference':'adopted';}
     }catch(error){
       summaryStatus=signal.aborted?'cancelled':'failed';
+      reason=error instanceof ProviderError?error.code:signal.aborted?'aborted':commitFailed?'commit_failed':'validation_or_projection';
       accepted=[];
       guard();if(signal.aborted||commitFailed)throw error;
       resetMaintenance();
-      repo.transaction(()=>repo.event(task.workspaceId,'context.summary_failed',{message:error instanceof Error?error.message:String(error),calls},task.id));
+      repo.transaction(()=>repo.event(task.workspaceId,'context.summary_failed',{message:error instanceof Error?error.message:String(error),reason,calls},task.id));
     }finally{
-      repo.transaction(()=>repo.event(task.workspaceId,'context.compaction_finished',{roundId,status:summaryStatus,summaries:accepted.length},task.id));
+      repo.transaction(()=>repo.event(task.workspaceId,'context.compaction_finished',{roundId,status:summaryStatus,reason,invalidReferences,summaries:accepted.length},task.id));
     }
-    for(const [index,input] of inputs.entries())if(!accepted.some(s=>s.coverage.some(c=>c.taskId===input.taskId)))
-      noBenefit.add(inputSignatures[index]);
+    for(const input of inputs)if(!accepted.some(s=>s.coverage.some(c=>c.taskId===input.taskId)))
+      attemptedMaterial.add(signatures.get(input.taskId)!);
     candidate=build('compact','capacity');trim();
   }
   // The deadline bounds model work, not the deterministic capacity fallback.

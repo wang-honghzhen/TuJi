@@ -1,5 +1,5 @@
 import { canvasDirectories } from '@/v3/canvas';
-import { MessagesSquare } from 'lucide-react';
+import { MessagesSquare, PanelRightClose } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { usePlaybackStore, taskParts, presentationOwner } from '@/ai/presentationClient';
 import { SidebarToggle } from './components/SidebarToggle';
@@ -14,6 +14,9 @@ import { CanvasBackground, CanvasBackgroundProvider } from './backgrounds/Canvas
 import { NewSessionGraphOverlay } from './components/NewSessionGraphOverlay';
 import { NewAiReplyPanel } from './components/NewAiReplyPanel';
 import { NewChatInput } from './components/NewChatInput';
+import { CanvasAiDrawer } from './components/CanvasAiDrawer';
+import { flushDraftActions } from '@/ai/draftTransfers';
+import { panelCommand, usePanelState } from '@/desktop/panelState';
 import { trackCanvasMutation } from './canvasEditFlush';
 import { AiTemporarySidebar } from '@/ai/ui/AiTemporarySidebar';
 import { openGlobalTemporarySession, openTemporarySession } from '@/ai/temporaryWindows';
@@ -31,7 +34,7 @@ import { useNewUiStore, useSidebarInsets } from './newUiStore';
 import { getCanvasDocumentIds } from '@/v3/layout';
 import type { Point, GraphState } from '@/v3/types';
 import { bootstrap, DRAFT_ID, emptyGraph, listDocumentMeta } from '@/v3/storage';
-import { useAiStore } from '@/ai/client';
+import { sessionTasks, useAiStore } from '@/ai/client';
 import type { Session } from '@/ai/domain';
 import { AiChatPage, AiSettingsDialog } from '@/ai/ui';
 import { AiSetupPage } from '@/ai/ui/AiSetupPage';
@@ -43,6 +46,7 @@ import { searchCanvas } from './graphSearch';
 import type { SidebarSearchKind, SidebarSearchValues } from './components/SearchField';
 
 const expandButtonClass = (visible: boolean) => `absolute top-3 z-30 ${visible ? 'opacity-100' : 'opacity-0 pointer-events-none'}`;
+const EMPTY_TARGETS: string[] = [];
 /** Browser records are the one-time migration source. Records written by an older format
  *  cannot be read at all, and the first start must still succeed: report what was skipped
  *  and start from an empty canvas. Browser storage is only read here, never rewritten. */
@@ -75,17 +79,30 @@ export default function NewApp() {
   const replyTargets = useAiStore(s => s.replyTargetRefsByCanvas);
   const graphState = snapshot?.graph ?? null;
   const [activeCanvasId, setActiveCanvasId] = useState(DRAFT_ID);
+  const dockedAi = usePanelState(s => s.dockedAiCanvases?.includes(activeCanvasId) ?? false);
+  const notebookOpen = usePanelState(s => s.host === 'main');
+  const notebookInset = usePanelState(s => s.host === 'main' && !s.detached ? s.width : 0);
+  const inBackground = usePanelState(s => s.background);
+  const [openAiCanvas, setOpenAiCanvas] = useState<string>();
+  const [aiDrawerWidth, setAiDrawerWidth] = useState(0);
+  const aiExpanded = dockedAi && openAiCanvas === activeCanvasId && !notebookOpen && !inBackground && view === 'canvas';
+  const presenting = view === 'canvas' && !dockedAi && !inBackground;
+  const currentCanvas = useRef(activeCanvasId); currentCanvas.current = activeCanvasId;
+  useEffect(() => { setOpenAiCanvas(undefined); }, [activeCanvasId, view]);
+  useEffect(() => { if (notebookOpen || inBackground) setOpenAiCanvas(undefined); }, [notebookOpen, inBackground]);
   const storedPlayback=usePlaybackStore(s=>s.byCanvas[activeCanvasId]);
   const enteredSessionId=useAiStore(s=>s.activeSessionByCanvas[activeCanvasId]);
   const playback=graphState?.canvases.find(c=>c.canvasId===activeCanvasId)?.isDraft?undefined:
     snapshot?.tasks.some(t=>t.id===storedPlayback?.taskId&&t.sessionId===enteredSessionId)?storedPlayback:undefined;
   const presentationParts=taskParts(snapshot,playback?.taskId),presentationPart=presentationParts.find(p=>p.seq===(playback?.cursor??1));
+  const drawerTask = dockedAi && enteredSessionId ? sessionTasks(snapshot, enteredSessionId).at(-1) : undefined;
+  const canvasAiTargets = presenting ? presentationPart?.targets ?? replyTargets[activeCanvasId] : drawerTask?.presentationFocus;
   const visibleTask=useRef<string>();
   useEffect(()=>{
-    const next=view==='canvas'?playback?.taskId:undefined,previous=visibleTask.current;
+    const next=presenting?playback?.taskId:undefined,previous=visibleTask.current;
     visibleTask.current=next;
     if(previous&&previous!==next)void useAiStore.getState().command('presentation.control',{taskId:previous,owner:presentationOwner,action:'background'}).catch(()=>undefined);
-  },[view,playback?.taskId,activeCanvasId]);
+  },[presenting,playback?.taskId,activeCanvasId]);
   const initialCanvasChosen = useRef(false), mutationQueue = useRef<Promise<unknown>>(Promise.resolve());
   const canvasEntryVersion = useRef(0);
   const placementQueue = useRef<Promise<unknown>>(Promise.resolve());
@@ -97,6 +114,7 @@ export default function NewApp() {
   const [pendingNavigation, setPendingNavigation] = useState<{ proceed: () => Promise<void>; draftCanvasId: string } | null>(null);
   const [creatingCanvas, setCreatingCanvas] = useState(false);
   const [naming, setNaming] = useState<'canvas' | 'document' | null>(null);
+  const [rename, setRename] = useState<{ kind: 'canvas' | 'document'; id: string; original: string } | null>(null);
   const [actionRequest, setActionRequest] = useState<GraphActionRequest | null>(null);
   const [organizeRegionId, setOrganizeRegionId] = useState<string | null>(null);
   const [layoutPreviewGraph, setLayoutPreviewGraph] = useState<GraphState | null>(null);
@@ -130,12 +148,12 @@ export default function NewApp() {
     measure(); const observer = new ResizeObserver(measure); observer.observe(element);
     window.addEventListener('resize', measure);
     return () => { observer.disconnect(); window.removeEventListener('resize', measure); };
-  }, [view, Boolean(graphState), activeCanvasId]);
+  }, [view, dockedAi, Boolean(graphState), activeCanvasId]);
 
   const canvas = graphState?.canvases.find(c => c.canvasId === activeCanvasId) ?? null;
   const visibleDocuments = useMemo(() => graphState && canvas ? getCanvasDocumentIds(graphState, canvas) : new Set<string>(), [graphState?.documents, canvas]);
   const documents = useMemo(() => graphState && canvas ? listDocumentMeta(graphState).filter(doc => modeOf(graphState.documents[doc.documentId]) === modeOf(canvas)) : [], [graphState?.documents, graphState?.edges, canvas?.canvasId, canvas?.mode]);
-  const rootDocumentIds = useMemo(() => graphState ? getRootDocumentIds(graphState) : [], [graphState?.documents]);
+  const rootDocumentIds = useMemo(() => new Set(graphState ? getRootDocumentIds(graphState) : []), [graphState?.documents]);
   const canvases = useMemo(() => graphState ? graphState.canvases.filter(c => !c.isDraft).sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)) : [], [graphState?.canvases]);
   const navigate = (id: string, forceSelect = false) => { useAiStore.getState().setView('canvas'); setFocusRequest({ id, forceSelect, sequence: ++focusSequence.current }); };
   const executeGraph = (command: object, canvasId = activeCanvasId, expectedFields?: Array<{ refId: string; field: string; value: string }>): Promise<GraphMutationResult & { cleanedEdges?: number; graphRevision: number }> => {
@@ -227,11 +245,26 @@ export default function NewApp() {
   const reviewPanel = <CanvasReviewPanel canvasId={canvas.canvasId} query={sidebarSearches.review} onQueryChange={value => setSidebarSearch('review', value)} showSearch={reviewPlacement !== 'right'} />;
   const stageState = layoutPreviewGraph ?? graphState;
   const stageCanvas = stageState.canvases.find(c => c.canvasId === activeCanvasId) ?? canvas;
-  return <CanvasBackgroundProvider><GraphAppearanceProvider state={graphState}><div className="relative w-screen h-screen bg-space-950 text-slate-200 overflow-hidden">
+  const changeAiSurface = async (action: 'dock' | 'expand' | 'fold' | 'restore') => {
+    try {
+      await flushDraftActions();
+      if (currentCanvas.current !== activeCanvasId) return;
+      if (action === 'expand') {
+        if (notebookOpen) await panelCommand('hide-panel');
+        if (currentCanvas.current === activeCanvasId) setOpenAiCanvas(activeCanvasId);
+        return;
+      }
+      setOpenAiCanvas(undefined);
+      if (action === 'fold') return;
+      await panelCommand('set-canvas-ai-dock', { canvasId: activeCanvasId, docked: action === 'dock' });
+      if (action === 'restore' && currentCanvas.current === activeCanvasId) useAiStore.getState().setView('chat');
+    } catch (error) { setNotice(error instanceof Error ? error.message : '切换 AI 视图失败'); }
+  };
+  return <CanvasBackgroundProvider><GraphAppearanceProvider state={graphState} light={snapshot?.personalizationSettings?.canvasBackgroundId === 'white-grid'}><div className="canvas-ai-workspace relative w-screen h-screen bg-space-950 text-slate-200 overflow-hidden">
     <CanvasBackground />
     <main className={`absolute inset-0 z-10 min-w-0 h-full`}>
       {view === 'canvas' || canvas.isDraft ? <>
-        <NewStageLayer state={stageState} canvas={stageCanvas} graphRevision={snapshot?.graphRevision??0} onAddDocument={add} onAction={openAction} onOrganize={setOrganizeRegionId} focusRequest={focusRequest} composerBottomInset={composerBottomInset}
+        <NewStageLayer state={stageState} canvas={stageCanvas} graphRevision={snapshot?.graphRevision??0} onAddDocument={add} onAction={openAction} onOrganize={setOrganizeRegionId} focusRequest={focusRequest} composerBottomInset={dockedAi ? 0 : composerBottomInset} aiDrawerWidth={aiExpanded ? aiDrawerWidth : 0}
           onCreateTemporary={point => { void (canvas.isDraft ? openGlobalTemporarySession() : openTemporarySession(canvas.canvasId, { point })).catch(cause => setNotice(cause instanceof Error ? cause.message : '无法打开临时会话')); }}
           onPlacementOccupancy={(refId, active) => {
             const request = placementQueue.current.catch(() => undefined).then(() => useAiStore.getState().command('graph.positioning', { refId, active }));
@@ -254,32 +287,38 @@ export default function NewApp() {
             if (active && expectedValue !== undefined) originalFields.current.set(key, expectedValue);
             else if (!active) originalFields.current.delete(key);
           }}
-          onSelectionChange={refs => useAiStore.getState().setSelectedRefs(canvas.canvasId, refs)} aiTargetRefs={enteredSessionId&&!canvas.isDraft?(presentationPart?presentationPart.targets:replyTargets[canvas.canvasId]??[]):[]}
-          onToggleCollapse={id => { void saveDirect({ type: 'toggleCollapse', id }); }} onSaveCanvas={() => setNaming('canvas')} />
-        {!canvas.isDraft && <div ref={composer} className="new-canvas-composer absolute bottom-0 z-20 flex flex-col items-center pointer-events-none" style={{ left: insets.left, right: insets.right,
+          onSelectionChange={refs => useAiStore.getState().setSelectedRefs(canvas.canvasId, refs)} playingPresentation={presenting}
+          aiTaskId={dockedAi ? drawerTask?.id : playback?.taskId}
+          aiTargetRefs={enteredSessionId && !canvas.isDraft && !inBackground ? canvasAiTargets ?? EMPTY_TARGETS : EMPTY_TARGETS}
+          onSaveCanvas={() => setNaming('canvas')} />
+        {!canvas.isDraft && !dockedAi && <div ref={composer} className="new-canvas-composer absolute bottom-0 z-20 flex flex-col items-center pointer-events-none" style={{ left: insets.left, right: insets.right,
           transition: isResizing ? 'none' : 'left 300ms ease-in-out, right 300ms ease-in-out' }}>
           <div className="new-canvas-composer-content w-full px-5 pb-4 flex flex-col gap-3 pointer-events-auto"><NewAiReplyPanel canvasId={canvas.canvasId} /><NewChatInput canvasId={canvas.canvasId} /></div>
         </div>}
       </> : <div className="new-chat-frame absolute inset-y-0 min-w-0" data-left-collapsed={!isLeftSidebarOpen} data-right-collapsed={!isRightSidebarOpen}
         style={{ left: insets.left, right: insets.right }}>
-        <AiChatPage canvasId={canvas.canvasId} hideHeading onNavigate={refs => { if (refs[0]) navigate(refs[0], true); }} />
+        <AiChatPage canvasId={canvas.canvasId} hideHeading onNavigate={refs => useAiStore.getState().requestCanvasSelection(canvas.canvasId, refs, 'ai')} />
       </div>}
-      {!canvas.isDraft && <button type="button" className="workspace-view-toggle" data-ai-view-toggle data-view-target={view === 'canvas' ? 'chat' : 'canvas'}
+      {!canvas.isDraft && (!dockedAi || view === 'chat') && <div className="workspace-view-actions" style={{ right: insets.right + 16 }}>
+        {view === 'canvas' && <button type="button" className="canvas-ai-dock-action" aria-label="收起 AI 到右侧" title="收起 AI 到右侧"
+          onClick={() => void changeAiSurface('dock')}><PanelRightClose size={18} /></button>}
+        <button type="button" className="workspace-view-toggle" data-ai-view-toggle data-view-target={view === 'canvas' ? 'chat' : 'canvas'}
         aria-label={view === 'canvas' ? '查看完整聊天记录' : '返回画布'} title={view === 'canvas' ? '查看完整聊天记录' : '返回画布'}
-        style={{ right: insets.right + 16, transition: isResizing ? 'none' : undefined }}
         onClick={() => useAiStore.getState().setView(view === 'canvas' ? 'chat' : 'canvas')}>
         {view === 'canvas' ? <MessagesSquare size={19} aria-hidden="true" /> : <NewTreeIcon size={32} />}
-      </button>}
+      </button></div>}
       <SidebarToggle side="left" expanded={false} onClick={toggleLeftSidebar} label="展开画布栏" hidden={isLeftSidebarOpen}
         style={{ left: insets.left + 12 }} className={expandButtonClass(!isLeftSidebarOpen)} />
       <SidebarToggle side="right" expanded={false} onClick={toggleRightSidebar} label="展开图文档栏" hidden={isRightSidebarOpen}
         style={{ right: insets.right + 12 }} className={expandButtonClass(!isRightSidebarOpen)} />
     </main>
-    <div className="absolute inset-y-0 left-0 z-30"><NewLeftSidebar canvases={canvases} activeCanvasId={activeCanvasId}
+    <div className="absolute inset-y-0 left-0 z-30"><NewLeftSidebar canvases={canvases} currentDraft={canvas.isDraft ? canvas : undefined} activeCanvasId={activeCanvasId}
+      onRenameCanvas={target => setRename({ kind: 'canvas', id: target.canvasId, original: target.canvasName })}
       onOpenCanvas={id => openCanvas(id, true)} onCreateCanvas={() => { void createNewCanvas(); }} directoryPanel={directoryPanel} reviewPanel={reviewPanel}
       onSettings={() => { useNewUiStore.getState().setPreviewCanvasId(null); useAiStore.getState().setSettingsOpen(true); }} /></div>
     <div className={`absolute inset-y-0 right-0 z-30`}><NewRightSidebar documents={documents} rootDocumentIds={rootDocumentIds}
-      activeDocumentIds={[...visibleDocuments]}
+      onRenameDocument={target => setRename({ kind: 'document', id: target.documentId, original: target.documentName })}
+      activeDocumentIds={visibleDocuments}
       onAddDocument={add} onCreateDocument={() => setNaming('document')} directoryPanel={directoryPanel} reviewPanel={reviewPanel} canvasId={canvas.canvasId}
       searches={sidebarSearches} onSearchChange={setSidebarSearch} onSearchEnter={kind => {
         if (kind !== 'directory') return;
@@ -288,6 +327,9 @@ export default function NewApp() {
       }} /></div>
     <NewReviewDock canvasId={canvas.canvasId}>{reviewPanel}</NewReviewDock>
     <AiTemporarySidebar canvasId={canvas.canvasId} />
+    {!canvas.isDraft && view === 'canvas' && dockedAi && <CanvasAiDrawer key={activeCanvasId} canvasId={activeCanvasId} canvasName={canvas.canvasName}
+      expanded={aiExpanded} bookmarkInset={notebookInset} onWidth={setAiDrawerWidth}
+      onOpen={() => void changeAiSurface('expand')} onFold={() => void changeAiSurface('fold')} onRestore={() => void changeAiSurface('restore')} />}
     {previewCanvasId && !graphState.canvases.find(c=>c.canvasId===previewCanvasId)?.isDraft && <NewSessionGraphOverlay canvasId={previewCanvasId} currentCanvasId={activeCanvasId} onSelect={(canvasId,sessionId) => openCanvas(canvasId,false,sessionId)} />}
     {pendingNavigation && <DraftCanvasLeaveDialog onCancel={() => setPendingNavigation(null)} onKeep={async () => { await pendingNavigation.proceed(); setPendingNavigation(null); }}
       onSave={async name => { const result = await executeGraph({ type: 'saveCanvas', name }, pendingNavigation.draftCanvasId); if (!result.ok) throw new Error(result.error ?? '另存失败'); await pendingNavigation.proceed(); setPendingNavigation(null); }} />}
@@ -296,10 +338,21 @@ export default function NewApp() {
       label={naming === 'canvas' ? '画布名称' : '图文档名称'} initialName={naming === 'canvas' ? canvas.isDraft ? '未命名画布' : `${canvas.canvasName} 副本` : ''}
       submitLabel={naming === 'canvas' ? '另存为画布' : '创建图文档'} onClose={() => setNaming(null)}
       onSubmit={naming === 'canvas' ? saveCurrentCanvas : createNewDocument} />}
+    {rename && <NameDialog title={rename.kind === 'canvas' ? '重命名画布' : '重命名图文档'}
+      label={rename.kind === 'canvas' ? '画布名称' : '图文档名称'} initialName={rename.original} submitLabel="保存名称"
+      onClose={() => setRename(null)} onSubmit={async name => {
+        if (name !== rename.original) {
+          const isCanvas = rename.kind === 'canvas';
+          await executeGraph(isCanvas ? { type: 'renameCanvas', name } : { type: 'renameDocument', id: rename.id, name },
+            isCanvas ? rename.id : activeCanvasId, [{ refId: rename.id, field: isCanvas ? 'canvasName' : 'name', value: rename.original }]);
+        }
+        setRename(null);
+      }} />}
     {actionRequest && <GraphActionDialog key={`${activeCanvasId}:${actionRequest.type}:${actionRequest.id ?? ''}:${actionRequest.ids?.join(',') ?? ''}`}
       request={actionRequest} state={graphState} canvas={canvas} onSubmit={mutate} onClose={() => setActionRequest(null)} />}
     {pendingTransfer && <GraphTreeTransferDialog key={pendingTransfer.revision} conflicts={pendingTransfer.conflicts} state={graphState}
-      targetId={'parentId' in pendingTransfer.command ? pendingTransfer.command.parentId : undefined}
+      targetId={pendingTransfer.command.type === 'registerDocument' ? pendingTransfer.command.id :
+        'parentId' in pendingTransfer.command ? pendingTransfer.command.parentId : undefined}
       onCancel={() => { setPendingTransfer(null); setActionRequest(null); }}
       onResolve={async choices => { const result = await mutate({ ...pendingTransfer.command, resolution: { revision: pendingTransfer.revision, choices } });
         if (result.ok) { setPendingTransfer(null); setActionRequest(null); } return result; }} />}

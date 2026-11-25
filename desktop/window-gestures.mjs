@@ -65,7 +65,9 @@ export function createWindowDragDispatcher(ipcMain, screen) {
   };
   return {
     register(window, origin, canDrag = () => true) {
-      const id = window.webContents.id;
+      // The window's webContents getter is unavailable once 'closed' fires.
+      const contents = window.webContents;
+      const id = contents.id;
       if (entries.has(id)) throw new Error('Window drag is already registered.');
       const entry = { window, origin, canDrag, start: undefined, sizeIntent: undefined, cancel() { entry.start = undefined; } };
       if (!entries.size) ipcMain.on(channel, dispatch);
@@ -74,16 +76,16 @@ export function createWindowDragDispatcher(ipcMain, screen) {
       for (const name of cancelEvents) window.on(name, entry.cancel);
       const preventResize = event => { if (entry.start) event.preventDefault(); };
       window.on('will-resize', preventResize);
-      window.webContents.on('did-start-loading', entry.cancel);
-      window.webContents.on('render-process-gone', entry.cancel);
+      contents.on('did-start-loading', entry.cancel);
+      contents.on('render-process-gone', entry.cancel);
       const dispose = () => {
         if (!entries.delete(id)) return;
         entry.cancel();
         for (const name of cancelEvents) window.removeListener(name, entry.cancel);
         window.removeListener('will-resize', preventResize);
         window.removeListener('closed', dispose);
-        window.webContents.removeListener('did-start-loading', entry.cancel);
-        window.webContents.removeListener('render-process-gone', entry.cancel);
+        contents.removeListener('did-start-loading', entry.cancel);
+        contents.removeListener('render-process-gone', entry.cancel);
         if (!entries.size) ipcMain.removeListener(channel, dispatch);
       };
       window.once('closed', dispose);
@@ -93,14 +95,13 @@ export function createWindowDragDispatcher(ipcMain, screen) {
 }
 
 export function windowControlPointer(window, screen, cursor = screen.getCursorScreenPoint()) {
-  let bounds = window.getBounds();
-  const display = screen.getDisplayMatching(bounds);
-  // Maximized Windows bounds include an invisible border outside the work area.
-  if (window.isFullScreen()) bounds = display.bounds;
-  else if (window.isMaximized()) bounds = display.workArea;
+  // Match the renderer viewport. A maximized window's outer bounds can extend
+  // beyond the display, and a restored window can straddle two displays.
+  const bounds = window.getContentBounds();
   const scale = window.webContents.getZoomFactor();
-  const width = (window.isMaximized() ? 80 : 116) * scale;
+  const width = (window.isMaximized() ? 2 : 3) * 36 * scale;
   const x = cursor.x - (bounds.x + bounds.width - width), y = cursor.y - bounds.y;
   const insideX = x >= 0 && x < width;
-  return { edge: insideX && y >= 0 && y < 2, inside: insideX && y >= 0 && y < 32 * scale };
+  const inside = insideX && y >= 0 && y < 32 * scale;
+  return { edge: inside && y < 8, inside };
 }

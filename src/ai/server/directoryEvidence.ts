@@ -69,7 +69,7 @@ export function graphReadUsage(index: CanvasIndex, tool: string, data: unknown, 
       const subgraph = record(row.subgraph), scope = subgraph?.refId;
       if (typeof scope === 'string' && index.rows.get(scope)?.readable) found.add(scope);
     }
-    if(tool==='graph_read_design_references'&&['member','subject'].includes(String(row.kind)))for(const key of ['sourceNodeId','targetNodeId']){
+    if(tool==='graph_read_dependencies' && typeof row.edgeId==='string' || tool==='graph_read_design_references'&&['member','subject'].includes(String(row.kind)))for(const key of ['sourceNodeId','targetNodeId']){
       const node=typeof row[key]==='string'?index.rows.get(row[key] as string):undefined;if(node?.readable&&node.parentId)found.add(node.parentId);
     }
     const id = typeof row.refId === 'string' ? row.refId : undefined;

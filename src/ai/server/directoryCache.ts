@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import type { AppSnapshot, Task } from '../domain';
 import type { FrozenRead } from '../contextState';
 import { inputCapacity } from '../memory';
-import { digest, graphIndex, observationChange, observe } from './directGraph';
+import { digest, graphIndex, observationChange, observeDirectoryDisplay } from './directGraph';
 import { DomainError, requireValue } from './errors';
 import { READ_FORMAT_VERSION } from './readCoverage';
 import { checkFrozenStorage, GRAPH_READ_LIMITS } from './graphReadLimits';
@@ -40,7 +40,7 @@ export function coversDirectoryTrees(b:DirectoryNode,a:DirectoryNode):boolean {
   const nodes=directoryNodes(b);
   for(const row of directoryNodes(a).values()){
     const other=nodes.get(row.refId);
-    if(!other||row.directoryVersion!==other.directoryVersion||row.kind!==other.kind||row.name!==other.name
+    if(!other||row.directoryVersion!==other.directoryVersion||row.hasDirectNodes!==other.hasDirectNodes||row.kind!==other.kind||row.name!==other.name
       ||row.nameState!==other.nameState||digest(row.nameReadWith??null)!==digest(other.nameReadWith??null))return false;
     if(row.children){
       if(!other.children||JSON.stringify(childIds(row))!==JSON.stringify(childIds(other)))return false;
@@ -53,7 +53,7 @@ export function coversDirectoryTrees(b:DirectoryNode,a:DirectoryNode):boolean {
   return true;
 }
 function mergeNode(a:DirectoryNode,b:DirectoryNode):DirectoryNode|undefined {
-  if(a.refId!==b.refId||a.directoryVersion!==b.directoryVersion||a.name!==b.name||a.kind!==b.kind
+  if(a.refId!==b.refId||a.directoryVersion!==b.directoryVersion||a.hasDirectNodes!==b.hasDirectNodes||a.name!==b.name||a.kind!==b.kind
     ||a.nameState!==b.nameState||digest(a.nameReadWith??null)!==digest(b.nameReadWith??null))return;
   if(a.children&&b.children){
     if(JSON.stringify(childIds(a))!==JSON.stringify(childIds(b)))return;
@@ -97,7 +97,7 @@ function retainedDrafts(tree:DirectoryNode,drafts:FrozenRead[]):FrozenRead[]{
 }
 function groupView(state:AppSnapshot,task:Task,group:CacheDirectoryRenderGroup):CacheDirectoryRenderGroup {
   const nodes=[...directoryNodes(group.tree).values()],index=graphIndex(state,task.canvasId);
-  const observation=observe(state,task,index,nodes.map(n=>n.refId),nodes.filter(complete).map(n=>n.refId),true);observation.sources=[];
+  const observation=observeDirectoryDisplay(state,task,index,nodes.map(n=>n.refId),nodes.filter(complete).map(n=>n.refId),group.tree);
   return {...group,observation,drafts:retainedDrafts(group.tree,group.drafts)};
 }
 /** Safe grafting requires the immediate parent to already show its complete child list. */

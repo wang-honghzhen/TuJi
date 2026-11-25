@@ -1,6 +1,7 @@
 import type { Observation } from '../contextState';
 import type { CanvasReadDraft } from './canvasReadBuilder';
 import { canvasFactCovered, factKey, type CanvasFact, type CanvasReadRequest, type Row } from './canvasReadEvidence';
+import { completedMemberLists } from './subgraphListCoverage';
 
 function completeSnapshot(observations:Observation[]){
   const groups=new Map<string,{total:number;pages:Set<number>}>();
@@ -23,7 +24,7 @@ export function selectCanvasRefreshScope(request:CanvasReadRequest,prior:Observa
   const facts=prior.flatMap(o=>o.canvasFacts??[]);
   const field=request.tool==='graph_read_node_content'?String(request.arguments.field??'content'):request.tool==='graph_read_object_field'?String(request.arguments.field):undefined;
   const fieldFacts=field?facts.filter(f=>f.refId===request.arguments.refId&&f.field===field):[];
-  const query=request.tool==='graph_search'||request.tool==='graph_search_node_content'||request.tool==='graph_read_design_references';
+  const query=request.tool==='graph_read_dependencies'||request.tool==='graph_search'||request.tool==='graph_search_node_content'||request.tool==='graph_read_design_references';
   const whole=field?fieldFacts.some(f=>fullField(f,fieldFacts))
     :completeSnapshot(prior)&&(query||facts.every(f=>hasWholeField(f,facts)));
   let selected:number[];
@@ -31,13 +32,25 @@ export function selectCanvasRefreshScope(request:CanvasReadRequest,prior:Observa
   else {
     // Partial query results cannot be mapped across changed membership or ordering.
     if(prior.some(o=>o.querySignature&&read.pageObservations!.some(p=>p.querySignature!==o.querySignature)))return;
+    const wholeScopes=new Set<string>();
+    if(request.tool==='graph_read_subgraph')for(const first of completedMemberLists(prior)){
+      const scope=first.memberListPage!.refId;
+      const scoped=prior.filter(o=>o.canvasPage?.pointerId===first.canvasPage?.pointerId && o.memberListPage?.refId===scope);
+      const scopedFacts=scoped.flatMap(o=>o.canvasFacts??[]);
+      if(scopedFacts.every(f=>hasWholeField(f,scopedFacts)))wholeScopes.add(scope);
+    }
+    const partialFacts=prior.filter(o=>!o.memberListPage||!wholeScopes.has(o.memberListPage.refId)).flatMap(o=>o.canvasFacts??[]);
     const covers=(current:CanvasFact)=>{
-      const old=facts.filter(f=>factKey(f)===factKey(current));
+      const old=partialFacts.filter(f=>factKey(f)===factKey(current));
+      // Legacy directory pages recorded presence but did not stamp their layer.
+      // Refresh metadata for those displayed cards, keeping unseen siblings out.
+      if (!old.length && request.tool==='graph_read_directory' && current.field==='spatial')
+        return partialFacts.some(f=>f.refId===current.refId && f.field==='hasDirectNodes');
       return old.some(f=>fullField(f,old))||canvasFactCovered(current,old.filter(f=>f.version===current.version));
     };
-    selected=read.pageObservations.flatMap((o,i)=>o.canvasFacts?.length&&o.canvasFacts.every(covers)?[i]:[]);
+    selected=read.pageObservations.flatMap((o,i)=>wholeScopes.has(String(read.pages[i].scope))||o.canvasFacts?.length&&o.canvasFacts.every(covers)?[i]:[]);
     const shown=selected.flatMap(i=>read.pageObservations![i].canvasFacts??[]);
-    if(!selected.length||facts.some(f=>!draft.unavailable.includes(f.refId)&&(!hasWholeField(f,facts)
+    if(!selected.length||partialFacts.some(f=>!draft.unavailable.includes(f.refId)&&(!hasWholeField(f,partialFacts)
       &&!shown.some(s=>factKey(s)===factKey(f)&&s.version===f.version)||!canvasFactCovered(f,shown))))return;
   }
   const results=selected.map(i=>{

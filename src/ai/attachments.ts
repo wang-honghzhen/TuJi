@@ -1,7 +1,5 @@
 import type { AppSnapshot, Artifact, Session } from './domain';
 import { isMinimalSession } from './temporaryModes';
-export const attachmentVision = (provider: AppSnapshot['provider'], model = provider.model): boolean =>
-  model === provider.model ? provider.supportsVision === true : provider.visionModels?.includes(model) === true;
 
 /** Public, credential-free policy shared by the host and composer. */
 export const DEFAULT_ATTACHMENT_LIMITS = Object.freeze({
@@ -50,6 +48,8 @@ export interface AttachmentProtection {
 }
 /** Immutable image identity. Bytes are loaded only by the host transport. */
 export interface ImageAssetRef {
+  /** Uploaded images live in objects/; rendered page and crop assets live in visual/. */
+  source?: 'upload';
   assetId: string; mimeType: 'image/png' | 'image/jpeg'; width: number; height: number;
   artifactId: string; version: number; page?: number; crop?: { x: number; y: number; width: number; height: number };
 }

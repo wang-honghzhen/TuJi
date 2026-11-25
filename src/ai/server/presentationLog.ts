@@ -126,9 +126,5 @@ export function capturePresentation(before: AppSnapshot, state: AppSnapshot) {
         return !call || ['completed', 'rejected'].includes(call.status) && (task.status === 'completed' || call.presentedAt !== undefined);
       });
     }
-    if (changed.has(task.id) && task.presentation) {
-      delete task.presentation.visiblePart; delete task.presentation.ack;
-      if(task.status==='completed'&&tail?.stepId)task.presentation.round={stepId:tail.stepId,revision:task.instructionRevision,lastSeq:tail.seq};
-    }
   }
 }

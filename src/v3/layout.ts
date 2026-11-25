@@ -1,6 +1,7 @@
 import { nodeGeometry } from './nodeGeometry';
 import { canvasDirectory } from './canvas';
 import type {
+  CanvasDirectory,
   CanvasRecord,
   ConnectionSide,
   GraphEdge,
@@ -10,11 +11,11 @@ import type {
   Point,
   Rect,
 } from './types';
-import { choosePorts, facingSide, makeEdgeRoute, makeStubRoute, placeEdgeLabel, portPoint,
+import { cachedPortChooser, facingSide, makeEdgeRoute, makeStubRoute, makeUnobstructedRoute, placeEdgeLabel, portPoint,
   type EdgeLabel, type EdgeRoute } from './edgeGeometry';
 import { getCanvasPaths, type PathSegment } from './paths';
-import { getNaturalGeometry, measureNaturalRegions, type RegionGeometry } from './regionLayout';
-import { getHierarchyIndex, retainHierarchyIndex } from './hierarchyIndex';
+import { getNaturalGeometry, measureNaturalRegions, nearestRegionSpace, type RegionGeometry } from './regionLayout';
+import { getCanvasMembership, canvasEdgeScope, type CanvasEdgeScope } from './hierarchyIndex';
 import { RectangleIndex } from './rectangleIndex';
 import { presentationGeometry, presentationPlacement } from './presentationLayout';
 import {
@@ -23,7 +24,7 @@ import {
   COLLAPSED_WIDTH,
   NODE_HEIGHT,
   NODE_WIDTH,
-  RECORD_HEADER_HEIGHT,
+  RECORD_HEADER_HEIGHT, PLANAR_HEADER_HEIGHT,
   RECORD_PADDING,
 } from './types';
 
@@ -37,11 +38,16 @@ export interface RenderBlock {
   parentId: string;
   depth: number;
   collapsed: boolean;
+  /** An expanded planar frame may reserve a shorter title above its children. */
+  headerHeight?: number;
+  /** Full world footprint of a group represented by a compact 3D overview card. */
+  spatialSummary?: { expandedRect: Rect; unfoldScale: number };
 }
 
 export interface RenderEdge {
   edge: GraphEdge;
   kind: 'full' | 'filtered' | 'outside';
+  scope: CanvasEdgeScope;
   source: Point;
   target: Point;
   /** A directed stub ending at this point still gets an arrow. */
@@ -67,19 +73,43 @@ export interface RenderModel {
   lodCollapsed: Set<string>;
 }
 
-export interface RenderOptions {
-  zoom: number;
+export function regionContentOrigin(block: RenderBlock): Point {
+  return { x: block.anchor.x + RECORD_PADDING,
+    y: block.anchor.y + (block.headerHeight ?? RECORD_HEADER_HEIGHT) + RECORD_PADDING };
+}
+
+export interface EdgeVisibilityOptions {
   showOutsideEdges?: boolean;
+  showInternalEdges?: boolean;
+  showCrossEdges?: boolean;
+  revealedEdgeIds?: ReadonlySet<string>;
+}
+
+export interface RenderOptions extends EdgeVisibilityOptions {
+  zoom: number;
+  /** The planar projection supplies measured frames and local child origins. */
+  projection?: { edges: readonly GraphEdge[]; compactGroups: ReadonlySet<string>;
+    frames: ReadonlyMap<string, Rect>; positions: ReadonlyMap<string, Point> };
   ignoreCollapse?: boolean;
   previousLod?: ReadonlySet<string>;
   focusIds?: ReadonlySet<string>;
+  /** In 3D, these branches stay open when their descendants occupy another
+   * plane or are selected. Explicitly folded groups still follow canvas state. */
+  spatialDetailAncestors?: ReadonlySet<string>;
   visibleIds?: ReadonlySet<string>;
   /** Geometry readers never pay for paths and labels. The UI delegates precise routing to a worker. */
   skipEdges?: boolean;
   deferRouting?: boolean;
 }
 
+export function isEdgeScopeVisible(scope: CanvasEdgeScope, id: string, options: EdgeVisibilityOptions): boolean {
+  if (scope === 'outside') return options.showOutsideEdges !== false;
+  if (scope === 'internal') return options.showInternalEdges !== false;
+  return options.showCrossEdges !== false || Boolean(options.revealedEdgeIds?.has(id));
+}
+
 const empty: Rect = { x: 0, y: 0, width: 0, height: 0 };
+const projectionPorts = cachedPortChooser();
 const collapsedRect: Rect = {
   x: 0,
   y: 0,
@@ -116,8 +146,7 @@ function childrenOf(record: GraphRecord, canvas?: CanvasRecord): string[] {
   return [...record.childNodeIds, ...record.childDocumentIds].filter((id) => !canvas?.excludedDocumentIds?.includes(id)).sort();
 }
 
-function fallbackPlacement(id: string, siblings: string[]): Placement {
-  const index = Math.max(0, siblings.indexOf(id));
+export function fallbackPlacementAt(index: number): Placement {
   return {
     x: (index % 3) * (NODE_WIDTH + BLOCK_GAP),
     y: Math.floor(index / 3) * (NODE_HEIGHT + BLOCK_GAP),
@@ -126,89 +155,65 @@ function fallbackPlacement(id: string, siblings: string[]): Placement {
 }
 
 function placement(id: string, siblings: string[], positions: Record<string, Placement>): Placement {
-  return positions[id] ?? fallbackPlacement(id, siblings);
+  return positions[id] ?? fallbackPlacementAt(Math.max(0, siblings.indexOf(id)));
+}
+
+/** The 3D camera supplies the square root of projected area per world unit.
+ * Keep very long groups open if they still span a substantial part of the view. */
+function spatialGroupThreshold(full: Rect, state: GraphState, dir?: CanvasDirectory, doc?: GraphRecord) {
+  if (!dir?.childIds.length && !doc?.childNodeIds.length && !doc?.childDocumentIds.length) return undefined;
+  const directNodes = doc ? doc.childNodeIds.length : dir!.childIds.reduce((count, id) => count + Number(!!state.nodes[id]), 0);
+  const span = Math.sqrt(full.width * full.height);
+  const bySize = Math.min(210 / span, 360 / Math.max(full.width, full.height));
+  // A single broad, densely populated leaf can fill the view even when each
+  // member has less than a readable thumbnail's worth of screen space.
+  const byDensity = 44 * Math.sqrt(directNodes) / span;
+  const fold = Math.min(.28, Math.max(bySize, byDensity));
+  return { fold, unfold: fold * 1.25 };
 }
 
 /** Display detail changes never change reserved geometry or child origins. */
 function displayRegionBounds(full: Rect, id: string, canvas: CanvasRecord | undefined,
-  options: RenderOptions, lod: Set<string>): Rect {
+  options: RenderOptions, lod: Set<string>, stableZoom?: ZoomRange, spatial?: ReturnType<typeof spatialGroupThreshold>): Rect {
   if (options.ignoreCollapse || !canvas || options.focusIds?.has(id)) return full;
   if (canvas.collapsed[id]) return collapsedRect;
+  if (options.spatialDetailAncestors && (!spatial || options.spatialDetailAncestors.has(id))) return full;
   const wasFolded = options.previousLod?.has(id) ?? false;
-  // Text has a screen-space font floor. Only a genuinely tiny region needs an
-  // overview; zooming through a text-size threshold must not remove its nodes.
-  const tooSmall = full.width * options.zoom < (wasFolded ? 72 : 56) || full.height * options.zoom < (wasFolded ? 40 : 30);
-  if (tooSmall) { lod.add(id); return collapsedRect; }
+  // 2D folds only tiny regions. 3D also considers the members' projected density.
+  const foldAt = spatial?.fold ?? Math.max(56 / full.width, 30 / full.height);
+  const unfoldAt = spatial?.unfold ?? Math.max(72 / full.width, 40 / full.height);
+  if (options.zoom < (wasFolded ? unfoldAt : foldAt)) {
+    lod.add(id);
+    if (stableZoom) stableZoom.max = Math.min(stableZoom.max, unfoldAt);
+    if (spatial) {
+      // Preserve the group's center while opening corridors between adjacent summaries.
+      const width = Math.min(full.width * .74, full.height * 2.4);
+      const height = Math.min(full.height * .66, width * .62);
+      return { x: full.x + (full.width - width) / 2, y: full.y + (full.height - height) / 2, width, height };
+    }
+    return collapsedRect;
+  }
+  if (stableZoom) stableZoom.min = Math.max(stableZoom.min, foldAt);
   return full;
 }
 
 export function measureDocument(state: GraphState, documentId: string, canvas?: CanvasRecord,
   options: RenderOptions = { zoom: 1 }, _visited = new Set<string>(), lod = new Set<string>(),
   geometry = getNaturalGeometry(state)): Rect {
-  const full = state.documents[documentId] ? geometry.document(documentId) : empty;
-  return displayRegionBounds(full, documentId, canvas, options, lod);
+  const doc = state.documents[documentId], full = doc ? geometry.document(documentId) : empty;
+  const spatial = options.spatialDetailAncestors && spatialGroupThreshold(full, state, undefined, doc);
+  return displayRegionBounds(full, documentId, canvas, options, lod, undefined, spatial);
 }
 
 function measureDirectory(state: GraphState, canvas: CanvasRecord, directoryId: string,
   options: RenderOptions, lod: Set<string>, geometry?: RegionGeometry): Rect {
   // An import can measure a canvas that is not attached to the graph yet.
   const measured = geometry ?? getNaturalGeometry(state.canvases.includes(canvas) ? state : { ...state });
-  const full = canvasDirectory(canvas, directoryId) ? measured.directory(canvas, directoryId) : empty;
+  const dir = canvasDirectory(canvas, directoryId), full = dir ? measured.directory(canvas, directoryId) : empty;
   if (directoryId === canvas.canvasId) return full;
-  return displayRegionBounds(full, directoryId, canvas, options, lod);
+  const spatial = options.spatialDetailAncestors && spatialGroupThreshold(full, state, dir);
+  return displayRegionBounds(full, directoryId, canvas, options, lod, undefined, spatial);
 }
-
-function indexMembership(state: GraphState, canvas: CanvasRecord): {
-  members: Set<string>;
-  parents: Map<string, string>;
-} {
-  const cached = membershipCache.get(state)?.get(canvas);
-  if (cached) return cached;
-  const hierarchy = getHierarchyIndex(state); retainHierarchyIndex(state, hierarchy);
-  const membershipKey = JSON.stringify([canvas.canvasId, canvas.excludedDocumentIds]);
-  const shared = membershipByHierarchy.get(hierarchy)?.get(membershipKey);
-  if (shared) return shared;
-  const members = new Set<string>();
-  const parents = new Map<string, string>();
-  const walkDoc = (id: string, parent: string, visited: Set<string>) => {
-    if (!state.documents[id] || visited.has(id) || canvas.excludedDocumentIds?.includes(id)) return;
-    visited.add(id);
-    members.add(id);
-    parents.set(id, parent);
-    const record = state.documents[id];
-    for (const nodeId of record.childNodeIds) {
-      if (!state.nodes[nodeId]) continue;
-      members.add(nodeId);
-      parents.set(nodeId, id);
-    }
-    for (const childId of record.childDocumentIds) walkDoc(childId, id, visited);
-  };
-  const visitedDocs = new Set<string>();
-  const visitedDirs = new Set<string>();
-  const walkDir = (id: string, parent?: string) => {
-    if (visitedDirs.has(id) || !canvasDirectory(canvas, id)) return;
-    visitedDirs.add(id);
-    members.add(id);
-    if (parent) parents.set(id, parent);
-    for (const childId of canvasDirectory(canvas, id).childIds) {
-      if (canvasDirectory(canvas, childId)) walkDir(childId, id);
-      else if (state.documents[childId]) walkDoc(childId, id, visitedDocs);
-      else if (state.nodes[childId]) {
-        members.add(childId);
-        parents.set(childId, id);
-      }
-    }
-  };
-  walkDir(canvas.canvasId);
-  const result = { members, parents };
-  const byCanvas = membershipCache.get(state) ?? new WeakMap(); byCanvas.set(canvas, result); membershipCache.set(state, byCanvas);
-  const byHierarchy = membershipByHierarchy.get(hierarchy) ?? new Map();
-  if (byHierarchy.size >= 24) byHierarchy.delete(byHierarchy.keys().next().value!);
-  byHierarchy.set(membershipKey, result); membershipByHierarchy.set(hierarchy, byHierarchy);
-  return result;
-}
-const membershipCache = new WeakMap<GraphState, WeakMap<CanvasRecord, { members: Set<string>; parents: Map<string, string> }>>();
-const membershipByHierarchy = new WeakMap<object, Map<string, { members: Set<string>; parents: Map<string, string> }>>();
 
 function center(rect: Rect): Point {
   return { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 };
@@ -220,18 +225,36 @@ function edgeHash(id: string): number {
   return value >>> 0;
 }
 
+interface ZoomRange { min: number; max: number }
+
+/** Reuse world geometry while all visible regions stay on the same side of
+ * their next fold/unfold threshold. Callers replace the projector on graph,
+ * filter or layout changes. Screen-space culling still runs at every zoom. */
+export function createZoomProjection(state: GraphState, canvas: CanvasRecord, options: Omit<RenderOptions, 'zoom'>) {
+  let model: RenderModel | undefined;
+  let range: ZoomRange;
+  return (zoom: number) => {
+    if (model && zoom >= range.min && zoom < range.max) return model;
+    range = { min: 0, max: Infinity };
+    model = buildRenderModel(state, canvas, { ...options, zoom, previousLod: model?.lodCollapsed ?? options.previousLod }, range);
+    return model;
+  };
+}
+
 export function buildRenderModel(
   state: GraphState,
   canvas: CanvasRecord,
-  options: RenderOptions
+  options: RenderOptions,
+  stableZoom?: ZoomRange
 ): RenderModel {
-  const geometry = presentationGeometry(state, canvas,
+  const geometry = options.projection ? undefined : presentationGeometry(state, canvas,
     measureNaturalRegions(state.canvases.includes(canvas) ? state : { ...state }, canvas), options.ignoreCollapse);
   const blocks: RenderBlock[] = [];
   const blockIndex = new RectangleIndex();
   const byId = new Map<string, RenderBlock>();
   const lod = new Set<string>();
-  const { members, parents } = indexMembership(state, canvas);
+  const membership = getCanvasMembership(state, canvas);
+  const { members, parents } = membership;
   const visited = new Set<string>();
   const visit = (id: string, parentId: string, anchor: Point, depth: number) => {
     if (canvas.excludedDocumentIds?.includes(id)) return;
@@ -243,13 +266,13 @@ export function buildRenderModel(
     const node = state.nodes[id];
     if (!dir && !doc && !node) return;
     const kind: RenderBlock['kind'] = dir ? 'directory' : doc ? 'document' : 'node';
-    const local = dir
-      ? measureDirectory(state, canvas, id, options, lod, geometry)
-      : doc
-        ? measureDocument(state, id, canvas, options, new Set(), lod, geometry)
-        : nodeGeometry(node!);
+    const full = options.projection?.frames.get(id) ?? (dir ? geometry!.directory(canvas, id) : doc ? geometry!.document(id) : nodeGeometry(node!));
+    const spatial = options.spatialDetailAncestors && spatialGroupThreshold(full, state, dir, doc);
+    const local = !options.projection && (dir || doc) && id !== canvas.canvasId
+      ? displayRegionBounds(full, id, canvas, options, lod, stableZoom, spatial) : full;
     const manualCollapse = Boolean(canvas.collapsed[id]) && !options.focusIds?.has(id);
-    const folded = kind !== 'node' && !options.ignoreCollapse && (manualCollapse || lod.has(id));
+    const folded = options.projection ? options.projection.compactGroups.has(id)
+      : kind !== 'node' && !options.ignoreCollapse && (manualCollapse || lod.has(id));
     const block: RenderBlock = {
       id,
       kind,
@@ -260,37 +283,42 @@ export function buildRenderModel(
       parentId,
       depth,
       collapsed: folded,
+      ...(options.projection && kind !== 'node' && { headerHeight: PLANAR_HEADER_HEIGHT }),
+      ...(spatial && lod.has(id) && { spatialSummary: { expandedRect: translate(full, anchor), unfoldScale: spatial.unfold } }),
     };
     blocks.push(block);
     byId.set(id, block);
     if (folded || node) return;
     const childIds = dir ? dir.childIds.filter((child) => !canvas.excludedDocumentIds?.includes(child)).sort() : doc ? childrenOf(doc, canvas) : [];
     const positions = dir ? canvas.placements : doc?.placements ?? {};
-    const contentOrigin = {
-      x: anchor.x + RECORD_PADDING,
-      y: anchor.y + RECORD_HEADER_HEIGHT + RECORD_PADDING,
-    };
+    const contentOrigin = regionContentOrigin(block);
     for (const childId of childIds) {
-      const pos = presentationPlacement(canvas, childId, id, placement(childId, childIds, positions));
+      if (options.visibleIds && !options.visibleIds.has(childId)) continue;
+      const pos = options.projection?.positions.get(childId) ?? presentationPlacement(canvas, childId, id, placement(childId, childIds, positions));
       visit(childId, id, { x: contentOrigin.x + pos.x, y: contentOrigin.y + pos.y }, depth + 1);
     }
   };
   const root = canvasDirectory(canvas, canvas.canvasId);
   if (root) {
     for (const childId of [...root.childIds].sort()) {
-      const pos = presentationPlacement(canvas, childId, canvas.canvasId, placement(childId, root.childIds, canvas.placements));
+      if (options.visibleIds && !options.visibleIds.has(childId)) continue;
+      const pos = options.projection?.positions.get(childId) ?? presentationPlacement(canvas, childId, canvas.canvasId, placement(childId, root.childIds, canvas.placements));
       visit(childId, canvas.canvasId, { x: pos.x, y: pos.y }, 0);
     }
   }
 
+  const edges: RenderEdge[] = [];
+  const bounds = blocks.reduce((acc, block) => unionRect(acc, block.rect), blocks[0]?.rect ?? empty);
+  if (options.skipEdges) return { blocks, edges, bounds, membership: members, parentOf: parents, lodCollapsed: lod };
+  const rootBlock: RenderBlock = { id: canvas.canvasId, kind: 'directory', name: canvas.canvasName, rect: bounds,
+    anchor: { x: 0, y: 0 }, parentId: '', depth: -1, collapsed: false };
   const representative = (id: string): RenderBlock | null => {
     if (!members.has(id)) return null;
     if (options.visibleIds && !options.visibleIds.has(id)) return null;
-    if (id === canvas.canvasId && blocks.length) {
-      const rect = blocks.reduce((acc, block) => unionRect(acc, block.rect), blocks[0].rect);
-      return { id, kind: 'directory', name: canvas.canvasName, rect, anchor: { x: 0, y: 0 }, parentId: '', depth: -1, collapsed: false };
-    }
-    let current: string | undefined = id;
+    if (id === canvas.canvasId && blocks.length) return rootBlock;
+    const visible = byId.get(id);
+    if (visible) return visible;
+    let current = parents.get(id);
     const seen = new Set<string>();
     while (current && !seen.has(current)) {
       seen.add(current);
@@ -301,53 +329,66 @@ export function buildRenderModel(
     return null;
   };
 
-  const edges: RenderEdge[] = [];
-  const bounds = blocks.length ? blocks.reduce((acc, block) => unionRect(acc, block.rect), blocks[0].rect) : empty;
-  if (options.skipEdges) return { blocks, edges, bounds, membership: members, parentOf: parents, lodCollapsed: lod };
-  const naturalById = options.visibleIds
-    ? new Map(buildRenderModel(state, canvas, { zoom: 1, ignoreCollapse: true, skipEdges: true }).blocks.map((block) => [block.id, block]))
-    : null;
+  let naturalById: Map<string, RenderBlock> | undefined;
   const endpointExists = (id: string) => Boolean(state.nodes[id] || state.documents[id] || state.canvases.some(item => canvasDirectory(item, id)));
   for (const block of blocks) blockIndex.add(block.rect);
   const blockByRect = new Map(blocks.map(block => [block.rect, block]));
-  for (const edge of state.edges) {
+  // Folding can project many distinct relations onto the same ordered pair.
+  // Corridor obstacles and attachment points are identical for that pair.
+  const portsBySource = new Map<RenderBlock, Map<RenderBlock, ReturnType<typeof projectionPorts>>>();
+  const portsFor = (edge: GraphEdge, source: RenderBlock, target: RenderBlock) => {
+    let targets = portsBySource.get(source);
+    const existing = targets?.get(target);
+    if (existing) return existing;
+    const corridor = unionRect(source.rect, target.rect);
+    const ancestorIds = new Set<string>();
+    for (const block of [source, target]) {
+      let id = parents.get(block.id);
+      while (id && !ancestorIds.has(id)) { ancestorIds.add(id); id = parents.get(id); }
+    }
+    const obstacles = blockIndex.query(corridor, 12).filter(rect => rect !== source.rect && rect !== target.rect)
+      .map(rect => {
+        const block = blockByRect.get(rect)!;
+        return ancestorIds.has(block.id) ? { ...rect, height: block.headerHeight ?? RECORD_HEADER_HEIGHT } : rect;
+      });
+    const ports = projectionPorts(edge, source.rect, target.rect, obstacles);
+    if (!targets) { targets = new Map(); portsBySource.set(source, targets); }
+    targets.set(target, ports);
+    return ports;
+  };
+  for (const edge of options.projection?.edges ?? state.edges) {
     if (edge.removed) continue;
     if (!members.has(edge.sourceNodeId) && !members.has(edge.targetNodeId)) continue;
     if (!endpointExists(edge.sourceNodeId) || !endpointExists(edge.targetNodeId)) continue;
+    const scope = canvasEdgeScope(state, membership, edge);
+    if (!isEdgeScopeVisible(scope, edge.edgeId, options)) continue;
     const source = representative(edge.sourceNodeId);
     const target = representative(edge.targetNodeId);
     if (!source && !target) continue;
     if (source && target && source.id === target.id) continue;
     if (source && target) {
-      // Ports avoid the blocks between them: the pair is chosen from the actual
-      // corridor, so an edge does not leave through a side that immediately
-      // heads into a neighbour.
-      const corridor = unionRect(source.rect, target.rect);
-      const ancestorIds = new Set<string>();
-      for (const block of [source, target]) {
-        let id = parents.get(block.id);
-        while (id && !ancestorIds.has(id)) { ancestorIds.add(id); id = parents.get(id); }
-      }
-      const between = blockIndex.query(corridor, 12).filter(rect => rect !== source.rect && rect !== target.rect).map(rect =>
-        ancestorIds.has(blockByRect.get(rect)!.id) ? { ...rect, height: RECORD_HEADER_HEIGHT } : rect);
-      const { sourceSide, targetSide, source: sourcePoint, target: targetPoint } = choosePorts(source.rect, target.rect, between);
+      const { sourceSide, targetSide, source: sourcePoint, target: targetPoint } = portsFor(edge, source, target);
       edges.push({
-        edge,
+        edge, scope,
         kind: 'full',
         source: sourcePoint,
         target: targetPoint,
         arrowAt: edge.directed ? 'target' : null,
         sourceSide, targetSide, sourceBlockId: source.id, targetBlockId: target.id,
-        route: makeEdgeRoute(sourcePoint, targetPoint, sourceSide, targetSide),
+        route: makeUnobstructedRoute(sourcePoint, targetPoint, sourceSide, targetSide, edge.routeStyle),
       });
       continue;
     }
     const otherId = source ? edge.targetNodeId : edge.sourceNodeId;
     const filtered = members.has(otherId) && Boolean(options.visibleIds) && !options.visibleIds?.has(otherId);
-    if (!filtered && options.showOutsideEdges === false) continue;
     const visible = source ?? target;
     if (!visible) continue;
-    const otherCenter = naturalById?.get(otherId) ? center(naturalById.get(otherId)!.rect) : null;
+    if (filtered && !naturalById) {
+      const natural = buildRenderModel(state, canvas, { zoom: 1, ignoreCollapse: true, skipEdges: true });
+      naturalById = new Map(natural.blocks.map(block => [block.id, block]));
+    }
+    const otherBlock = naturalById?.get(otherId);
+    const otherCenter = otherBlock ? center(otherBlock.rect) : null;
     const angle = (edgeHash(edge.edgeId) % 7 - 3) * 0.18;
     const outward = otherCenter
       ? { x: otherCenter.x - center(visible.rect).x, y: otherCenter.y - center(visible.rect).y }
@@ -360,7 +401,7 @@ export function buildRenderModel(
     const length = filtered ? 64 : 44;
     const end = { x: start.x + outward.x * length, y: start.y + outward.y * length };
     edges.push({
-      edge,
+      edge, scope,
       kind: filtered ? 'filtered' : 'outside',
       source: source ? start : end,
       target: source ? end : start,
@@ -374,12 +415,15 @@ export function buildRenderModel(
   const parallel = new Map<string, RenderEdge[]>();
   for (const rendered of edges) {
     if (rendered.kind !== 'full') continue;
-    const key = [rendered.sourceBlockId, rendered.targetBlockId].sort().join('\u0000');
-    parallel.set(key, [...(parallel.get(key) ?? []), rendered]);
+    const key = [rendered.scope, ...[rendered.sourceBlockId, rendered.targetBlockId].sort()].join('\u0000');
+    const group = parallel.get(key);
+    if (group) group.push(rendered); else parallel.set(key, [rendered]);
   }
   for (const group of parallel.values()) {
+    if (group.length < 2) continue;
     group.sort((a, b) => a.edge.edgeId.localeCompare(b.edge.edgeId));
     group.forEach((rendered, index) => {
+      if (rendered.edge.routeStyle === 'orthogonal') return;
       const lane = index - (group.length - 1) / 2;
       rendered.route = makeEdgeRoute(rendered.source, rendered.target, rendered.sourceSide, rendered.targetSide,
         lane, options.zoom, (rendered.sourceBlockId ?? '') < (rendered.targetBlockId ?? ''));
@@ -391,8 +435,9 @@ export function buildRenderModel(
     if (rendered.kind === 'full') continue;
     const visibleId = rendered.sourceBlockId ?? rendered.targetBlockId;
     const side = rendered.freeEnd === 'target' ? rendered.sourceSide : rendered.targetSide;
-    const key = [visibleId, side, rendered.kind, ...[rendered.edge.sourceNodeId, rendered.edge.targetNodeId].sort()].join('\u0000');
-    parallelStubs.set(key, [...(parallelStubs.get(key) ?? []), rendered]);
+    const key = [visibleId, side, rendered.kind, rendered.scope, ...[rendered.edge.sourceNodeId, rendered.edge.targetNodeId].sort()].join('\u0000');
+    const group = parallelStubs.get(key);
+    if (group) group.push(rendered); else parallelStubs.set(key, [rendered]);
   }
   for (const group of parallelStubs.values()) {
     if (group.length < 2) continue;
@@ -410,9 +455,11 @@ export function buildRenderModel(
       rendered.route = makeStubRoute(rendered.source, rendered.target);
     });
   }
-  const occupiedLabels = blocks.filter((block) => block.kind === 'node').map((block) => ({ ...block.rect }));
-  for (const rendered of options.deferRouting ? [] : [...edges].sort((a, b) => a.edge.edgeId.localeCompare(b.edge.edgeId))) {
-    if (rendered.kind === 'full') rendered.label = placeEdgeLabel(rendered.route, rendered.edge.edgeContent, occupiedLabels);
+  if (!options.deferRouting) {
+    const occupiedLabels = new RectangleIndex(blocks.filter(block => block.kind === 'node').map(block => block.rect));
+    for (const rendered of [...edges].sort((a, b) => Number(b.scope === 'internal') - Number(a.scope === 'internal') || a.edge.edgeId.localeCompare(b.edge.edgeId))) {
+      if (rendered.kind === 'full') rendered.label = placeEdgeLabel(rendered.route, rendered.edge.edgeContent, occupiedLabels);
+    }
   }
   return { blocks, edges, bounds, membership: members, parentOf: parents, lodCollapsed: lod };
 }
@@ -424,7 +471,7 @@ export function getFocusVisibleIds(
   selectedIds: ReadonlySet<string>,
   mode: 'selected' | 'neighbors'
 ): Set<string> {
-  const { members, parents } = indexMembership(state, canvas);
+  const { members, parents } = getCanvasMembership(state, canvas);
   const result = new Set<string>();
   const addSubtree = (id: string) => {
     if (!members.has(id) || result.has(id)) return;
@@ -435,6 +482,13 @@ export function getFocusVisibleIds(
     children.forEach(addSubtree);
   };
   selectedIds.forEach(addSubtree);
+  // An edge needs its endpoints in the projection, even when neither endpoint is selected.
+  for (const edge of state.edges) {
+    if (!edge.removed && selectedIds.has(edge.edgeId)) {
+      if (members.has(edge.sourceNodeId)) result.add(edge.sourceNodeId);
+      if (members.has(edge.targetNodeId)) result.add(edge.targetNodeId);
+    }
+  }
   if (mode === 'neighbors') {
     const initial = new Set(result);
     for (const edge of state.edges) {
@@ -514,31 +568,7 @@ export function findFreeDocumentPlacement(
   const preferred = preferredWorld
     ? { x: preferredWorld.x - origin.x, y: preferredWorld.y - origin.y }
     : { x: 0, y: 0 };
-  const candidate = (point: Point): Rect =>
-    translate(reservedNew, { x: origin.x + point.x, y: origin.y + point.y });
-  if (!existing.some((rect) => overlaps(candidate(preferred), rect, BLOCK_GAP))) {
-    return { ...preferred, source: 'auto' };
-  }
-  const stepX = Math.max(NODE_WIDTH + BLOCK_GAP, reservedNew.width + BLOCK_GAP);
-  const stepY = Math.max(NODE_HEIGHT + BLOCK_GAP, reservedNew.height + BLOCK_GAP);
-  for (let ring = 1; ring <= 24; ring += 1) {
-    for (let col = -ring; col <= ring; col += 1) {
-      for (const row of [-ring, ring]) {
-        const point = { x: preferred.x + col * stepX, y: preferred.y + row * stepY };
-        if (!existing.some((rect) => overlaps(candidate(point), rect, BLOCK_GAP))) {
-          return { ...point, source: 'auto' };
-        }
-      }
-    }
-    for (let row = -ring + 1; row < ring; row += 1) {
-      for (const col of [-ring, ring]) {
-        const point = { x: preferred.x + col * stepX, y: preferred.y + row * stepY };
-        if (!existing.some((rect) => overlaps(candidate(point), rect, BLOCK_GAP))) {
-          return { ...point, source: 'auto' };
-        }
-      }
-    }
-  }
-  const furthest = Math.max(0, ...existing.map((rect) => rect.x + rect.width));
-  return { x: furthest - origin.x - reservedNew.x + BLOCK_GAP, y: preferred.y, source: 'auto' };
+  const obstacles = existing.map(rect => ({ ...rect, x: rect.x - origin.x - reservedNew.x, y: rect.y - origin.y - reservedNew.y }));
+  const point = nearestRegionSpace(reservedNew, preferred, obstacles, directoryId === canvas.canvasId);
+  return { ...point, source: 'auto' };
 }

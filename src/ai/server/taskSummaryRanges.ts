@@ -8,7 +8,8 @@ export interface SummaryRange {
   weight: number; unitIds: string[];
   payload: {
     rangeId: string; taskId: string; initialMessage: unknown;
-    referenceCatalog: TaskSummaryInput['referenceCatalog'];
+    referenceCatalog: ReturnType<typeof rangeMetadata>['referenceCatalog'];
+    fieldCitationInstruction?:string;
     executionFunctionGuide: TaskSummaryInput['executionFunctionGuide'];
     units: Array<Pick<TaskSummaryUnit, 'id' | 'weight' | 'content'>>;
   };
@@ -18,25 +19,41 @@ export interface SummaryRangePlan {
   retainedUnitIds: Array<{ taskId: string; unitIds: string[] }>;
 }
 
-function material(input: TaskSummaryInput, start: number, end: number) {
-  const units = input.units.slice(start, end);
-  return { taskId: input.taskId, start, end, initialMessage: input.initialMessage,
-    referenceCatalog: summaryUnitBindings(units), executionFunctionGuide: summaryUnitGuide(units), units };
+export function rangeMetadata(units: TaskSummaryUnit[], rangeId: string) {
+  // The marker identifies a verified native page in the host catalog. The author
+  // needs the record, field and delivered span, without the private page/hash.
+  const referenceCatalog=summaryUnitBindings(units).map(b=>{
+    if(!b.fieldRead)return b;
+    const {recordId,field,start,end}=b.fieldRead;
+    return {key:b.key,id:b.id,kind:b.kind,fieldRead:{recordId,field,...(start===undefined?{}:{start,end})}};
+  });
+  return {
+    rangeId, referenceCatalog, executionFunctionGuide: summaryUnitGuide(units),
+    ...(referenceCatalog.some(b=>b.fieldRead)?{fieldCitationInstruction:
+      '每条画布结论引用实际使用的字段 [[ref:key]]。fieldRead.field 区分正文 content、名称 name、目录路径 path、空间层级 spatial、成员 members/node_members/directory_members、关系集合 relations、边详情 edge。保留子摘要结论时带上对应标记，只引用仍在本次摘要中的事实。全量结论须有完整列表依据。缺少字段依据时保留普通对象引用或标明无法确认。'
+      +(referenceCatalog.some(b=>b.fieldRead?.field.startsWith('depend'))?'依赖边的方向和端点用 dependencyEdge，数量用 dependencyCount_，完整名单用 dependencies_ 对应方向的标记。':'')}:{})
+  };
+}
+export function rangeBody(units: TaskSummaryUnit[], rangeId: string) {
+  return {...rangeMetadata(units,rangeId),units:units.map(({id,weight,content})=>({id,weight,content}))};
 }
 
-function makeRange(input: TaskSummaryInput, start: number, end: number, weight: number): SummaryRange {
-  const value = material(input, start, end), inputHash = digest(['summary-range-input-v1', value]);
+export function makeRange(input: TaskSummaryInput, start: number, units: TaskSummaryUnit[], weight: number, backgroundHash = digest(input.initialMessage)): SummaryRange {
+  const end = start + units.length;
+  const inputHash = digest(['summary-range-input-v2', input.taskId, start, end, backgroundHash, units]);
   const rangeId = `range:${digest(['summary-range-id-v1', input.taskId, start, end, inputHash]).slice(0, 24)}`;
-  return { rangeId, inputHash, taskId: input.taskId, start, end, weight, unitIds: value.units.map(unit => unit.id),
-    payload: structuredClone({ rangeId, taskId: input.taskId, initialMessage: value.initialMessage,
-      referenceCatalog: value.referenceCatalog, executionFunctionGuide: value.executionFunctionGuide,
-      units: value.units.map(({ id, weight, content }) => ({ id, weight, content })) }) };
+  const { taskId, initialMessage } = input;
+  const {rangeId: _rangeId, ...body} = rangeBody(units, rangeId);
+  return {
+    rangeId, inputHash, taskId, start, end, weight, unitIds: units.map(unit => unit.id),
+    payload: { rangeId, taskId, initialMessage, ...body }
+  };
 }
 
 /** Quarter-unit arithmetic keeps every whole step/root indivisible. Minimize
  * groups first, then squared weights so a short tail is balanced into all groups.
  * At most 20 units fit in a group: O(20n) work and O(n) bookkeeping. */
-function partition(input: TaskSummaryInput, from: number, to: number): SummaryRange[] {
+export function balancedGroups(input: TaskSummaryInput, from: number, to: number) {
   type Path = { groups: number; squares: number; previous: number; weight: number };
   const paths: Array<Path | undefined> = Array(to - from + 1);
   paths[0] = { groups: 0, squares: 0, previous: -1, weight: 0 };
@@ -53,10 +70,10 @@ function partition(input: TaskSummaryInput, from: number, to: number): SummaryRa
     }
   }
   if (!paths[to - from]) return [];
-  const ranges: SummaryRange[] = [];
+  const ranges: Array<{start:number;end:number;weight:number}> = [];
   for (let end = to - from; end > 0;) {
     const path = paths[end]!;
-    ranges.push(makeRange(input, from + path.previous, from + end, path.weight / 4));
+    ranges.push({start:from+path.previous,end:from+end,weight:path.weight/4});
     end = path.previous;
   }
   return ranges.reverse();
@@ -76,7 +93,7 @@ function unitSpan(unit: TaskSummaryUnit, records: Evidence[], positions: Map<str
   }
   const covered = new Set(unit.coverage.map(item => item.recordId));
   if (unit.records.some(record => !covered.has(record.id) || digest(records[positions.get(record.id) ?? -1]) !== digest(record))) return;
-  if ([...covered].some(id => !unit.records.some(record => record.id === id))) return;
+  if (new Set(unit.records.map(record=>record.id)).size!==covered.size) return;
   const start = Math.min(...indices), end = Math.max(...indices);
   for (let index = start; index <= end; index++) if (!covered.has(records[index].id)) return;
   // The production validator uses inclusive order bounds, including ties.
@@ -84,35 +101,36 @@ function unitSpan(unit: TaskSummaryUnit, records: Evidence[], positions: Map<str
   return [start, end];
 }
 
-/** Program-owned scopes; no source material or invalid tail is silently lost.
- * Retained units continue to use their original representation. */
+/** Every returned interval has distinct, adjacent original records. Missing or
+ * protected records, including order ties, are hard boundaries. */
+export function summarySegments(input: TaskSummaryInput, records: Evidence[]) {
+  const rows = records.filter(record => record.taskId === input.taskId).sort((a, b) => a.order - b.order || a.id.localeCompare(b.id));
+  const positions = new Map(rows.map((r, index) => [r.id, index]));
+  const covered = input.units.flatMap(unit => [...new Set(unit.coverage.map(c => c.recordId))]);
+  const segments: Array<{ from: number; to: number }> = [];
+  if (positions.size !== rows.length || new Set(covered).size !== covered.length
+    || new Set(input.units.map(u => u.id)).size !== input.units.length
+    || input.units.some(u => !u.id || u.taskId !== input.taskId || u.weight !== 1 && u.weight !== .25)) return segments;
+  let from = 0, priorEnd: number | undefined;
+  const flush = (to: number) => { if (to > from) segments.push({ from, to }); from = to; };
+  for (const [index, unit] of input.units.entries()) {
+    const span = unitSpan(unit, rows, positions);
+    if (!span) { flush(index); from = index + 1; priorEnd = undefined; continue; }
+    if (priorEnd !== undefined && span[0] !== priorEnd + 1) flush(index);
+    priorEnd = span[1];
+  }
+  flush(input.units.length); return segments;
+}
+
+/** Full-capacity allocation, also used by archive tooling and protocol tests. */
 export function allocateSummaryRanges(inputs: TaskSummaryInput[], records: Evidence[]): SummaryRangePlan {
   const plan: SummaryRangePlan = { ranges: [], retainedUnitIds: [] };
-  const taskCounts = new Map<string, number>();
-  for (const input of inputs) taskCounts.set(input.taskId, (taskCounts.get(input.taskId) ?? 0) + 1);
   for (const input of inputs) {
-    const taskRecords = records.filter(record => record.taskId === input.taskId).sort((a, b) => a.order - b.order || a.id.localeCompare(b.id));
-    const positions = new Map(taskRecords.map((record, index) => [record.id, index]));
-    const coveredIds = input.units.flatMap(unit => [...new Set(unit.coverage.map(item => item.recordId))]);
-    const invalid = taskCounts.get(input.taskId) !== 1 || positions.size !== taskRecords.length
-      || new Set(input.units.map(unit => unit.id)).size !== input.units.length
-      || new Set(coveredIds).size !== coveredIds.length
-      || input.units.some(unit => !unit.id || unit.taskId !== input.taskId || unit.weight !== 1 && unit.weight !== .25);
-    const ranges: SummaryRange[] = [];
-    if (!invalid) {
-      let segmentStart = 0, priorEnd: number | undefined;
-      const flush = (end: number) => { if (end > segmentStart) ranges.push(...partition(input, segmentStart, end)); segmentStart = end; };
-      for (let index = 0; index < input.units.length; index++) {
-        const span = unitSpan(input.units[index], taskRecords, positions);
-        if (!span) { flush(index); segmentStart = index + 1; priorEnd = undefined; continue; }
-        if (priorEnd !== undefined && span[0] !== priorEnd + 1) flush(index);
-        priorEnd = span[1];
-      }
-      flush(input.units.length);
-    }
+    const segments = inputs.filter(i => i.taskId === input.taskId).length === 1 ? summarySegments(input, records) : [];
+    const ranges = segments.flatMap(({ from, to }) => balancedGroups(input, from, to))
+      .map(({ start, end, weight }) => makeRange(input, start, input.units.slice(start, end), weight));
     plan.ranges.push(...ranges);
-    const allocated = new Set(ranges.flatMap(range => range.unitIds));
-    const retained = input.units.filter(unit => !allocated.has(unit.id)).map(unit => unit.id);
+    const ids = new Set(ranges.flatMap(r => r.unitIds)), retained = input.units.filter(u => !ids.has(u.id)).map(u => u.id);
     if (retained.length) plan.retainedUnitIds.push({ taskId: input.taskId, unitIds: retained });
   }
   return plan;
@@ -124,22 +142,30 @@ export function summaryRangeRequest(plan: SummaryRangePlan) { return { ranges: p
  * stale JSON and scope mix-ups; the caller must still retain its live source
  * fence, production summary validation, and final full-request savings check. */
 export function bindSummaryRangeResponse(plan: SummaryRangePlan, output: unknown, inputs: TaskSummaryInput[], records: Evidence[]) {
-  const current = new Map(allocateSummaryRanges(inputs, records).ranges.map(range => [range.rangeId, range]));
   const requested = new Map<string, SummaryRange>();
+  const tasks = new Map(inputs.map(input => [input.taskId, { input, segments: summarySegments(input, records), backgroundHash: digest(input.initialMessage), end: 0 }]));
+  if (tasks.size !== inputs.length) throw new Error('摘要任务重复');
   for (const range of plan.ranges) {
-    if (requested.has(range.rangeId) || !current.has(range.rangeId) || digest(range) !== digest(current.get(range.rangeId))) throw new Error('摘要范围或来源已改变');
+    const scope = tasks.get(range.taskId);
+    if (!scope || requested.has(range.rangeId) || range.start < scope.end ||
+      !scope.segments.some(s => s.from <= range.start && range.start < range.end && range.end <= s.to)) throw new Error('摘要范围或来源已改变');
+    const units = scope.input.units.slice(range.start, range.end), weight = units.reduce((n, u) => n + u.weight, 0);
+    if (weight < 2 || weight > 5 || digest(range) !== digest(makeRange(scope.input, range.start, units, weight, scope.backgroundHash))) throw new Error('摘要范围或来源已改变');
+    scope.end = range.end;
     requested.set(range.rangeId, range);
   }
   if (!output || typeof output !== 'object' || Array.isArray(output) || Object.keys(output).some(key => key !== 'summaries')) throw new Error('摘要输出格式无效');
   const rows = (output as { summaries?: unknown }).summaries;
   if (!Array.isArray(rows)) throw new Error('摘要输出缺少 summaries 数组');
   const used = new Set<string>();
-  return { summaries: rows.map(item => {
-    if (!item || typeof item !== 'object' || Array.isArray(item) || Object.keys(item).some(key => key !== 'rangeId' && key !== 'summary')) throw new Error('摘要范围输出无效');
-    const row = item as { rangeId?: unknown; summary?: unknown };
-    const range = typeof row.rangeId === 'string' ? requested.get(row.rangeId) : undefined;
-    if (!range || used.has(range.rangeId) || typeof row.summary !== 'string' || !row.summary.trim()) throw new Error('摘要范围或正文无效');
-    used.add(range.rangeId);
-    return { taskId: range.taskId, unitIds: [...range.unitIds], summary: row.summary };
-  }) };
+  return {
+    summaries: rows.map(item => {
+      if (!item || typeof item !== 'object' || Array.isArray(item) || Object.keys(item).some(key => key !== 'rangeId' && key !== 'summary')) throw new Error('摘要范围输出无效');
+      const row = item as { rangeId?: unknown; summary?: unknown };
+      const range = typeof row.rangeId === 'string' ? requested.get(row.rangeId) : undefined;
+      if (!range || used.has(range.rangeId) || typeof row.summary !== 'string' || !row.summary.trim()) throw new Error('摘要范围或正文无效');
+      used.add(range.rangeId);
+      return { taskId: range.taskId, unitIds: [...range.unitIds], summary: row.summary };
+    })
+  };
 }

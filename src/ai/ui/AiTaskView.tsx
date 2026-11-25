@@ -54,11 +54,17 @@ export function AiInteractionView({ task }: { task: Task }) {
 function InteractionContent({ task, interaction }: { task: Task; interaction: Interaction }) {
   const command = useAiStore((state) => state.command);
   const snapshot = useAiStore((state) => state.snapshot);
-  const [answer, setAnswer] = useState('');
+  const draft = useAiStore(state => state.draftsBySession[task.sessionId]?.interactionAnswer);
+  const answer = draft?.id === interaction.id && draft.version === interaction.version ? draft.text : '';
+  const setAnswer = (text: string) => useAiStore.getState().setDraft(task.sessionId, {
+    interactionAnswer: { id: interaction.id, version: interaction.version, text },
+  });
   const action = useAction();
   const proposed = snapshot?.changes.find((change) => change.id === interaction.changeSetId);
   const submit = (value: string) => void action.run(async () => {
     await command('interaction.reply', { taskId: task.id, interactionId: interaction.id, version: interaction.version, answer: value });
+    const store = useAiStore.getState(), saved = store.draftsBySession[task.sessionId]?.interactionAnswer;
+    if (saved?.id === interaction.id && saved.version === interaction.version) store.setDraft(task.sessionId, { interactionAnswer: undefined });
   });
   if (interaction.kind === 'structure') return <div className="ai-card ai-column" data-ai-interaction="structure">
     <p>此目录调整需要在图文档管理入口处理。继续任务将跳过原来的剪切、复制选择。</p>
@@ -71,7 +77,7 @@ function InteractionContent({ task, interaction }: { task: Task; interaction: In
     {proposed && <AiChangeDetails change={proposed} />}
     {interaction.options.length > 0 && <div className="ai-row">{interaction.options.map((option) => <button key={option} className="ai-button" disabled={action.busy} data-ai-interaction-choice onClick={() => submit(option)}>{option}</button>)}</div>}
     {interaction.kind === 'question' && <div className="ai-column"><textarea className="ai-input" rows={2} value={answer} onChange={(event) => setAnswer(event.target.value)} placeholder="填写你的答复" aria-label="答复 AI 问题" /><button className="ai-button ai-button-primary" disabled={action.busy || !answer.trim()} onClick={() => submit(answer.trim())}><Check size={13} />提交答复</button></div>}
-    <p className="ai-muted">此答复绑定当前问题与版本。</p><AiError text={action.error} />
+    <p className="ai-muted ai-interaction-footnote">此答复绑定当前问题与版本。</p><AiError text={action.error} />
   </div>;
 }
 
@@ -119,7 +125,7 @@ export const toolLabels: Record<string, string> = {
   graph_read_node_content: '读取节点正文', graph_read_directory_content: '读取子图说明', graph_read_object_field: '读取对象字段',
   graph_neighbors: '读取邻接关系', graph_search: '检索图内容', graph_search_node_content: '检索节点正文',
   graph_read_node_edges: '读取节点关联边', graph_read_subgraph_edges: '读取子图内部边', graph_read_between_subgraphs: '读取子图之间的边',
-  graph_read_design_references: '读取设计引用', graph_propose_changes: '规划图修改', graph_apply_changes: '修改画布',
+  graph_read_dependencies: '查询节点依赖', graph_read_design_references: '读取设计引用', graph_propose_changes: '规划图修改', graph_apply_changes: '修改画布',
 };
 export function AiToolView({ call }: { call: ToolCallRecord }) {
   const snapshot = useAiStore(state => state.snapshot);

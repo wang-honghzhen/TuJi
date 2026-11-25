@@ -4,13 +4,14 @@ import type { Coverage, SummarySnapshot, SummaryObjectBinding } from '../context
 import { AUTO_CONTEXT } from '../contextState';
 import { allEvidence, fullCoverage, coverageKey, summaryArchive, validSummary, makeSummary, protectedCurrentSteps, type Evidence } from './historyRepresentations';
 import { digest } from './directGraph';
-import { summaryBindingCatalog, usedSummaryBindings, bindSummaryReadReferences } from './summaryBindings';
+import { summaryBindingCatalog, verifiedSummaryText } from './summaryBindings';
+import { summaryFieldBindings } from './summaryFieldEvidence';
 import { estimateTokens } from '../tokens';
 import { toolDefinitions } from './tools';
 import { contextProtection } from './contextProtection';
 import { originResultId } from './readVisibility';
 import { summaryUnitBindings as unitBindings, summaryUnitGuide as unitGuide } from './taskSummaryWindow';
-export { boundedSummaryInput } from './taskSummaryWindow';
+import { DomainError } from './errors';
 
 export interface TaskSummaryUnit {
   id:string; taskId:string; order:number; weight:number; stepIds:string[]; coverage:Coverage[];
@@ -41,7 +42,7 @@ export function taskSummaryUnits(state:AppSnapshot,task:Task,taskId:string):Task
     grouped.set(key,[...(grouped.get(key)??[]),record]);
   }
   const protectedSteps=taskId===task.id?protectedCurrentSteps(state,task):new Set<string>();
-  const calls=[...state.toolCalls,...state.snapshots.flatMap(s=>s.toolCalls??[])],definitions=toolDefinitions({write:true,graph:true,design:true});
+  const calls=[...state.toolCalls,...state.snapshots.flatMap(s=>s.toolCalls??[])],definitions=toolDefinitions({write:true,graph:true,design:true,web:true});
   const hardProtectedCalls=contextProtection(state,task,new Set([taskId])).hardProtectedCalls;
   for(const call of calls)if(call.taskId===taskId&&hardProtectedCalls.has(originResultId(call)))protectedSteps.add(call.stepId);
   const units:TaskSummaryUnit[]=[];
@@ -52,15 +53,16 @@ export function taskSummaryUnits(state:AppSnapshot,task:Task,taskId:string):Task
     units.push({id:`step:${stepId}`,taskId,order:ordered[0].order,weight:1,stepIds:stepId.startsWith('unstepped:')?[]:[stepId],
       coverage:ordered.map(fullCoverage),records:ordered,content:ordered.map(r=>({recordId:r.id,content:attachmentSummaryReceipt(calls.find(c=>c.id===r.id),r.projectionText??r.text)})),
       executionFunctionGuide:definitions.filter(t=>calls.some(c=>c.name===t.name&&ordered.some(r=>r.id===c.id))).map(t=>({name:t.name,meaning:t.description})),
-      bindings:summaryBindingCatalog(state,ordered.map(r=>({recordId:r.id,text:attachmentSummaryReceipt(calls.find(c=>c.id===r.id),r.projectionText??r.text)})),ordered.flatMap(r=>r.sources))});
+      bindings:summaryBindingCatalog(state,ordered.map(r=>({recordId:r.id,text:attachmentSummaryReceipt(calls.find(c=>c.id===r.id),r.projectionText??r.text)})),ordered.flatMap(r=>r.sources))
+        .concat(ordered.flatMap(record=>{
+          const call=calls.find(c=>c.id===record.id);
+          return call && record.representation==='body' && record.projectionText===record.text ? summaryFieldBindings(state,task,call):[];
+        }))});
   }
   for(const summary of selected){
     const stepIds=summary.stepIds??[...new Set(summary.coverage.flatMap(c=>{const r=records.find(r=>r.id===c.recordId);return r?.stepId?[r.stepId]:[];}))];
     if(stepIds.some(id=>protectedSteps.has(id)))continue;
-    let text:string,bindings:SummaryObjectBinding[];
-    try{text=bindSummaryReadReferences(summary.text,summary.objectBindings??[]);bindings=usedSummaryBindings(text,summary.objectBindings??[]);
-      if(/\bread:[a-zA-Z0-9-]+/.test(text))continue;
-    }catch{continue;}
+    const {text,bindings}=verifiedSummaryText(summary.text,summary.objectBindings??[]);
     units.push({id:summary.id,summaryId:summary.id,taskId,order:Math.min(...summary.coverage.map(c=>records.find(r=>r.id===c.recordId)?.order??0)),
       weight:.25,stepIds,
       coverage:summary.coverage,records:summary.coverage.flatMap(c=>records.find(r=>r.id===c.recordId)??[]),
@@ -82,7 +84,7 @@ export function summaryStorageBenefit(summary:SummarySnapshot,inputs:TaskSummary
 }
 
 /** Validate every proposed range before constructing any persisted summary. */
-export function acceptTaskSummaries(state:AppSnapshot,task:Task,inputs:TaskSummaryInput[],output:unknown,roundId:string):SummarySnapshot[] {
+export function acceptTaskSummaries(state:AppSnapshot,task:Task,inputs:TaskSummaryInput[],output:unknown,roundId:string,onInvalidReference?:(taskId:string)=>void):SummarySnapshot[] {
   const rows=(output as {summaries?:unknown[]})?.summaries;
   if(!Array.isArray(rows))throw new Error('摘要输出缺少 summaries 数组');
   const calls=[...state.toolCalls,...state.snapshots.flatMap(s=>s.toolCalls??[])];
@@ -106,8 +108,24 @@ export function acceptTaskSummaries(state:AppSnapshot,task:Task,inputs:TaskSumma
     const sources=units.flatMap(u=>u.records.flatMap(r=>r.sources));
     const bindings=summaryBindingCatalog(state,units.flatMap(u=>u.records.map(r=>({recordId:r.id,text:attachmentSummaryReceipt(calls.find(c=>c.id===r.id),r.projectionText??r.text)}))),sources,
       units.flatMap(u=>archive.find(s=>s.id===u.summaryId)?.objectBindings??[]));
-    const text=bindSummaryReadReferences(row.summary,bindings);
-    const summary=makeSummary('task',text,coverage,units.flatMap(u=>u.summaryId?[u.summaryId]:[]),sources,usedSummaryBindings(text,bindings));
+    bindings.push(...unitBindings(units).filter(b=>b.fieldRead && !bindings.some(other=>other.key===b.key)));
+    let verified:ReturnType<typeof verifiedSummaryText>;
+    try{verified=verifiedSummaryText(row.summary,bindings);}
+    catch(error){
+      if(!onInvalidReference||!(error instanceof DomainError)||error.code!=='INVALID_SUMMARY_REFERENCE')throw error;
+      onInvalidReference(input.taskId);continue;
+    }
+    const summary=makeSummary('task',verified.text,coverage,units.flatMap(u=>u.summaryId?[u.summaryId]:[]),sources,verified.bindings);
+    const fieldDependencies=verified.bindings.filter(b=>b.fieldRead);
+    if(fieldDependencies.length)summary.fieldDependencies=fieldDependencies;
+    const citedKeys=new Set(fieldDependencies.map(b=>b.key));
+    const previousFields=units.flatMap(u=>{
+      const child=archive.find(s=>s.id===u.summaryId);
+      if(!child)return [];
+      return [...child.omittedFieldSources??[],...child.fieldDependencies?.flatMap(b=>b.fieldRead?[{recordId:b.fieldRead.recordId,key:b.key}]:[])??[]];
+    });
+    const omitted=[...new Map(previousFields.filter(s=>!citedKeys.has(s.key)).map(s=>[s.key,s])).values()];
+    if(omitted.length)summary.omittedFieldSources=omitted;
     const metadata=new Map<string,NonNullable<SummarySnapshot['intermediateUserMessages']>[number]>();
     for(const unit of units){
       for(const old of archive.find(s=>s.id===unit.summaryId)?.intermediateUserMessages??[])metadata.set(old.id,old);
@@ -115,7 +133,7 @@ export function acceptTaskSummaries(state:AppSnapshot,task:Task,inputs:TaskSumma
     }
     summary.intermediateUserMessages=[...metadata.values()].sort((a,b)=>a.order-b.order||a.id.localeCompare(b.id));
     summary.stepIds=[...new Set(units.flatMap(u=>u.stepIds))];summary.inputUnitIds=units.map(u=>u.id);summary.summaryRoundId=roundId;
-    summary.version=digest([summary.version,summary.intermediateUserMessages,summary.stepIds]);
+    summary.version=digest([summary.version,summary.intermediateUserMessages,summary.stepIds,...(fieldDependencies.length?[fieldDependencies]:[]),...(omitted.length?[omitted]:[])]);
     result.push(summary);
   }
   return result;

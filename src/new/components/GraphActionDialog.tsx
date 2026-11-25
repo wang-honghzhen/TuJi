@@ -21,6 +21,7 @@ export function GraphActionDialog({ request, state, canvas, onSubmit, onClose }:
   const [name, setName] = useState(''); const [content, setContent] = useState('');
   const [source, setSource] = useState(request.sourceId ?? ''); const [target, setTarget] = useState('');
   const [direction, setDirection] = useState('none');
+  const [dependency, setDependency] = useState(false);
   const [mode, setMode] = useState<'cascade' | 'promote' | ''>(''); const [acknowledged, setAcknowledged] = useState(false); const [error, setError] = useState('');
   const [saving, setSaving] = useState(false);
   const [design, setDesign] = useState<DesignNodeData>(state.nodes[request.id ?? '']?.design ?? { type: 'proposal' });
@@ -77,11 +78,12 @@ export function GraphActionDialog({ request, state, canvas, onSubmit, onClose }:
       if (!source || !target || source === target) { setError('请选择两个不同的节点'); return; }
       const reversed = direction === 'reverse';
       command = { type: 'createEdge', input: { sourceNodeId: reversed ? target : source, targetNodeId: reversed ? source : target,
-        directed: direction !== 'none', edgeContent: content } };
+        directed: direction !== 'none', edgeContent: content, ...(dependency ? { relationKind: 'dependency' } : {}) } };
     } else if (request.type === 'createNode' || request.type === 'createSubgraph' || request.type === 'group') {
       if (!name.trim() || !parentId) { setError('请填写名称并选择目标路径'); return; }
-      command = request.type === 'createNode' ? { type: 'createNode', parentId, name, content, point: request.point, ...(modeOf(canvas) === 'design' ? { design } : {}) } :
-        { type: 'createSubgraph', parentId, name, content, ids: request.type === 'group' ? ids : [], point: request.point };
+      const point = request.pointForParent?.(parentId) ?? request.point;
+      command = request.type === 'createNode' ? { type: 'createNode', parentId, name, content, point, ...(modeOf(canvas) === 'design' ? { design } : {}) } :
+        { type: 'createSubgraph', parentId, name, content, ids: request.type === 'group' ? ids : [], point };
     } else if (request.type === 'move') {
       if (!parentId) { setError('请选择目标路径'); return; } command = { type: 'move', ids, parentId };
     } else if (request.type === 'importDocument') {
@@ -111,9 +113,12 @@ export function GraphActionDialog({ request, state, canvas, onSubmit, onClose }:
     </header>
     <div className="space-dialog-body min-h-0 overflow-y-auto new-scroll space-y-4 text-xs">
       {request.type === 'createEdge' ? <>
+        <label className="flex items-center gap-2 text-slate-300"><input type="checkbox" checked={dependency}
+          onChange={event => { setDependency(event.target.checked); if (event.target.checked && direction === 'none') setDirection('forward'); }} />
+          依赖关系（箭头起点依赖终点）</label>
         <div className="grid grid-cols-[1fr_auto_1fr] gap-1 items-center">
           <GraphChoiceField field="source" value={source} options={nodes.filter((item) => item.id !== target)} onChange={setSource} placeholder="选择起点" />
-          <GraphChoiceField field="direction" value={direction} options={[{ id: 'reverse', label: '←' }, { id: 'forward', label: '→' }, { id: 'none', label: '—' }]} onChange={setDirection} placeholder="方向" searchable={false} />
+          <GraphChoiceField field="direction" value={direction} options={[{ id: 'reverse', label: '←' }, { id: 'forward', label: '→' }, ...(dependency ? [] : [{ id: 'none', label: '—' }])]} onChange={setDirection} placeholder="方向" searchable={false} />
           <GraphChoiceField field="target" value={target} options={nodes.filter((item) => item.id !== source)} onChange={setTarget} placeholder="选择终点" />
         </div>
       </> : !deleting && !simple && <div className="space-y-1 text-slate-400"><div>路径</div>

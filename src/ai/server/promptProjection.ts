@@ -2,13 +2,13 @@ import { attachmentPromptMessages } from './attachmentPrompt';
 import type { AppSnapshot, ProtocolMessage, Task } from '../domain';
 import type { ContextStage, PromptEntry } from '../contextState';
 import { allEvidence, summaryArchive } from './historyRepresentations';
-import { renderSummaryReferences, summaryProjection } from './summaryBindings';
+import { renderSummaryReferences, summaryProjection, usableSummaryReferences } from './summaryBindings';
 import { historicalGraphEncoder, translateGraphPayload } from './graphReferences';
 import { historyReferenceProjection } from './historyReferenceProjection';
 import { publicReadEntries } from './toolVersionProtocol';
 import { promptReceipt } from './promptReceipts';
 
-export const PROMPT_PROJECTION_VERSION = 28;
+export const PROMPT_PROJECTION_VERSION = 32;
 
 /** Projection is draft-only. The caller commits the complete stage with the request. */
 export function projectPromptEntries(state: AppSnapshot, task: Task, stage: ContextStage,
@@ -30,6 +30,12 @@ export function projectPromptEntries(state: AppSnapshot, task: Task, stage: Cont
     if (typeof row.summaryId === 'string' && typeof row.content === 'string') {
       const summary = archive.find(s => s.id === row.summaryId);
       if (summary) {
+        if (!usableSummaryReferences(summary)) {
+          // A previous tool result may still contain a card or text fragment from
+          // an invalidated legacy root. Preserve its archive path on fresh projections.
+          return {summaryId:summary.id,contentState:'unavailable',reason:'unverified_summary_reference',
+            readWith:{tool:'context_read_task',arguments:{taskId:summary.coverage[0]?.taskId}}};
+        }
         const projection = summaryProjection(state, task, summary);
         // Saved summary expansions may predate the local summary/original label.
         // Refresh presentation metadata without changing archived text or ranges.

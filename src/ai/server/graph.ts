@@ -1,6 +1,8 @@
 import { canvasDirectories, canvasDirectory, canvasDirectoryEntries } from '@/v3/canvas';
 import type { CanvasRecord, GraphEdge, GraphState } from '@/v3/types';
 import { canvasMemberIds } from '../canvasScope';
+import { getCanvasMembership } from '@/v3/hierarchyIndex';
+import { pruneSpatialLayers, setSubgraphLayer } from '@/v3/spatialLevels';
 import { graphIdAllocator } from '@/v3/ids';
 import { documentParents, getDocumentTree } from '@/v3/documentTrees';
 import { normalizeRegionLayout, validateRegionLayout } from '@/v3/regionLayout';
@@ -44,6 +46,22 @@ export function assertAiObjectRefs(state: GraphState, refs: string[]) {
   const protectedIds = new Set(state.canvases.flatMap(canvas => [canvas.canvasId]));
   requireValue(refs.every(ref => !protectedIds.has(ref)), '画布及根目录不是AI可操作对象；顶层新增或移动请省略parentId', 'ROOT_READ_ONLY');
 }
+const edgeScopeMessage = '画布外边仅可读取关系说明，修改关系需要两个端点都在当前画布内';
+export function assertAiEdgeCommand(state: GraphState, canvasId: string, command: Record<string, unknown>, atCommit = false) {
+  if (!['createEdge', 'updateEdge', 'reconnectEdge', 'deleteEdge'].includes(String(command.type))) return;
+  const { members } = getCanvasMembership(state, canvasOf(state, canvasId));
+  const edge = state.edges.find(item => item.edgeId === command.id);
+  if (edge) {
+    requireValue(members.has(edge.sourceNodeId) && members.has(edge.targetNodeId), edgeScopeMessage, 'OUT_OF_SCOPE');
+    assertAiObjectRefs(state, [edge.sourceNodeId, edge.targetNodeId]);
+  }
+  const fields = (command.type === 'createEdge' ? command.input ?? command : command.patch) as Partial<GraphEdge> | undefined;
+  for (const id of [fields?.sourceNodeId, fields?.targetNodeId, command.nodeId]) {
+    // A saved batch can create the referenced node before using it. Its final
+    // membership is checked again against the complete candidate graph.
+    if (typeof id === 'string' && !(atCommit && !entity(state, id))) requireValue(members.has(id), edgeScopeMessage, 'OUT_OF_SCOPE');
+  }
+}
 export function assertAiCommandRefs(state: GraphState, command: Record<string, unknown>) {
   const refs = ['id', 'parentId', 'nodeId'].flatMap(key => typeof command[key] === 'string' ? [command[key] as string] : []);
   if (Array.isArray(command.ids)) refs.push(...command.ids.filter((ref): ref is string => typeof ref === 'string'));
@@ -63,7 +81,8 @@ export function semanticHashes(state: GraphState): Record<string, string> {
   }
   for (const canvas of state.canvases) {
     values[`canvases:${canvas.canvasId}:structure`] = hash([canvas.childIds, canvas.directories, canvas.excludedDocumentIds, canvas.nodeReferenceIds, canvas.isDraft]);
-    values[`canvases:${canvas.canvasId}:view`] = hash([canvas.placements, canvas.collapsed, canvas.presentationPlacements]);
+    values[`canvases:${canvas.canvasId}:view`] = hash([canvas.placements, canvas.collapsed, canvas.presentationPlacements,
+      ...(canvas.spatialLayerOffsets ? [canvas.spatialLayerOffsets] : [])]);
   }
   for (const edge of state.edges) values[`edges:${edge.edgeId}`] = hash(edge);
   return values;
@@ -84,6 +103,23 @@ const structureTypes = new Set(['createNode', 'createSubgraph', 'move', 'moveCan
 export function planMutation(state: GraphState, canvasId: string, raw: Record<string, unknown>,
   actor: 'user' | 'ai' = 'user', protectedIds?: ReadonlySet<string>): { state: GraphState; id?: string; cleanedEdges: number; identityMap?: Record<string, string> } {
   const command = structuredClone(raw); const kind = text(command.type, '操作类型', 80);
+  if (actor === 'ai') assertAiEdgeCommand(state, canvasId, command);
+  if (kind === 'renameCanvas' || kind === 'renameDocument') {
+    requireValue(actor === 'user', '画布和图文档重命名仅由用户执行', 'USER_ONLY_MANAGEMENT');
+    const name = text(command.name, '名称', 1000).trim();
+    requireValue(name, '名称不能为空');
+    if (kind === 'renameCanvas') {
+      const canvas = canvasOf(state, canvasId);
+      if (name === canvas.canvasName) return { state, cleanedEdges: 0 };
+      const canvases = state.canvases.map(c => c === canvas ? { ...canvas, canvasName: name, updatedAt: now() } : c);
+      return { state: { ...state, canvases }, cleanedEdges: 0 };
+    }
+    const id = text(command.id, '图文档'), doc = state.documents[id];
+    requireValue(doc?.kind === 'document', '图文档不存在', 'NOT_FOUND');
+    if (name === doc.name) return { state, cleanedEdges: 0 };
+    const renamed = { ...doc, name, rev: doc.rev + 1, metadata: { ...doc.metadata, updatedAt: now() } };
+    return { state: { ...state, documents: { ...state.documents, [id]: renamed } }, cleanedEdges: 0 };
+  }
   if (kind === 'replaceDocument') requireValue(actor === 'user', '图文档替换仅由用户执行', 'USER_ONLY_MANAGEMENT');
   requireValue(command.designListPatch === undefined || kind === 'updateDesignNode', 'designListPatch仅用于updateDesignNode', 'INVALID_ARGUMENT');
   requireValue(command.designPatch === undefined || kind === 'updateDesignNode', 'designPatch仅用于updateDesignNode', 'INVALID_ARGUMENT');
@@ -94,12 +130,28 @@ export function planMutation(state: GraphState, canvasId: string, raw: Record<st
   }
   try { return planGraphUpdate(() => {
     let next = state, createdId: string | undefined;
+    if (kind === 'setSubgraphLayer') {
+      const id = text(command.id, '子图');
+      requireValue(getCanvasMembership(state, canvasOf(state, canvasId)).parents.has(id), '只能调整当前画布内已挂载的子图或图文档', 'OUT_OF_SCOPE');
+      if (command.expectedOffset !== undefined) requireValue(command.expectedOffset === (canvasOf(state, canvasId).spatialLayerOffsets?.[id] ?? 0),
+        '子图的层差已变化，请按当前层差重试', 'VERSION_CONFLICT');
+      return { state: setSubgraphLayer(state, canvasId, id, command.offset as number), cleanedEdges: 0 };
+    }
     if (structureTypes.has(kind)) {
       if (['createNode', 'createSubgraph'].includes(kind)) { text(command.parentId, '父对象'); text(command.name, '名称', 1000); text(command.content ?? '', '正文'); command.content ??= ''; }
       if (['move', 'moveCanvasItems', 'reparentContent'].includes(kind)) { strings(command.ids, '移动对象'); text(command.parentId, '父对象'); }
-      const result = applyStructureCommand(state, canvasId, command as unknown as StructureCommand);
-      if (result.id && command.point && ['createNode', 'createSubgraph'].includes(kind)) result.state = recordPlacementIntent(result.state,
-        canvasId, String(command.parentId), result.id, actor, Date.now());
+      const result = applyStructureCommand(state, canvasId, command as unknown as StructureCommand, protectedIds);
+      if (result.id && (kind === 'createNode' || kind === 'createSubgraph')) {
+        const grouped = kind === 'createSubgraph' && Array.isArray(command.ids) && command.ids.length > 0;
+        const group = result.state.documents[result.id], view = canvasOf(result.state, canvasId);
+        const members = group ? [...group.childNodeIds, ...group.childDocumentIds] : view.directories[result.id]?.childIds ?? [];
+        const wrapsManual = actor === 'user' && grouped && members.some(id => {
+          const p = (group?.placements ?? view.placements)[id];
+          return p?.source === 'manual' || p?.manualAnchor;
+        });
+        if (command.point || wrapsManual) result.state = recordPlacementIntent(result.state,
+          canvasId, String(command.parentId), result.id, actor, Date.now());
+      }
       return result;
     }
     if (kind === 'createEdge') { next = createEdge(state, (command.input ?? command) as unknown as CreateEdgeInput); createdId = next.edges.at(-1)?.edgeId; }
@@ -200,7 +252,7 @@ export function planMutation(state: GraphState, canvasId: string, raw: Record<st
 }
 /** Keep structure only; backgrounds belong to global personalization settings. */
 const canvasKeys = ['canvasId', 'canvasName', 'updatedAt', 'childIds', 'directories', 'placements', 'collapsed', 'presentationPlacements',
-  'excludedDocumentIds', 'nodeReferenceIds', 'isDraft', 'mode'];
+  'spatialLayerOffsets', 'excludedDocumentIds', 'nodeReferenceIds', 'isDraft', 'mode'];
 export function compactCanvasPresentation(state: GraphState): GraphState {
   let changed = false;
   const canvases = state.canvases.map(canvas => {
@@ -208,15 +260,12 @@ export function compactCanvasPresentation(state: GraphState): GraphState {
     changed = true;
     return Object.fromEntries(Object.entries(canvas).filter(([key]) => canvasKeys.includes(key))) as unknown as CanvasRecord;
   });
-  return changed ? { ...state, canvases } : state;
-}
-function normalizeCanvases(state: GraphState): GraphState {
-  return compactCanvasPresentation(state);
+  return pruneSpatialLayers(changed ? { ...state, canvases } : state);
 }
 /** An edge stores what it means (who relates to whom, how, and in which style).
  *  Retired fields — the old manual source/target anchors — are dropped here at
  *  the single ingestion boundary instead of lingering in stored JSON. */
-const edgeKeys = ['edgeId', 'edgeContent', 'directed', 'sourceNodeId', 'targetNodeId', 'routeStyle', 'removed', 'membershipFor'];
+const edgeKeys = ['edgeId', 'edgeContent', 'directed', 'sourceNodeId', 'targetNodeId', 'routeStyle', 'removed', 'membershipFor', 'relationKind'];
 export function compactEdges<T extends { edges: GraphEdge[] }>(graph: T): T {
   let changed = false;
   const edges = graph.edges.map(edge => {
@@ -230,7 +279,7 @@ export function compactEdges<T extends { edges: GraphEdge[] }>(graph: T): T {
   return changed ? { ...graph, edges } : graph;
 }
 export function normalizedGraph(state: GraphState, previous?: GraphState): GraphState {
-  const next = prunePresentationPlacements(compactEdges(normalizeCanvases(normalizeRegionLayout(migrateProposalEvaluations(state), previous))));
+  const next = prunePresentationPlacements(compactEdges(compactCanvasPresentation(normalizeRegionLayout(migrateProposalEvaluations(state), previous))));
   validateStructure(next); validateRegionLayout(next); return next;
 }
 function collectionsOf(state: GraphState) {
@@ -299,14 +348,25 @@ export function checkAiEffects(before: GraphState, after: GraphState, canvasId: 
   const oldMembers = memberIds(before, canvasId), newMembers = memberIds(after, canvasId);
   for (const patch of graphDiff(before, after)) {
     if (patch.collection === 'edges') {
-      for (const edge of [patch.before, patch.after]) if (edge) {
-        const value = edge as { sourceNodeId: string; targetNodeId: string };
-        assertAiObjectRefs(before, [value.sourceNodeId, value.targetNodeId]);
+      for (const [value, members] of [[patch.before, oldMembers], [patch.after, newMembers]] as const) {
+        if (!value) continue;
+        const edge = value as GraphEdge, endpoints = [edge.sourceNodeId, edge.targetNodeId];
+        const pruned = patch.after === null && endpoints.some(id => oldMembers.has(id) && !entity(after, id));
+        if (pruned) continue;
+        requireValue(endpoints.every(id => members.has(id)), edgeScopeMessage, 'OUT_OF_SCOPE');
+        assertAiObjectRefs(before, endpoints);
       }
     }
     if (patch.collection === 'canvases') {
       // Other canvases may only change through canonical shared projection updates.
       requireValue(patch.id === canvasId || hash([(patch.before as CanvasRecord).childIds, (patch.before as CanvasRecord).directories]) === hash([(patch.after as CanvasRecord).childIds, (patch.after as CanvasRecord).directories]), '不能改变其他画布组织', 'OUT_OF_SCOPE');
+      const prev = (patch.before as CanvasRecord).spatialLayerOffsets ?? {}, next = (patch.after as CanvasRecord).spatialLayerOffsets ?? {};
+      for (const ref of new Set([...Object.keys(prev), ...Object.keys(next)])) if (prev[ref] !== next[ref]) {
+        if (patch.id === canvasId)
+          requireValue(allowed.has(ref) || (!oldMembers.has(ref) && newMembers.has(ref)), '不能修改当前范围外的层级', 'OUT_OF_SCOPE');
+        else
+          requireValue(next[ref] === undefined && allowed.has(ref) && !memberIds(after, patch.id).has(ref), '不能修改其他画布的层级', 'OUT_OF_SCOPE');
+      }
       continue;
     }
     if (patch.before === null) requireValue(newMembers.has(patch.id), '新增内容必须留在当前画布', 'OUT_OF_SCOPE');

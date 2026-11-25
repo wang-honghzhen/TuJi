@@ -1,17 +1,19 @@
 import type { RenderBlock, RenderEdge, RenderModel } from './layout';
 import type { ConnectionSide, Point, Rect } from './types';
 import { RECORD_HEADER_HEIGHT } from './types';
-import { attachmentPoint, choosePorts, pointOnRoute, portPoint, type EdgeRoute } from './edgeGeometry';
+import { attachmentPoint, cachedPortChooser, makeStubRoute, pointOnRoute, portPoint, type EdgeRoute } from './edgeGeometry';
 import { routeAroundObstacles } from './obstacleRouter';
 import { RectangleIndex } from './rectangleIndex';
 
 export type RoutingModel = Pick<RenderModel, 'blocks' | 'edges' | 'parentOf'>;
+const routingPorts = cachedPortChooser();
 export const PORT_SEAT = { gap: 18, minGap: 6, margin: 8 } as const;
+type SeatSpacing = { gap: number; minGap: number; margin: number };
 export interface SeatLayout { offsets: number[]; capacity: number; usable: number }
 
 /** Keep each end near its desired boundary position. Pool neighbouring ends only
  * when their spacing would overlap; distant ends do not pull one another around. */
-export function assignSeats(count: number, length: number, options: { gap: number; minGap: number; margin: number } = PORT_SEAT,
+export function assignSeats(count: number, length: number, options: SeatSpacing = PORT_SEAT,
   preferred?: readonly number[]): SeatLayout {
   const low = Math.min(options.margin, length / 2), usable = Math.max(0, length - low * 2);
   const capacity = Math.max(1, Math.floor(usable / options.minGap) + 1);
@@ -35,11 +37,49 @@ export function assignSeats(count: number, length: number, options: { gap: numbe
   return { offsets, capacity, usable };
 }
 
+/** Keep local ports fixed. Fit the remaining fan into the gaps between them,
+ * sharing secondary seats when the side is full. */
+function fitAroundReserved(preferred: number[], length: number, reserved: number[], spacing: SeatSpacing): number[] {
+  if (!reserved.length) return assignSeats(preferred.length, length, spacing, preferred).offsets;
+  const gap = spacing.minGap, low = Math.min(spacing.margin, length / 2), high = length - low;
+  const intervals: Array<{ start: number; end: number; first: number; count: number }> = [];
+  let capacity = 0;
+  const add = (start: number, end: number) => {
+    if (end < start) return;
+    const count = Math.floor((end - start) / gap) + 1;
+    intervals.push({ start, end, first: capacity, count }); capacity += count;
+  };
+  let start = low, spare = low, clearance = reserved[0] - low;
+  for (let i = 0; i < reserved.length; i++) {
+    const at = reserved[i];
+    add(start, at - gap);
+    start = at + gap;
+    if (i && (at - reserved[i - 1]) / 2 > clearance) {
+      clearance = (at - reserved[i - 1]) / 2; spare = at - clearance;
+    }
+  }
+  add(start, high);
+  if (!capacity) return preferred.map(() => high - reserved[reserved.length - 1] > clearance ? high : spare);
+  const desired = assignSeats(preferred.length, length, spacing, preferred).offsets;
+  let desiredRange = 0, assignedRange = 0, previous = -1;
+  return desired.map((aim, i) => {
+    while (desiredRange + 1 < intervals.length && aim > (intervals[desiredRange].end + intervals[desiredRange + 1].start) / 2) desiredRange++;
+    const slot = intervals[desiredRange];
+    const nearest = slot.first + Math.max(0, Math.min(slot.count - 1, Math.round((aim - slot.start) / gap)));
+    const index = capacity < desired.length ? Math.round(i * (capacity - 1) / (desired.length - 1))
+      : Math.max(previous + 1, Math.min(nearest, capacity - desired.length + i));
+    previous = index;
+    while (index >= intervals[assignedRange].first + intervals[assignedRange].count) assignedRange++;
+    return intervals[assignedRange].start + (index - intervals[assignedRange].first) * gap;
+  });
+}
+
 export interface ConnectionContext { obstacles: Rect[]; terminals: Rect[]; constraint?: Rect; sourceAncestors: string[]; targetAncestors: string[]; commonRegion?: string }
 
 /** One geometry policy shared by immediate previews and worker routing. Expanded
  * ancestor regions contribute their headers; unrelated regions remain obstacles. */
-export function createRoutingGeometry(model: RoutingModel, expandedEdgeIds: string[] = []) {
+export function createRoutingGeometry(model: RoutingModel, expandedEdgeIds: string[] = [],
+  { ports = routingPorts, spacing = PORT_SEAT }: { ports?: typeof routingPorts; spacing?: SeatSpacing } = {}) {
   const blocks = new Map(model.blocks.map(block => [block.id, block]));
   const index = new RectangleIndex(model.blocks.map(block => Object.assign({ ...block.rect }, { id: block.id })));
   const ancestry = new Map<string, string[]>(), contexts = new Map<string, ConnectionContext>();
@@ -57,20 +97,29 @@ export function createRoutingGeometry(model: RoutingModel, expandedEdgeIds: stri
     const ancestorIds = new Set([...sourceAncestors, ...targetAncestors]);
     const commonRegion = sourceAncestors.find(id => targetAncestors.includes(id) && blocks.has(id));
     const common = commonRegion && blocks.get(commonRegion)!.rect;
+    const header = commonRegion ? blocks.get(commonRegion)!.headerHeight ?? RECORD_HEADER_HEIGHT : 0;
     const corridor = a && b ? { x: Math.min(a.x, b.x) - 450, y: Math.min(a.y, b.y) - 450,
       width: Math.max(a.x + a.width, b.x + b.width) - Math.min(a.x, b.x) + 900,
       height: Math.max(a.y + a.height, b.y + b.height) - Math.min(a.y, b.y) + 900 } : undefined;
     const obstacles = (corridor ? index.query(corridor) : []).flatMap(rect => {
       const id = (rect as Rect & { id: string }).id;
       if (id === edge.sourceBlockId || id === edge.targetBlockId) return [];
-      return [ancestorIds.has(id) && !blocks.get(id)!.collapsed ? { ...rect, height: RECORD_HEADER_HEIGHT } : rect];
+      // An unrelated expanded region blocks the entire rectangle. Its contents
+      // contribute no additional boundary and crowd useful turns out of the
+      // router's bounded search grid on long cross-region connections.
+      const parent = blocks.get(model.parentOf.get(id) ?? '');
+      if (parent && !ancestorIds.has(parent.id) && parent.id !== edge.sourceBlockId && parent.id !== edge.targetBlockId &&
+        rect.x >= parent.rect.x && rect.y >= parent.rect.y && rect.x + rect.width <= parent.rect.x + parent.rect.width &&
+        rect.y + rect.height <= parent.rect.y + parent.rect.height) return [];
+      const block = blocks.get(id)!;
+      return [ancestorIds.has(id) && !block.collapsed ? { ...rect, height: block.headerHeight ?? RECORD_HEADER_HEIGHT } : rect];
     });
     const terminals = [a, b].filter((r): r is Rect => Boolean(r)).filter(rect =>
       ![a, b].some(other => other && other !== rect && other.x >= rect.x && other.y >= rect.y &&
         other.x + other.width <= rect.x + rect.width && other.y + other.height <= rect.y + rect.height));
     const result: ConnectionContext = { obstacles, terminals, sourceAncestors, targetAncestors, commonRegion,
-      constraint: common ? { x: common.x + 4, y: common.y + RECORD_HEADER_HEIGHT + 6,
-        width: Math.max(0, common.width - 8), height: Math.max(0, common.height - RECORD_HEADER_HEIGHT - 10) } : undefined };
+      constraint: common ? { x: common.x + 4, y: common.y + header + 6,
+        width: Math.max(0, common.width - 8), height: Math.max(0, common.height - header - 10) } : undefined };
     contexts.set(edge.edge.edgeId, result); return result;
   };
 
@@ -79,7 +128,7 @@ export function createRoutingGeometry(model: RoutingModel, expandedEdgeIds: stri
   for (const edge of model.edges) if (edge.kind === 'full' &&
     (blocks.get(edge.sourceBlockId!)?.collapsed || blocks.get(edge.targetBlockId!)?.collapsed)) {
     const ends = edge.edge.directed ? [edge.sourceBlockId, edge.targetBlockId] : [edge.sourceBlockId, edge.targetBlockId].sort();
-    const key = JSON.stringify([ends, edge.edge.directed]);
+    const key = JSON.stringify([edge.scope, ends, edge.edge.directed]);
     const group = groups.get(key) ?? []; group.push(edge); groups.set(key, group);
   }
   for (const group of groups.values()) if (group.length > 1 && !group.some(edge => expanded.has(edge.edge.edgeId))) {
@@ -89,28 +138,48 @@ export function createRoutingGeometry(model: RoutingModel, expandedEdgeIds: stri
   }
   const edges = model.edges.filter(edge => !hidden.has(edge.edge.edgeId)).map(edge => {
     const a = blocks.get(edge.sourceBlockId!), b = blocks.get(edge.targetBlockId!);
-    const ports = edge.kind === 'full' && a && b ? choosePorts(a.rect, b.rect, context(edge).obstacles) : {};
-    return { ...edge, ...ports, aggregateEdgeIds: aggregateIds.get(edge.edge.edgeId) };
+    const attachments = edge.kind === 'full' && a && b ? ports(edge.edge, a.rect, b.rect, context(edge).obstacles) : {};
+    return { ...edge, ...attachments, aggregateEdgeIds: aggregateIds.get(edge.edge.edgeId) };
   });
   const seats = new Map<string, { block: RenderBlock; side: ConnectionSide; ends: Array<{ edge: RenderEdge; end: 'source' | 'target'; at: number; aim: number }> }>();
-  for (const edge of edges) if (edge.kind === 'full') for (const end of ['source', 'target'] as const) {
+  for (const edge of edges) for (const end of ['source', 'target'] as const) {
     const block = blocks.get(end === 'source' ? edge.sourceBlockId! : edge.targetBlockId!); if (!block) continue;
     const side = end === 'source' ? edge.sourceSide : edge.targetSide, horizontal = side === 'top' || side === 'bottom';
     const key = `${block.id}/${side}`, group = seats.get(key) ?? { block, side, ends: [] };
     const partner = edge[end === 'source' ? 'target' : 'source'];
-    group.ends.push({ edge, end, at: horizontal ? edge[end].x : edge[end].y, aim: horizontal ? partner.x : partner.y }); seats.set(key, group);
+    // Order a fan by direction at this block. A faraway partner may be lower
+    // on screen but have a shallower angle than its much closer neighbour.
+    const dx = partner.x - (block.rect.x + block.rect.width / 2);
+    const dy = partner.y - (block.rect.y + block.rect.height / 2);
+    const outward = side === 'right' ? dx : side === 'left' ? -dx : side === 'bottom' ? dy : -dy;
+    group.ends.push({ edge, end, at: horizontal ? edge[end].x : edge[end].y, aim: Math.atan2(horizontal ? dx : dy, outward) });
+    seats.set(key, group);
   }
   for (const { block, side, ends } of seats.values()) {
     const horizontal = side === 'top' || side === 'bottom', start = horizontal ? block.rect.x : block.rect.y;
     const length = horizontal ? block.rect.width : block.rect.height;
     ends.sort((a, b) => a.aim - b.aim || a.edge.edge.edgeId.localeCompare(b.edge.edge.edgeId) || a.end.localeCompare(b.end));
-    const { offsets } = assignSeats(ends.length, length, PORT_SEAT, ends.map(end => end.at - start));
-    ends.forEach((item, i) => { item.edge[item.end] = portPoint(block.rect, side, start + offsets[i]); });
+    const local = ends.filter(item => item.edge.scope === 'internal');
+    const secondary = ends.filter(item => item.edge.scope !== 'internal');
+    const offsets = assignSeats(local.length, length, spacing, local.map(item => item.at - start)).offsets;
+    const available = secondary.length ? fitAroundReserved(secondary.map(item => item.at - start), length, offsets, spacing) : [];
+    const attach = (item: typeof ends[number], offset: number) => {
+      const { edge, end } = item, old = edge[end], next = portPoint(block.rect, side, start + offset);
+      edge[end] = next;
+      if (edge.freeEnd) {
+        const free = edge[edge.freeEnd];
+        edge[edge.freeEnd] = { x: free.x + (next.x - old.x), y: free.y + (next.y - old.y) };
+        edge.route = makeStubRoute(edge.source, edge.target);
+      }
+    };
+    local.forEach((item, i) => attach(item, offsets[i]));
+    secondary.forEach((item, i) => attach(item, available[i]));
   }
 
   const route = (edge: RenderEdge): EdgeRoute => {
     const c = context(edge);
-    const result = routeAroundObstacles(edge.source, edge.target, edge.sourceSide, edge.targetSide, c.obstacles, 8, c.terminals, c.constraint);
+    const result = routeAroundObstacles(edge.source, edge.target, edge.sourceSide, edge.targetSide,
+      c.obstacles, 8, c.terminals, c.constraint, {}, edge.edge.routeStyle);
     if (result.fallback) return result;
     // Boundary crossings describe the resulting curve. They never force it to
     // visit arbitrary coordinates or depend on an edge's identifier.

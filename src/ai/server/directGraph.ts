@@ -1,7 +1,7 @@
 import { graphQueryRead } from './graphQueryRead';
-import { SUBGRAPH_EDGE_TOOLS } from './graphQueries';
+import { SUBGRAPH_EDGE_TOOLS, usesCardSearch } from './graphQueries';
 import type { GraphReadContext } from './graphReadContext';
-import { enhancedSearch, validateNodeSearch, nodeSearchMatches, assertDesignQuery, graphQueryKey, graphQueryVersion, currentGraphQueryHashes, type GraphQuery } from './graphQueries';
+import { enhancedSearch, searchMatches, bodyRangeQuery, isBodyRangeQuery, graphQueryDependency, validateNodeSearch, nodeSearchMatches, assertDesignQuery, graphQueryKey, graphQueryVersion, currentGraphQueryHashes, type GraphQuery } from './graphQueries';
 import { createHash, randomUUID } from 'node:crypto';
 import { frozenReadRevoked, frozenPageRevoked, rememberReadPage } from './readVisibility';
 import { inheritedReadScope } from './inheritedReadScope';
@@ -12,23 +12,23 @@ import { AUTO_CONTEXT } from '../contextState';
 import { canvasMemberIds } from '../canvasScope';
 import { canvasIndex, type CanvasIndex } from './canvasView';
 import { estimateTokens } from '../tokens';
-import { requireValue } from './errors';
+import { CanvasObjectsUnavailable, requireValue } from './errors';
 import { directReadBudgets, readCapacityReceipt, frozenPageCapacityReceipt } from './directReadBudget';
-import { READ_FORMAT_VERSION, readCoverage, readKind, pageCoverage, type CoverageReason } from './readCoverage';
-import { graphTables } from './graphReadTables';
+import { FROZEN_GRAPH_PAGE_STATUS, READ_FORMAT_VERSION, readCoverage, readKind, pageCoverage, type CoverageReason } from './readCoverage';
+import { graphFieldVersion, graphTables } from './graphReadTables';
 import { graphPaginator } from './graphPagination';
 import { repeatReadNotice } from './readRepetition';
 import { fittingTextEnd } from './textSlicePacking';
 import { captureRelationHashes, currentRelationHashes, relationCardHashes, relationDependency } from './graphRelationDependencies';
 import { bindSubgraphVersions, subgraphFacts, subgraphVersion, subgraphDependency, subgraphKey, captureSubgraphHashes, equivalentSubgraphVersion } from './subgraphVersions';
 import { GRAPH_READ_LIMITS, checkGraphReadSource, checkFrozenStorage, resourceLimit } from './graphReadLimits';
-import { directoryTree, directoryCard, childDirectories } from './directoryRead';
-import { treeListBranch, type TreeListBranch } from './treeExpansion';
+import { directoryTree, directoryCard, directoryListBranch, directoryMetadata, childDirectories } from './directoryRead';
+import type { TreeListBranch } from './treeExpansion';
 import { graphField, fieldReadWith, GRAPH_FIELDS, type GraphField } from './graphReadFields';
 import { captureGraphReadHashes, frozenGraphReadHashes, GRAPH_READ_DEPENDENCIES_VERSION,
   graphReadDependenciesCurrent, rememberGraphReadHashes } from './graphReadDependencies';
 import { attachFrozenDirectoryEvidence, directoryReplayRequest, graphReadUsage } from './directoryEvidence';
-import { rememberCanvasRead, stampCanvasObservation, stampCanvasVersionDependencies } from './canvasReadEvidence';
+import { canvasField, rememberCanvasRead, stampBodyRanges, stampCanvasObservation, stampCanvasVersionDependencies, stampDisplayedCanvasFields } from './canvasReadEvidence';
 
 export const digest = (value: unknown) => createHash('sha256').update(JSON.stringify(value) ?? 'null').digest('hex');
 const key = (canvas: string, directory: string) => `${canvas}/${directory}`;
@@ -71,18 +71,14 @@ export function objectStamp(index: CanvasIndex, ref: string): string | undefined
   const edge = graphTables(index).edges.get(ref);
   return edge ? digest(edge) : undefined;
 }
-export function membershipStamp(index: CanvasIndex, ref: string, directoriesOnly = false): string | undefined {
+export function membershipStamp(index: CanvasIndex, ref: string, directoriesOnly = false, previous?:string): string | undefined {
   const row = index.rows.get(ref); if (!row) return;
-  return digest(sorted(row.children.filter(id => directoriesOnly ? index.rows.get(id)?.kind !== 'node' : index.rows.get(id)?.kind === 'node'))
-    .map(id => [id, index.rows.get(id)?.segments.at(-1)?.name, index.rows.get(id)?.kind]));
+  const ids=sorted(row.children.filter(id => directoriesOnly ? index.rows.get(id)?.kind !== 'node' : index.rows.get(id)?.kind === 'node'));
+  if(previous!==undefined && !previous.startsWith('members:2:'))
+    return digest(ids.map(id=>[id,index.rows.get(id)?.segments.at(-1)?.name,index.rows.get(id)?.kind]));
+  return 'members:2:'+digest(ids.map(id=>[id,index.rows.get(id)?.kind]));
 }
-export function searchMatches(index: CanvasIndex, query: string, scope: 'all' | 'node_names' = 'all') {
-  const terms = query.toLowerCase().trim().split(/\s+/).filter(Boolean);
-  if (scope === 'node_names') return [...index.rows.values()].filter(r => r.kind === 'node' && r.readable
-    && terms.some(t => r.segments.at(-1)!.name.toLowerCase().includes(t))).map(r => r.id).sort();
-  return [...index.rows.values()].filter(r => r.kind !== 'root' && terms.some(t => `${r.segments.at(-1)?.name}\n${r.content}\n${JSON.stringify(index.graph.nodes[r.id]?.design ?? '')}`.toLowerCase().includes(t)))
-    .map(r => r.id).concat(index.edges.filter(e=>terms.some(t=>e.edgeContent.toLowerCase().includes(t))).map(e=>e.edgeId)).sort();
-}
+export {searchMatches} from './graphQueries';
 export function observe(state: AppSnapshot, task: Task, index: CanvasIndex, refs: string[], completeDirectories: string[] = [], structureOnly = false, query?: string, queryScope?: 'all' | 'node_names', graphQuery?: GraphQuery): Observation {
   const dirs = new Set<string>(completeDirectories);
   for (const ref of refs) { const row = index.rows.get(ref); if (row) dirs.add(row.kind === 'node' ? row.parentId ?? index.rootId : ref);
@@ -105,6 +101,13 @@ export function observe(state: AppSnapshot, task: Task, index: CanvasIndex, refs
     readHashes:{...(structureOnly?captureSubgraphHashes(index,refs,'directory'):captureGraphReadHashes(index.graph,sources,completeDirectories,index.canvasId)),...(graphQuery?{[graphQueryKey(index.canvasId,graphQuery)]:graphQueryVersion(index,graphQuery)}:{})} };
   stampCanvasVersionDependencies(index,observation);return observation;
 }
+/** Directory navigation certifies displayed cards and presence flags, without reading node bodies. */
+export function observeDirectoryDisplay(state:AppSnapshot,task:Task,index:CanvasIndex,refs:string[],complete:string[],data:unknown) {
+  const observation=observe(state,task,index,refs,complete,true);
+  observation.sources=[];
+  stampDisplayedCanvasFields(index,observation,data);
+  return observation;
+}
 export function observationChange(state: AppSnapshot, observation: Observation, context?: GraphReadContext) {
   if (!state.graph?.canvases.some(c => c.canvasId === observation.canvasId)) return { signature: 'deleted', changes: [{ deleted: true }] };
   const index = graphIndex(state, observation.canvasId, context);
@@ -118,7 +121,7 @@ export function observationChange(state: AppSnapshot, observation: Observation, 
         nextAction:'read_if_current_version_needed',readWith:{tool:'graph_read',arguments:{refs:[refId]}}});
     }
     for(const [refId,stamp] of Object.entries(observation.directoryMembers??{})){
-      const currentVersion=membershipStamp(index,refId,observation.structureOnly);
+      const currentVersion=membershipStamp(index,refId,observation.structureOnly,stamp);
       if(currentVersion!==stamp)changes.push({kind:'directory',refId,...(currentVersion?{membersChanged:true,currentVersion}:{deleted:true}),
         readWith:{tool:observation.structureOnly?'graph_read_directory':'graph_read_subgraph',arguments:refId===index.rootId?{}:{refId}}});
     }
@@ -126,11 +129,20 @@ export function observationChange(state: AppSnapshot, observation: Observation, 
       changes.push({kind:'path',refId,...(index.rows.has(refId)?{currentPath:path(index,refId)}:{deleted:true})});
     const current=currentRelationHashes(index.graph,Object.keys(observation.readHashes??{}),context);
     for(const [key,stamp] of Object.entries(observation.readHashes??{})){
+      const range=graphQueryDependency(key)?.query;
+      if(range&&isBodyRangeQuery(range)&&current[key]!==stamp){
+        const {refId,field,start,end}=range.arguments;
+        const fact=observation.canvasFacts?.find(f=>f.refId===refId&&f.field===field&&f.start===start&&f.end===end);
+        changes.push({kind:'direct_data',refId,part:'field:'+field,...(fact?{fact}:{}),
+          ...(current[key]?{changed:true,currentVersion:current[key]}:{deleted:true})});
+        continue;
+      }
       const group=subgraphDependency(key);
       if(group&&!equivalentSubgraphVersion(current[key],stamp)){changes.push({kind:['directory','path','owner'].includes(group.part)?'directory_data':'direct_data',refId:group.refId,
         part:group.part,...(current[key]?{changed:true,currentVersion:current[key]}:{deleted:true}),
         ...(group.part==='directory'&&index.rows.has(group.refId)?{replacement:directoryCard(index,group.refId),replaces:'previous_directory_entry_and_children'}:{}),
-        readWith:index.rows.has(group.refId)&&['name','design'].includes(group.part)?fieldReadWith(index,group.refId,group.part as GraphField):index.rows.get(group.refId)?.kind==='node'?{tool:'graph_read',arguments:{refs:[group.refId]}}:
+        readWith:group.part==='body'?{tool:index.rows.get(group.refId)?.kind==='node'?'graph_read_node_content':'graph_read_directory_content',arguments:{refId:group.refId,current:true}}:
+          index.rows.has(group.refId)&&['name','design'].includes(group.part)?fieldReadWith(index,group.refId,group.part as GraphField):index.rows.get(group.refId)?.kind==='node'?{tool:'graph_read',arguments:{refs:[group.refId]}}:
           {tool:['directory','path','owner'].includes(group.part)?'graph_read_directory':'graph_read_subgraph',arguments:group.refId===index.rootId?{}:{refId:group.refId}}});continue;}
       const relation=relationDependency(key);if(!relation||current[key]===stamp)continue;
       changes.push({kind:'relations',refId:relation.refId,...(current[key]?{changed:true,currentVersion:current[key]}:{deleted:true}),
@@ -164,8 +176,9 @@ function graphPageSources(index:CanvasIndex,page:unknown){
   visit(page);return [...refs].flatMap(id=>{const s=graphTables(index).source(id);return s?[spans.has(s.id)?{...s,...spans.get(s.id)}:s]:[];});
 }
 export function directGraphRead(state:AppSnapshot,task:Task,call:ToolCallRecord,args:Record<string,unknown>,projectField?:(value:unknown)=>unknown):Record<string,unknown> {
+  if(call.name==='graph_search'&&usesCardSearch(args))return graphQueryRead(state,task,call,args);
   state=inheritedReadScope(state,task);
-  if(SUBGRAPH_EDGE_TOOLS.has(call.name))return graphQueryRead(state,task,call,args);
+  if(call.name==='graph_read_dependencies'||SUBGRAPH_EDGE_TOOLS.has(call.name))return graphQueryRead(state,task,call,args);
   const index=graphIndex(state,task.canvasId), workspace=state.workspaces.find(w=>w.id===task.workspaceId)!;
   const limits=directReadBudgets(state,task,call,args.budget),{pageBudget:budget,availableTokens,maximumTokens}=limits;
   const target=typeof args.refId==='string'?args.refId:index.rootId;
@@ -182,6 +195,7 @@ export function directGraphRead(state:AppSnapshot,task:Task,call:ToolCallRecord,
   let refs=!subgraph&&Array.isArray(args.refs)?args.refs as string[]:[];
   requireValue(refs.every(id=>id!==index.rootId),'根目录请通过目录函数省略refId读取','ROOT_READ_ONLY');
   const failedRefs=refs.filter(id=>!index.rows.has(id)&&!index.edges.some(e=>e.edgeId===id));
+  if(call.name==='graph_read'&&failedRefs.length)throw new CanvasObjectsUnavailable(failedRefs);
   requireValue(!failedRefs.length,'对象不属于当前读取范围','OUT_OF_SCOPE',
     {failedRefs,executed:false,nextAction:'retry_with_in_scope_refs'});
   const searchScope=args.scope??'all';
@@ -189,7 +203,7 @@ export function directGraphRead(state:AppSnapshot,task:Task,call:ToolCallRecord,
     requireValue(searchScope==='all'||searchScope==='node_names','scope必须为all或node_names','INVALID_ARGUMENT');
     requireValue(args.limit===undefined||Number.isInteger(args.limit)&&Number(args.limit)>=0,'limit必须为非负整数','INVALID_ARGUMENT');
   }
-  const graphQuery:GraphQuery|undefined=call.name==='graph_search'&&enhancedSearch(args)?{tool:call.name,arguments:{...args}}:undefined;
+  const graphQuery:GraphQuery|undefined=call.name==='graph_search'&&args.scope==='node_names'&&enhancedSearch(args)?{tool:call.name,arguments:{...args}}:undefined;
   if(graphQuery){validateNodeSearch(index,args);if(args.designTypes!==undefined)assertDesignQuery(state,task);}
   const matches=call.name==='graph_search'?(graphQuery?nodeSearchMatches(index,args as any):searchMatches(index,String(args.query??''),searchScope as 'all'|'node_names')):[];
   if(call.name==='graph_search') refs=matches.slice(0,Math.min(50,Number(args.limit??12)));
@@ -204,15 +218,25 @@ export function directGraphRead(state:AppSnapshot,task:Task,call:ToolCallRecord,
       {executed:false,reason:'range_field_conflict'});
     requireValue(args.start!==undefined&&args.end!==undefined,'正文范围读取须同时提供start和end。','INVALID_ARGUMENT',
       {executed:false,reason:'paired_range_required'});
-    requireValue(typeof args.expectedVersion==='string','正文范围读取须保留原读取入口的expectedVersion。','INVALID_ARGUMENT',
+    requireValue(args.current===true||typeof args.expectedVersion==='string','正文补读须保留已见范围版本；读当前范围可指定current:true。','INVALID_ARGUMENT',
       {executed:false,reason:'expected_version_required'});
     requireValue(Number.isSafeInteger(args.start)&&Number.isSafeInteger(args.end)&&Number(args.start)>=0&&Number(args.end)>=Number(args.start),
       'start/end须为UTF-16偏移整数，满足0≤start≤end。','INVALID_ARGUMENT',{executed:false,reason:'invalid_range'});
   }
   if((isBodyRead(call.name)||call.name==='graph_read_object_field')&&args.expectedVersion!==undefined){
-    const currentVersion=call.name==='graph_read_object_field'&&GRAPH_FIELDS.includes(args.field as GraphField)?graphField(index,target,args.field as GraphField).version:tables.source(target)?.version;
-    requireValue(currentVersion===args.expectedVersion,'对象已变化，不能用新版补齐旧冻结结果；需要当前版本时重新读取对象。','VERSION_CONFLICT',
-      {failedRefs:[target],expectedVersion:args.expectedVersion,currentVersion,executed:false,nextAction:'reread_current_object',readWith:{tool:'graph_read',arguments:{refs:[target]}}});
+    const field=call.name==='graph_read_object_field'&&GRAPH_FIELDS.includes(args.field as GraphField)?graphField(index,target,args.field as GraphField):undefined;
+    const recordVersion=tables.source(target)?.version;
+    const bodyField=String(args.field??'content'),bodyValue=canvasField(index,target,bodyField);
+    const bodyVersion=typeof bodyValue==='string'?graphFieldVersion(target,bodyField,bodyValue):undefined;
+    const rangeVersion=rangeRead?graphQueryVersion(index,bodyRangeQuery(target,bodyField,Number(args.start),Number(args.end))):undefined;
+    const currentVersion=field?.version??rangeVersion??bodyVersion;
+    // An already-issued legacy handle still checks its original whole-object fence.
+    const legacyMatches=field&&typeof args.expectedVersion==='string'&&/^[a-f0-9]{64}$/.test(args.expectedVersion)
+      &&digest([tables.source(target)?.version,args.field,field.value])===args.expectedVersion;
+    requireValue(currentVersion===args.expectedVersion||legacyMatches||(!field&&(recordVersion===args.expectedVersion||bodyVersion===args.expectedVersion)),'补读入口已变化；需要当前内容时，按原范围另开快照。','VERSION_CONFLICT',
+      {failedRefs:[target],expectedVersion:args.expectedVersion,currentVersion,executed:false,nextAction:'reread_current_object',
+        readWith:{tool:call.name,arguments:{refId:target,...(args.field!==undefined?{field:args.field}:{}),...(rangeRead?{start:args.start,end:args.end}:{}),
+          ...(args.budget!==undefined?{budget:args.budget}:{}),current:true}}});
   }
   if(rangeRead){
     const row=index.rows.get(target);
@@ -230,9 +254,10 @@ export function directGraphRead(state:AppSnapshot,task:Task,call:ToolCallRecord,
     const invalid=requestedRefs.filter(id=>!index.rows.has(id)||index.rows.get(id)!.kind!=='node');
     requireValue(!invalid.length,'关联边查询含不在当前画布内的节点，整次未执行','OUT_OF_SCOPE',{failedRefs:invalid,requestedRefs,executed:false});
     const conflicts=requests.filter(r=>r.expectedRelationVersion!==undefined&&r.expectedRelationVersion!==tables.relationVersion(r.refId));
-    requireValue(!conflicts.length,'关联边集合已变化，整次未执行；请重读冲突节点取得当前关系入口','VERSION_CONFLICT',
+    requireValue(!conflicts.length,'关联边集合已变化，整次未执行；需要当前关系时按原节点范围另开快照。','VERSION_CONFLICT',
       {failedRefs:[...new Set(conflicts.map(r=>r.refId))],requestedRefs,executed:false,
-        conflicts:conflicts.map(r=>({refId:r.refId,currentRelationVersion:tables.relationVersion(r.refId)})),nextAction:'reread_node_relations'});
+        conflicts:conflicts.map(r=>({refId:r.refId,currentRelationVersion:tables.relationVersion(r.refId)})),nextAction:'reread_node_relations',
+        readWith:{tool:call.name,arguments:{...(args.requests?{requests:requestedRefs.map(refId=>({refId}))}:{refId:target}),...(args.budget!==undefined?{budget:args.budget}:{}),current:true}}});
     refs=requestedRefs;
   }
   if(call.name==='graph_neighbors')refs=[...new Set([...refs,...seeds.flatMap(id=>tables.related(id)).flatMap(e=>[e.sourceNodeId,e.targetNodeId]).filter(id=>index.rows.has(id))])];
@@ -240,7 +265,7 @@ export function directGraphRead(state:AppSnapshot,task:Task,call:ToolCallRecord,
     ?Object.fromEntries(Object.entries(value).sort(([a],[b])=>a.localeCompare(b)).map(([k,v])=>[k,canonical(v)])):value;
   const queryArgs={...(call.name==='graph_read_node_edges'?{requests:refs.map(refId=>({refId}))}:args),
     budget:args.budget??AUTO_CONTEXT.readTokens,...(call.name==='graph_search'?{scope:searchScope}:{}),...(subgraph?{refs:targets,refId:undefined,mode:undefined}:directory?{refId:target,mode:args.mode??'recursive'}:{})};
-  const queryKey=digest([call.name,canonical(queryArgs),'directory-batch-pages-v8-tree-envelope',...(projectField?['field-short-references-v1']:[]),...(countOnly?['count-only-complete-v1']:[])]);
+  const queryKey=digest([call.name,canonical(queryArgs),'directory-batch-pages-v8-tree-envelope',...(call.name==='graph_read_node_content'?['body-only-v2']:[]),...(projectField?['field-short-references-v1']:[]),...(countOnly?['count-only-complete-v1']:[])]);
   const recentPointers=new Set(state.toolCalls.filter(c=>c.taskId===task.id&&c.id!==call.id&&c.presentedAt!==undefined).slice(-8)
     .flatMap(c=>{try{const result=JSON.parse(c.result??'{}');return result.status==='ok'&&typeof result.pointerId==='string'?[result.pointerId]:[];}catch{return [];}}));
   // Repeated live queries must not keep an ever-growing family protected forever.
@@ -248,6 +273,7 @@ export function directGraphRead(state:AppSnapshot,task:Task,call:ToolCallRecord,
   // frozen snapshot. Explicit context_read_pages still addresses the old snapshot.
   const recentGroups=completedContextGroups(state,task),recentSteps=new Set(recentGroups.slice(-AUTO_CONTEXT.recentGroups).map(g=>g.id));
   const previous=workspace.frozenReads?.find(r=>r.taskId===task.id&&r.canvasId===task.canvasId&&r.queryKey===queryKey&&recentPointers.has(r.id)
+    &&r.sources.every(s=>tables.source(s.id)?.version===s.version)
     &&(!recentGroups.length||recentSteps.has(state.toolCalls.find(c=>c.id===r.callId)?.stepId??''))
     &&!frozenReadRevoked(state,r)&&!r.pages.some((_,i)=>frozenPageRevoked(state,r.id,i+1))&&r.readFormatVersion===READ_FORMAT_VERSION&&r.coverage&&r.expiresAt>Date.now()+60000&&!observationChange(state,r.snapshotObservation??r.observation).changes.length&&graphReadDependenciesCurrent(index.graph,r));
   if(previous){
@@ -263,6 +289,7 @@ export function directGraphRead(state:AppSnapshot,task:Task,call:ToolCallRecord,
     if(repeatNotice&&estimateTokens(JSON.stringify({...result,repeatNotice}))<=availableTokens)Object.assign(result,{repeatNotice});
     const observation=structuredClone(previous.pageObservations?.[0]??previous.observation);observation.id=`observation:${randomUUID()}`;observation.callId=call.id;
     stampCanvasObservation(index,observation,data);
+    if(call.name==='graph_read_node_content'||call.name==='graph_read_directory_content')stampBodyRanges(index,observation);
     (workspace.observations??=[]).push(observation);call.resultSources=sources;
     rememberReadPage(call,previous.id,1,frozenGraphReadHashes(previous,1));
     attachFrozenDirectoryEvidence(call,previous,1);
@@ -275,8 +302,8 @@ export function directGraphRead(state:AppSnapshot,task:Task,call:ToolCallRecord,
   const pointerId=`read:${randomUUID()}`;
   // Measure the actual wire envelope and provenance. The continuation/stale envelope is the largest.
   const frame=(data:Record<string,unknown>,page=99999999,totalPages=99999999)=>({status:'partial',pointerId,page,totalPages,hasMorePages:page<totalPages,isLastPage:page===totalPages,data,
-    coverage:pageCoverage(readCoverage(readKind(call.name),['pagination','oversized_object','relations_deferred',...(recursive?['directory_boundary' as const]:[]),...(searchLimited?['search_limit' as const]:[])]),2),...(selection?{selection}:{}),freshness:'unknown',stale:true,
-    notice:'这是冻结版本的原文，可用于历史比较；仅需当前版本时重新读取。',sources:graphPageSources(index,data),nextCursor:{pointerId,page:page+1},
+    coverage:pageCoverage(readCoverage(readKind(call.name),['pagination','oversized_object','relations_deferred',...(recursive?['directory_boundary' as const]:[]),...(searchLimited?['search_limit' as const]:[])]),2),...(selection?{selection}:{}),...FROZEN_GRAPH_PAGE_STATUS,
+    sources:graphPageSources(index,data),nextCursor:{pointerId,page:page+1},
     ...(subgraph?{requestedRefs:targets}:{})});
   const fits=(data:Record<string,unknown>)=>estimateTokens(JSON.stringify(frame(data)))<=budget;
   const edgeIds=(ids:string[])=>sorted([...new Set(ids.flatMap(id=>tables.edges.has(id)?[id]:tables.related(id).map(e=>e.edgeId)))]);
@@ -289,13 +316,12 @@ export function directGraphRead(state:AppSnapshot,task:Task,call:ToolCallRecord,
         return {kind:'directory_tree',scope,...(parentId?{parentId}:{}),tree,
           listReadWith:{tool:'graph_read_directory',arguments:{...(scope===index.rootId?{}:{refId:scope}),mode:'children'}}};
       };
-      const result=directoryTree(index,target,tree=>fits(wrap(tree)),(id,ids,rows)=>treeListBranch(id,ids,rows,budget,
-        items=>({kind:'directory_children',scope:id,directoryVersion:subgraphVersion(index,id,'directory'),listOnly:true,totalChildren:ids.length,items}),fits));
+      const result=directoryTree(index,target,tree=>fits(wrap(tree)),(id,ids,rows)=>directoryListBranch(index,id,ids,rows,budget,fits));
       directoryBranches.push(...result.branches);
       pages.push(wrap(result.tree));seen.push(...result.refs);complete.push(...result.shown);boundaries.push(...result.omitted);
     }else{
       const ids=childDirectories(index,target);resourceLimit(ids.length<=GRAPH_READ_LIMITS.objects,'objects');
-      put(ids.map(id=>directoryCard(index,id)),call.name,target,[],{directoryVersion:subgraphVersion(index,target,'directory'),listOnly:true});
+      put(ids.map(id=>directoryCard(index,id)),call.name,target,[],{...directoryMetadata(index,target),listOnly:true});
       seen.push(target,...ids);complete.push(target);
     }
   }else if(subgraph){
@@ -316,7 +342,8 @@ export function directGraphRead(state:AppSnapshot,task:Task,call:ToolCallRecord,
     for(const branch of paginator.branches)for(const page of branch.pages){const origin=(page.query as {origin?:{page:number}})?.origin;if(origin)origin.page=positions.get(origin.page)!;}
   }else if(call.name==='graph_read_object_field'){
     requireValue(GRAPH_FIELDS.includes(args.field as GraphField),'field必须为name、path或design','INVALID_ARGUMENT');
-    const field=args.field as GraphField,value=graphField(index,target,field);checkGraphReadSource(index,[target],[]);
+    const field=args.field as GraphField,value=graphField(index,target,field);
+    resourceLimit(Buffer.byteLength(value.content)<=GRAPH_READ_LIMITS.sourceBytes,'sourceBytes');
     // Project structural JSON before slicing: aliases must not alter frozen offsets,
     // and user-authored name/pros/cons strings must never be rewritten.
     if(value.encoding==='json'&&projectField)value.content=JSON.stringify(projectField(JSON.parse(value.content)));
@@ -328,15 +355,12 @@ export function directGraphRead(state:AppSnapshot,task:Task,call:ToolCallRecord,
   }else if(call.name==='graph_read_node_content'||call.name==='graph_read_directory_content'){
     const nodeContent=call.name==='graph_read_node_content',row=index.rows.get(target);
     requireValue(row?.readable&&row.kind!=='root'&&(nodeContent?row.kind==='node':row.kind!=='node'),nodeContent?'需要当前画布节点':'需要当前画布内的子图或图文档','OUT_OF_SCOPE');
-    checkGraphReadSource(index,[target],[]);
     const design=nodeContent?index.graph.nodes[target]?.design:undefined;
     requireValue(args.field===undefined||nodeContent&&design?.type==='combination'&&['pros','cons'].includes(String(args.field)),'只有组合可单独读取优缺点；方案的评价请读取正文');
     const field=args.field as 'pros'|'cons'|undefined;
     const content=field?design?.[field]??'':index.rows.get(target)!.content;let offset=Number(args.start??0);const rangeEnd=Number(args.end??content.length);
-    const location=tables.path(target);
-    const metadata={refId:target,...(field?{field}:{}),...(!nodeContent?{kind:'directory'}:{}),...(nodeContent?{
-      ...(JSON.stringify(location).length<=512?{path:location}:{pathReadWith:fieldReadWith(index,target,'path')}),relations:tables.relations(target)}:{}),
-      ...(design&&!field?{design:{type:design.type},designReadWith:fieldReadWith(index,target,'design')}:{})};
+    resourceLimit(Buffer.byteLength(content.slice(offset,rangeEnd))<=GRAPH_READ_LIMITS.sourceBytes,'sourceBytes');
+    const metadata={refId:target,...(field?{field}:{}),...(!nodeContent?{kind:'directory'}:{})};
     while(offset<rangeEnd){
       const part=(end:number)=>({...metadata,content:content.slice(offset,end),start:offset,end,contentLength:content.length});
       const end=fittingTextEnd(content.slice(0,rangeEnd),offset,budget,end=>fits(part(end)));
@@ -346,7 +370,8 @@ export function directGraphRead(state:AppSnapshot,task:Task,call:ToolCallRecord,
   }else if(call.name==='graph_read_node_edges'){
     const nodes=refs.map(refId=>({refId,kind:'node',relations:{totalEdges:tables.related(refId).length,version:tables.relationVersion(refId)}}));
     const ids=edgeIds(refs);
-    checkGraphReadSource(index,refs,ids);
+    resourceLimit(refs.length+ids.length<=GRAPH_READ_LIMITS.objects,'objects');
+    checkGraphReadSource(index,[],ids);
     pages.push(...paginator.edgePages(ids,refs.length===1?refs[0]:index.rootId,{kind:'all_incident_edges',requestedRefs:refs,totalEdges:ids.length},nodes));
   }else if(countOnly){
     // Completing a count is not reading any matching object or relation. Keep
@@ -362,17 +387,21 @@ export function directGraphRead(state:AppSnapshot,task:Task,call:ToolCallRecord,
   const coverage=readCoverage(readKind(call.name),reasons);
   const full=!recursive&&pages.length===1&&coverage.extent==='full';
   const pageSources=pages.map(page=>graphPageSources(index,page));
+  const deferredPathRefs=new Set<string>();
   const result={status:boundaries.length||first.status==='blocked'?'partial':'ok',pointerId,page:1,totalPages:pages.length,hasMorePages:pages.length>1,isLastPage:pages.length===1,
     coverage:pageCoverage(coverage,pages.length,first.status==='blocked'),freshness:'current',stale:false,data:first,sources:pageSources[0],...(!recursive&&pages.length>1?{nextCursor:{pointerId,page:2}}:{}),...(selection?{selection}:{}),
     ...(subgraph?{requestedRefs:targets}:{})};
   const requiredTokens=estimateTokens(JSON.stringify(result));
   if(requiredTokens>availableTokens)return readCapacityReceipt(call,args,availableTokens,requiredTokens,{limits});
+  const scopeTotals=new Map<string,number>(),scopePositions=new Map<string,number>();
+  if(subgraph)for(const page of pages)if(typeof page.scope==='string')scopeTotals.set(page.scope,(scopeTotals.get(page.scope)??0)+1);
   const pageObservations=pageSources.map((sources,i)=>{
     const rows=[pages[i],...((pages[i].items??[]) as Record<string,unknown>[]),...((pages[i].endpoints??[]) as Record<string,unknown>[])];
     const metadataRef=rows.filter(r=>(r===pages[i]||r.relations)&&typeof r.refId==='string'&&index.rows.has(r.refId)).map(r=>r.refId as string);
     const pageScope=typeof pages[i].scope==='string'?pages[i].scope as string:undefined;
     const directoryRefs=directoryTool?(recursive?seen:[target,...((pages[i].items??[]) as Record<string,unknown>[]).map(v=>String(v.refId))]):[];
     const scopes=subgraph&&pageScope?[pageScope]:[];
+    const completeScopes=scopes.filter(id=>scopeTotals.get(id)===1);
     const o=observe(state,task,index,[...new Set([...directoryRefs,...metadataRef,...sources.map(s=>s.id)])],recursive?complete:full&&directory?[target]:[],directoryTool,call.name==='graph_search'&&typeof args.query==='string'?args.query:undefined,searchScope as 'all'|'node_names',graphQuery);
     if(!directoryTool){
       // Relation cards, blocked objects and endpoints are identities, not body reads.
@@ -382,24 +411,43 @@ export function directGraphRead(state:AppSnapshot,task:Task,call:ToolCallRecord,
       const paths=new Set(rows.flatMap(row=>Array.isArray(row.path)?row.path.flatMap(p=>p&&typeof p.refId==='string'?[p.refId]:[]):[]));
       o.paths=Object.fromEntries(Object.entries(o.paths).filter(([ref])=>paths.has(ref)));
     }
-    if(subgraph&&pageScope){o.directories[pageScope]=directoryStamp(state,index,pageScope);o.directoryMembers![pageScope]=membershipStamp(index,pageScope)!;o.paths={};}
-    o.sources=sources;o.readHashes={...captureGraphReadHashes(index.graph,sources,scopes,index.canvasId),
+    if(subgraph&&pageScope){
+      o.paths={};o.completeDirectories=completeScopes;
+      o.directoryMembers=Object.fromEntries(completeScopes.map(id=>[id,membershipStamp(index,id)!]));
+      const part=(scopePositions.get(pageScope)??0)+1;scopePositions.set(pageScope,part);
+      o.memberListPage={refId:pageScope,part,total:scopeTotals.get(pageScope)!,version:subgraphVersion(index,pageScope,'members')!};
+    }
+    o.sources=sources;o.readHashes={...captureGraphReadHashes(index.graph,sources,completeScopes,index.canvasId),
       ...captureSubgraphHashes(index,directoryRefs,'directory'),
       ...relationCardHashes(index.canvasId,pages[i]),
       ...captureRelationHashes(index,call.name==='graph_read_node_edges'?refs:call.name==='graph_neighbors'?seeds:[]),...(graphQuery?{[graphQueryKey(index.canvasId,graphQuery)]:graphQueryVersion(index,graphQuery)}:{})};
+    if(!directoryTool){
+      for(const row of rows){
+        if(typeof row.refId==='string'&&row.pathReadWith)deferredPathRefs.add(row.refId);
+      }
+      // A source can supply a body or a field continuation without displaying its location.
+      for(const source of sources)if(!Object.hasOwn(o.paths,source.id))
+        delete o.readHashes[subgraphKey(index.canvasId,source.id,'path')];
+    }
     if(subgraph){
       for(const key of Object.keys(o.readHashes))if(subgraphDependency(key)?.part==='path')delete o.readHashes[key];
-      Object.assign(o.readHashes,captureSubgraphHashes(index,sources.filter(s=>s.kind==='node').map(s=>s.id),'owner'),captureSubgraphHashes(index,scopes,'content'));
+      Object.assign(o.readHashes,captureSubgraphHashes(index,sources.filter(s=>s.kind==='node').map(s=>s.id),'owner'));
+      if(typeof (pages[i].subgraph as {name?:string}|undefined)?.name==='string')
+        Object.assign(o.readHashes,captureSubgraphHashes(index,scopes,'name'));
     }
-    if(call.name==='graph_read_object_field'){
-      Object.assign(o.readHashes,captureSubgraphHashes(index,[target],args.field as GraphField));
+    if(call.name==='graph_read_node_content'||call.name==='graph_read_directory_content'){
+      o.objects={};o.paths={};o.contentLengths={};o.directories={};o.objectParents={};o.readHashes={};
+    }else if(call.name==='graph_read_object_field'){
+      o.readHashes=captureSubgraphHashes(index,[target],args.field as GraphField);
       o.objects={};o.paths={};o.contentLengths={};o.directories={};
     }else{
       // A complete field in a fresh object also resolves an earlier field-only read.
       if(!directoryTool)Object.assign(o.readHashes,captureSubgraphHashes(index,rows.filter(r=>typeof r.refId==='string'&&typeof r.name==='string').map(r=>String(r.refId)),'name'));
       if(!isBodyRead(call.name))Object.assign(o.readHashes,captureSubgraphHashes(index,rows.filter(r=>typeof r.refId==='string'&&r.design!==undefined&&task.readHashes?.[subgraphKey(index.canvasId,r.refId,'design')]).map(r=>String(r.refId)),'design'));
     }
-    stampCanvasObservation(index,o,pages[i]);o.canvasPage={pointerId,page:i+1,totalPages:pages.length};if(i===0)o.callId=call.id;return o;
+    stampCanvasObservation(index,o,pages[i]);
+    if(call.name==='graph_read_node_content'||call.name==='graph_read_directory_content')stampBodyRanges(index,o);
+    o.canvasPage={pointerId,page:i+1,totalPages:pages.length};if(i===0)o.callId=call.id;return o;
   });
   const observation=pageObservations[0];
   const snapshotObservation=observe(state,task,index,[...new Set([...refs,...seen,...(directory?targets:isBodyRead(call.name)||call.name==='graph_read_object_field'?[target]:[]),...pageSources.flatMap(s=>s.map(r=>r.id))])],directoryTool?complete:subgraph?targets:[],directoryTool,call.name==='graph_search'&&typeof args.query==='string'?args.query:undefined,searchScope as 'all'|'node_names',graphQuery);
@@ -407,7 +455,10 @@ export function directGraphRead(state:AppSnapshot,task:Task,call:ToolCallRecord,
     snapshotObservation[field]=Object.assign({},...pageObservations.map(o=>o[field]));
   if(subgraph)snapshotObservation.paths={};
   snapshotObservation.sources=pageSources.flat();
-  snapshotObservation.readHashes=Object.assign({},...pageObservations.map(o=>o.readHashes));
+  // Rebuild obsolete continuation handles on a fresh read, without telling the
+  // model it saw an old path when the page contained only a handle.
+  snapshotObservation.readHashes=Object.assign({},...pageObservations.map(o=>o.readHashes),
+    captureSubgraphHashes(index,[...deferredPathRefs],'path'));
   // Aggregate versions describe the frozen query. Write dependencies remain the
   // actual delivered objects, memberships and relation sets, not every sibling.
   if(subgraph)Object.assign(snapshotObservation.readHashes!,captureSubgraphHashes(index,targets,'direct'));
@@ -427,7 +478,7 @@ export function directGraphRead(state:AppSnapshot,task:Task,call:ToolCallRecord,
     const branchObservation=observe(state,task,index,allRefs,[branch.parentId],true);branchObservation.sources=[];
     const observations=branch.pages.map(page=>{
       const ids=(page.items as Record<string,unknown>[]??[]).flatMap(row=>typeof row.refId==='string'?[row.refId]:[]);
-      const o=observe(state,task,index,[branch.parentId,...ids],[],true);o.sources=[];return o;
+      return observeDirectoryDisplay(state,task,index,[branch.parentId,...ids],[],page);
     });
     additions.push({id:branch.id,taskId:task.id,callId:call.id,canvasId:task.canvasId,kind:'graph_read_directory_children',pageBudget:budget,
       canvasOrigin:{version:1,tool:'graph_read_directory',arguments:{refId:branch.parentId,mode:'children',budget}},

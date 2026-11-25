@@ -1,0 +1,17 @@
+.canvas-granularity-panel{position:absolute;top:62px;z-index:160;display:grid;gap:10px;width:min(338px,92vw);max-height:68vh;overflow:auto;padding:13px;border:1px solid #54677c;border-radius:10px;background:#162331;color:#e1e9f3;box-shadow:0 8px 35px #0005;font-size:13px;user-select:text}
+.canvas-granularity-panel header,.granularity-actions,.canvas-granularity-panel li{display:flex;align-items:center;gap:7px}
+.canvas-granularity-panel header{justify-content:space-between}.canvas-granularity-panel header button{padding:4px}
+.canvas-granularity-panel select,.canvas-granularity-panel button{background:#25374a;color:inherit;border:1px solid #465b70;border-radius:5px;padding:4px 7px}
+.canvas-granularity-panel select{min-width:0;max-width:100%;width:100%}.canvas-granularity-panel button[aria-pressed=true]{background:#315975;border-color:#7ba4bf}
+.canvas-granularity-panel label{display:flex;gap:8px;align-items:center}.canvas-granularity-panel li label{flex:1;min-width:0}.canvas-granularity-panel small{display:block;opacity:.8;overflow-wrap:anywhere}
+.canvas-granularity-panel li{padding:7px 0;border-top:1px solid #37495a}.canvas-granularity-panel ul,.canvas-granularity-panel p{margin:0;padding:0}
+.canvas-granularity-panel :focus-visible{outline:2px solid #a5d9ef;outline-offset:1px}
+
+.granularity-object-select, .granularity-object-select::picker(select) { appearance: base-select; }
+.granularity-object-select::picker(select) {
+  max-width: min(90vw, 480px); max-height: 55vh; overflow: auto; padding: 4px;
+  border: 1px solid #54677c; border-radius: 8px; background: #162331; color: #e1e9f3;
+}
+.granularity-object-select option { padding: 4px 6px; white-space: normal; display: block; overflow-wrap: anywhere; }
+.granularity-object-select option:checked, .granularity-object-select option:focus { background: #31506b; }
+.granularity-object-select selectedcontent { min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }

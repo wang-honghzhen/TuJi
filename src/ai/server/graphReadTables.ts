@@ -1,11 +1,17 @@
 import { createHash } from 'node:crypto';
 import type { SourceRef } from '../domain';
 import type { CanvasIndex } from './canvasView';
+import type { GraphEdge } from '@/v3/types';
 import { readCoverage } from './readCoverage';
 import { relationMembershipVersion } from './relationMembershipVersion';
 
 type Row=Record<string,unknown>;
+export function edgeReadPayload(e:GraphEdge):Row {
+  return {edgeId:e.edgeId,source:{refId:e.sourceNodeId},target:{refId:e.targetNodeId},directed:e.directed,content:e.edgeContent,
+    ...(e.membershipFor?{membershipFor:e.membershipFor}:{}),...(e.relationKind?{relationKind:e.relationKind}:{})};
+}
 const hash=(v:unknown)=>createHash('sha256').update(JSON.stringify(v)).digest('hex');
+export const graphFieldVersion=(id:string,field:string,value:unknown)=>'field:'+hash([id,field,value]);
 const caches=new WeakMap<CanvasIndex,ReturnType<typeof createTables>>();
 export function graphTables(index:CanvasIndex) {
   let tables=caches.get(index);if(!tables){tables=createTables(index);caches.set(index,tables);}return tables;
@@ -27,7 +33,6 @@ function createTables(index:CanvasIndex) {
     if(value)sources.set(id,value);return value;
   };
   const related=(id:string)=>incident.get(id)??[];
-  const fieldVersion=(id:string,field:string,value:unknown)=>hash([source(id)?.version,field,value]);
   const relationVersion=(id:string)=>{
     if(!versions.has(id))versions.set(id,relationMembershipVersion(related(id)));
     return versions.get(id)!;
@@ -45,7 +50,7 @@ function createTables(index:CanvasIndex) {
       ...(index.graph.nodes[id]?.design ? {design:index.graph.nodes[id].design} : {}),
       ...(row.kind==='node'?{relations:relations(id)}:{})};
   };
-  const edge=(id:string):Row=>{const e=edges.get(id)!;return {edgeId:id,source:{refId:e.sourceNodeId},target:{refId:e.targetNodeId},directed:e.directed,content:e.edgeContent,...(e.membershipFor?{membershipFor:e.membershipFor}: {})};};
+  const edge=(id:string):Row=>edgeReadPayload(edges.get(id)!);
   const table=(items:Row[],pageEdges:Row[],scope:string):Row=>{
     const loaded=new Set(items.filter(i=>i.kind==='node'&&i.status!=='blocked').map(i=>i.refId));
     const endpoints=[...new Set(pageEdges.flatMap(e=>[(e.source as Row)?.refId,(e.target as Row)?.refId]).filter((id):id is string=>typeof id==='string'))]
@@ -53,10 +58,10 @@ function createTables(index:CanvasIndex) {
         if(!index.rows.has(id))return {refId:id,outside:true};
         const name=index.rows.get(id)!.segments.at(-1)?.name??'';
         return {refId:id,...(name.length<=256?{name}:{nameState:'deferred',nameReadWith:{tool:'graph_read_object_field',
-          arguments:{refId:id,field:'name',expectedVersion:fieldVersion(id,'name',name)}}})};
+          arguments:{refId:id,field:'name',expectedVersion:graphFieldVersion(id,'name',name)}}})};
       });
     return {scope,items:items.map(i=>i.kind==='node'?{...i,relations:relations(String(i.refId),pageEdges)}:i),edges:pageEdges,
       ...(endpoints.length?{endpoints}:{})};
   };
-  return {edges,related,relationVersion,relations,node,edge,table,source,path,fieldVersion};
+  return {edges,related,relationVersion,relations,node,edge,table,source,path};
 }

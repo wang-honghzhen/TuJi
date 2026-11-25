@@ -32,21 +32,45 @@
 .graph-search-result small { color:#8c9db3; font-size:10px; overflow-wrap:anywhere; line-height:1.5; }
 .graph-search-result-copy>span { color:#9dacc0; font-size:11px; line-height:1.6; overflow-wrap:anywhere; }
 .graph-search-result mark,[data-document-library] mark { color:#e1efff; background:#6b9ed83b; border-radius:2px; }
+.graph-search-result .graph-name-label mark, [data-document-library] .graph-name-label mark {
+  color: var(--graph-node-accent); background: #6b9ed83b;
+}
 .graph-search-go { opacity:.5; }
 .graph-search-result:hover .graph-search-go { opacity:1; }
 .graph-search-empty { padding:30px 16px; color:#9cacc0; text-align:center; font-size:12px; line-height:1.9; }
 .graph-search-empty span { color:#71859e; font-size:11px; }
 .graph-search-count { display:flex; justify-content:space-between; padding:6px 12px; font-size:10px; color:#8295af; }
 .canvas-search { position:relative; }
-.canvas-search-toggle { display:flex; align-items:center; gap:6px; padding:8px; border-radius:7px; font-size:12px; color:#cbd5e1; }
+.canvas-search-toggle { display:grid; place-items:center; width:32px; height:32px; border-radius:7px; color:#cbd5e1; }
 .canvas-search-toggle:hover,.canvas-search-toggle.is-active { background:#88b6ed20; color:#c4defa; }
-.canvas-search-popover { position:fixed; display:flex; flex-direction:column; padding:10px; border:1px solid #99b7dc35; border-radius:14px; background:#101c2bf5; box-shadow:0 20px 65px #0007; backdrop-filter:blur(20px); }
-.canvas-search-popover>header,.canvas-search-popover>.graph-search-field,.canvas-search-popover>.graph-search-filters,.canvas-search-popover>footer { flex-shrink:0; }
-.canvas-search-popover header { display:flex; align-items:center; justify-content:space-between; padding:2px 2px 10px; font-size:12px; color:#c3d1e2; }
-.canvas-search-popover header button { padding:4px; border-radius:4px; }
-.canvas-search-popover .graph-search-results { max-height:min(52vh,440px); }
-.canvas-search-popover footer { display:flex; justify-content:space-between; padding:10px 3px 1px; font-size:10px; color:#8295ae; border-top:1px solid #9aafc91a; }
-.canvas-search-popover footer span { color:#6e839f; }
+.canvas-search-popover { position:fixed; display:flex; flex-direction:column; padding:10px; border:1px solid var(--space-border); border-radius:14px; background:var(--space-panel); box-shadow:var(--space-shadow); }
+.canvas-search-popover>header,.canvas-search-popover>.graph-search-filters,.canvas-search-popover>footer { flex-shrink:0; }
+.canvas-search-popover header { display:flex; align-items:center; gap:6px; color:#c3d1e2; }
+.canvas-search-popover header>.graph-search-field { flex:1; }
+.canvas-search-popover header>button, .canvas-search-popover footer button { display:grid; place-items:center; width:26px; height:26px; border-radius:5px; }
+.canvas-search-popover header>button:hover, .canvas-search-popover footer button:hover:not(:disabled) { background:#ffffff12; }
+.canvas-search-popover .graph-search-field { color:var(--space-accent); background:var(--space-input); }
+.canvas-search-popover .graph-search-field:focus-within { border-color:#8cadde85; }
+.canvas-search-popover .graph-search-filters {
+  align-self:stretch; padding:3px; gap:2px; margin:8px 0; border-radius:9px; background:var(--space-input);
+}
+.canvas-search-popover .graph-search-filters button { flex:1; min-height:27px; font-size:12px; }
+.canvas-search-popover .graph-search-filters button:hover { color:#eef5ff; }
+.canvas-search-popover .graph-search-filters button[aria-pressed=true] {
+  color:#dfecff; background:#273c56; box-shadow:inset 0 0 0 1px #89b6ec35;
+}
+.canvas-search-popover .graph-search-results { max-height:min(52vh,440px); overscroll-behavior:contain; }
+.canvas-search-popover .graph-search-result.is-active {
+  background:#9ac4f515; box-shadow:inset 2px 0 #9bbff5;
+}
+.canvas-search-popover .graph-search-result:focus-visible { outline-offset:-2px; }
+.canvas-search-popover .graph-search-result.is-active .graph-search-go { opacity:1; color:var(--space-accent); }
+.canvas-search-popover .graph-search-reset { padding:2px 4px; color:var(--space-accent); text-decoration:underline; text-underline-offset:3px; }
+.canvas-search-popover footer { display:flex; align-items:center; justify-content:space-between; gap:8px; min-height:30px; padding:4px 3px 0; font-size:11px; color:#a3b3c8; border-top:1px solid #9aafc91a; font-variant-numeric:tabular-nums; }
+.canvas-search-popover footer div { display:flex; gap:4px; }
+.graph-search-shortcuts { display:inline-flex; align-items:center; gap:3px; }
+.graph-search-shortcuts kbd { padding:0 3px; border:1px solid var(--space-border); border-radius:4px; color:#bed0e6; font:inherit; font-size:10px; line-height:15px; }
+.graph-search-shortcuts kbd:last-child { margin-left:3px; }
+.canvas-search-popover footer button:disabled { opacity:.35; }
 .directory-search-list { flex:1; padding:2px 6px; }
 .pending-search-results { flex:1; padding:2px 8px 12px; }
-@media(max-width:640px) { .canvas-search-toggle span { display:none; } }

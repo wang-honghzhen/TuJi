@@ -313,7 +313,7 @@ async function parseArtifactExclusive(workspaceId: string, name: string, mimeTyp
       if(options.signal?.aborted)throw new Error('资料解析已中断');
       const decoded=await loadImage(bytes);
       if(decoded.width*decoded.height>limits.imagePixels)throw new Error('图片解码像素超过上限');
-      Object.assign(artifact,{status:'ready',visualState:'available',width:dimensions.width,height:dimensions.height,firstFrameOnly:dimensions.firstFrameOnly});
+      Object.assign(artifact,{status:'ready',visualState:'available',width:decoded.width,height:decoded.height,firstFrameOnly:dimensions.firstFrameOnly});
       await options.onProgress?.({completedPages:1,totalPages:1,resumed:false,status:'ready'});return artifact;
     }
     const parser = `${PARSER_VERSION}:${detected.format}:${sha(JSON.stringify(limits))}:${options.ocr ? sha(JSON.stringify(options.ocr)) : 'text-only'}`;

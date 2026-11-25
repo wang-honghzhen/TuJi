@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import type { CanvasIndex } from './canvasView';
-import { graphTables } from './graphReadTables';
+import { graphFieldVersion, graphTables } from './graphReadTables';
 import { estimateTokens } from '../tokens';
 import { fittingTextEnd } from './textSlicePacking';
 import { fieldReadWith } from './graphReadFields';
@@ -106,7 +106,7 @@ export function graphPaginator(index:CanvasIndex,pages:Row[],pointerId:string,bu
         const refId=String(item.refId),node=index.rows.get(refId)?.kind==='node';
         const blocked:Row={kind,scope,status:'blocked',code:'OBJECT_TOO_LARGE',refId,
           ...(node?{relations:tables.relations(refId)}:{}),
-          readWith:{tool:node?'graph_read_node_content':'graph_read_directory_content',arguments:{refId,expectedVersion:tables.source(refId)?.version}},
+          readWith:{tool:node?'graph_read_node_content':'graph_read_directory_content',arguments:{refId,expectedVersion:graphFieldVersion(refId,'content',index.rows.get(refId)!.content)}},
           ...(typeof item.name==='string'&&item.name.length>256?{nameReadWith:fieldReadWith(index,refId,'name')}:{}),
           ...(item.path&&JSON.stringify(item.path).length>512?{pathReadWith:fieldReadWith(index,refId,'path')}:{}),
           ...(index.graph.nodes[refId]?.design?{designReadWith:fieldReadWith(index,refId,'design')}:{} )};

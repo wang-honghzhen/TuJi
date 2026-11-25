@@ -1,5 +1,5 @@
 import type { AppSnapshot, Task, SourceRef } from '../domain';
-import type { ContextStage, PromptEntry } from '../contextState';
+import type { ContextStage, Observation, PromptEntry } from '../contextState';
 import { notebookWorkspace, notePayload, sameNoteContent } from '../notebook';
 import { visibleWriteCalls } from './writeAcknowledgements';
 import { sourceChanges, type SourceChange } from './sourceFreshness';
@@ -7,6 +7,9 @@ import { renderNoticeFacts } from './contextUpdates';
 import { allRetainedCalls, isReceipted, originResultId } from './readVisibility';
 import { pageOrigin, returnedReadPages } from './readPageEvidence';
 import { captureNotebookCheck } from './notebookChecks';
+import { visibleCanvasEvidence } from './contextFreshness';
+import { canvasAvailability } from './unavailableCanvasReads';
+import { submittedSourceResolution } from './submittedSourceResolution';
 
 /** Identity survives partial reads; completeness is a separate, prompt-local fact. */
 export function visibleNoteEvidence(state:AppSnapshot,task:Task,stage:ContextStage){
@@ -96,30 +99,35 @@ export function noteNoticeLabels(fact:NoteNoticeFact,encode:(id:string)=>string)
   return {kind:'笔记变动',labels:[`${encode(fact.id)}·${fact.deleted?'已删除':fact.unread?'未读':'正文'}`],
     detail:fact.deleted?'旧内容仅供历史参考':'context_read_children重读'};
 }
-export function noteNoticeFacts(state:AppSnapshot,task:Task,stage:ContextStage){
+function resolveNoteNotices(state:AppSnapshot,task:Task,stage:ContextStage,observations?:Observation[],
+  availability=canvasAvailability(state,task,stage)){
   const notebook=notebookWorkspace(state,state.sessions.find(s=>s.id===task.sessionId));
   const facts:NoteNoticeFact[]=[];
-  if(!notebook)return facts;
-  acknowledgeVisibleNotes(state,task,stage);
+  if(!notebook)return {facts,sources:[] as SourceRef[],closure:[] as SourceRef[]};
   const visible=visibleNoteEvidence(state,task,stage);
+  stage.noteVersions=Object.fromEntries([...visible].filter(([,v])=>v.complete.size).map(([id,v])=>[id,Math.max(...v.complete)]));
+  const sources:SourceRef[]=[...visible].map(([id,evidence])=>({kind:'note',id,
+    version:Math.max(...(evidence.complete.size?evidence.complete:evidence.versions)),tracking:'current'}));
+  const resolution=submittedSourceResolution(state,task,observations??(sources.length?visibleCanvasEvidence(state,task,stage):[]),()=>visible);
   for(const note of notebook.workNotes){
     const known=stage.noteVersions[note.id];
     const versions=[...visible.get(note.id)?.versions??[]].sort((a,b)=>a-b),callIds=[...visible.get(note.id)?.callIds??[]].sort();
     if(known!==note.version)facts.push({key:`note:${note.id}`,id:note.id,kind:'笔记变动',state:[versions,note.version],callIds,unread:!versions.length});
     const shown=known===note.version?[note]:(notebook.noteVersions??[]).filter(n=>n.id===note.id&&versions.includes(n.version));
-    const changes=shown.flatMap(n=>sourceChanges(state,task,n.sourceRefs));
+    const citations=shown.flatMap(n=>n.sourceRefs);
+    const changes=citations.length?sourceChanges(state,task,resolution.freeze(citations),false).filter(change=>!availability.settleSource(change)):[];
     if(changes.length)facts.push({key:`note-source:${note.id}`,id:note.id,kind:'笔记依据变动',state:[versions,changes],callIds,changes});
   }
   for(const [id,value] of visible)if(!notebook.workNotes.some(n=>n.id===id))facts.push({key:`note:${id}`,id,kind:'笔记变动',
     state:[[...value.versions].sort((a,b)=>a-b),'deleted'],deleted:true,callIds:[...value.callIds].sort()});
-  return facts;
+  return {facts,sources,closure:resolution.freeze(sources)};
 }
-export function noteVersionNotices(state:AppSnapshot,task:Task,stage:ContextStage,encode:(id:string)=>string){
-  const facts=noteNoticeFacts(state,task,stage);
-  // Keep stale displayed evidence as a precondition. A warning is not a reread.
-  // A fully displayed replacement supersedes the old body; partial delivery does not.
-  const sources:SourceRef[]=[...visibleNoteEvidence(state,task,stage)].map(([id,evidence])=>({kind:'note',id,
-    version:Math.max(...(evidence.complete.size?evidence.complete:evidence.versions)),tracking:'current'}));
-  return {lines:renderNoticeFacts(facts.map(f=>noteNoticeLabels(f,encode))),sources,
-    check:{...captureNotebookCheck(state,task),unreadNoteIds:facts.filter(f=>f.unread).map(f=>f.id)}};
+export function noteNoticeFacts(state:AppSnapshot,task:Task,stage:ContextStage,observations?:Observation[],
+  availability?:ReturnType<typeof canvasAvailability>){
+  return resolveNoteNotices(state,task,stage,observations,availability).facts;
+}
+export function noteVersionNotices(state:AppSnapshot,task:Task,stage:ContextStage,encode:(id:string)=>string,observations?:Observation[],
+  availability?:ReturnType<typeof canvasAvailability>){
+  const {facts,sources,closure}=resolveNoteNotices(state,task,stage,observations,availability);
+  return {lines:renderNoticeFacts(facts.map(f=>noteNoticeLabels(f,encode))),facts,sources,closure,check:captureNotebookCheck(state,task)};
 }

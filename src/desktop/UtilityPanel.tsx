@@ -8,6 +8,7 @@ import { TemporaryChat } from '@/ai/ui/AiTemporarySidebar';
 import { UserNotebook } from '@/ai/ui/UserNotebook';
 import { AiError, useAction } from '@/ai/ui/common';
 import { panelCommand, usePanelState } from './panelState';
+import { GraphAppearanceProvider } from '@/new/graphAppearance';
 import { reconcileNotebookView } from './notebookViewState';
 import './companion.css';
 
@@ -25,7 +26,9 @@ export function UtilityPanel({ canvasId }: { canvasId?: string }) {
   const noteTabs = ui.noteTabs ?? [];
   const notebookSelected = ui.activeTab === 'notebook' || ui.activeTab === 'note-directory' || noteTabs.some(tab => tab.id === ui.activeTab);
   const visible = ui.ready && ui.host === role;
-  const [mounted, setMounted] = useState(visible), [shown, setShown] = useState(false);
+  const [retainForExit, setRetainForExit] = useState(false);
+  const mounted = visible || retainForExit;
+  const panel = useRef<HTMLElement>(null);
   const [floating, setFloating] = useState({ x: Math.max(12, innerWidth - 550), y: 56 });
   const gesture = useRef<{ x: number; y: number; width: number; left: number; top: number; drag: boolean; native: boolean; pointerId: number; target: HTMLElement }>();
   const [dragging, setDragging] = useState(false);
@@ -57,10 +60,22 @@ export function UtilityPanel({ canvasId }: { canvasId?: string }) {
     if (role !== 'main') return;
     void panelCommand('set-context', { canvasId: canvas ?? '', enteredSessionByCanvas: entered }).catch(() => undefined);
   }, [canvas, entered, role]);
-  useEffect(() => {
-    if (visible) { setMounted(true); const frame = requestAnimationFrame(() => setShown(true)); return () => cancelAnimationFrame(frame); }
-    setShown(false); const timer = setTimeout(() => setMounted(false), 200); return () => clearTimeout(timer);
-  }, [visible]);
+  useLayoutEffect(() => {
+    if (panel.current) panel.current.inert = !visible;
+    if (visible) {
+      setRetainForExit(true);
+      return;
+    }
+    if (!mounted && !ui.panelExitId) return;
+    let cancelled = false;
+    const slide = panel.current?.getAnimations() ?? [];
+    void Promise.allSettled(slide.map(animation => animation.finished)).then(() => {
+      if (cancelled) return;
+      setRetainForExit(false);
+      if (role === 'panel' && ui.panelExitId) void panelCommand('panel-slide-ended', { id: ui.panelExitId }).catch(() => undefined);
+    });
+    return () => { cancelled = true; };
+  }, [visible, ui.panelExitId]);
   useEffect(() => {
     if (visible && snapshot && !notebookSelected && !selected) void panelCommand('patch-view', { activeTab: 'notebook' });
   }, [visible, !!snapshot, notebookSelected, ui.activeTab, !!selected]);
@@ -88,6 +103,7 @@ export function UtilityPanel({ canvasId }: { canvasId?: string }) {
     const reading = Object.fromEntries(Object.entries(state.reading).filter(([key]) => !key.startsWith('note:' + id + ':') && key !== 'directory:' + id));
     await panelCommand('patch-view', { noteTabs: (state.noteTabs ?? []).filter(tab => tab.id !== id), reading });
   });
+  const resize = (width: number) => panelCommand('patch-view', { width: Math.max(360, Math.min(1200, width)) });
   const begin = (event: PointerEvent<HTMLElement>, drag: boolean) => {
     if (event.button !== 0 || !event.isPrimary || gesture.current || (drag && !ui.detached)) return;
     const native = drag && role === 'panel' && !!window.tujiDesktop;
@@ -101,7 +117,7 @@ export function UtilityPanel({ canvasId }: { canvasId?: string }) {
     const g = gesture.current; if (!g || g.pointerId !== event.pointerId) return;
     if (g.native) window.tujiDesktop?.dragPanel('move');
     else if (g.drag) setFloating({ x: Math.max(0, Math.min(innerWidth - 80, g.left + event.screenX - g.x)), y: Math.max(0, Math.min(innerHeight - 60, g.top + event.screenY - g.y)) });
-    else void panelCommand('patch-view', { width: Math.max(360, Math.min(1200, g.width + g.x - event.screenX)) });
+    else void resize(g.width + g.x - event.screenX);
   };
   const end = (event?: PointerEvent<HTMLElement>) => {
     const g = gesture.current; if (!g || (event && event.pointerId !== g.pointerId)) return;
@@ -126,14 +142,14 @@ export function UtilityPanel({ canvasId }: { canvasId?: string }) {
         <button type="button" className="utility-quick-delete" aria-label={'删除' + label(session)} disabled={action.busy} onClick={() => void remove(session)}><X size={10} /></button>
       </div>)}
     </nav>}
-    {mounted && <aside className={'utility-panel' + (role === 'panel' ? ' utility-panel-native' : '') + (browserFloating ? ' utility-panel-floating' : '')}
-      data-visible={shown && visible} data-detached={ui.detached} data-ai-temporary-sidebar aria-label="笔记与临时会话侧边页" style={style}
+    {mounted && <aside ref={panel} className={'utility-panel' + (role === 'panel' ? ' utility-panel-native' : '') + (browserFloating ? ' utility-panel-floating' : '')}
+      data-visible={visible} data-detached={ui.detached} data-ai-temporary-sidebar aria-label="笔记与临时会话侧边页" style={style}
       onPointerMove={move} onPointerUp={end} onPointerCancel={end} onLostPointerCapture={end}
       onPointerDownCapture={() => { if (selected) touchTemporarySession(selected.id); }} onInputCapture={() => { if (selected) touchTemporarySession(selected.id); }}
       onKeyDownCapture={event => { if (event.key === 'Escape') end(); if (selected) touchTemporarySession(selected.id); }} onWheelCapture={() => { if (selected) touchTemporarySession(selected.id); }}>
       {!ui.detached && <div className="utility-resize" role="separator" aria-label="调整侧边页宽度" aria-orientation="vertical" tabIndex={0}
         onPointerDown={event => begin(event, false)} onKeyDown={event => {
-          if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') { event.preventDefault(); void panelCommand('patch-view', { width: ui.width + (event.key === 'ArrowLeft' ? 20 : -20) }); }
+          if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') { event.preventDefault(); void resize(ui.width + (event.key === 'ArrowLeft' ? 20 : -20)); }
         }} />}
       <header ref={header} className="utility-header" data-edge-theme={edgeTab.theme} data-edge-selected={edgeTab.selected}>
       <div className="utility-tabs" role="tablist" aria-label="侧边页标签">
@@ -169,7 +185,9 @@ export function UtilityPanel({ canvasId }: { canvasId?: string }) {
         </div>
       </header>
       <div className="utility-content" role="tabpanel">
-        {selected ? <TemporaryChat key={selected.id} session={selected} /> : <UserNotebook key={ui.activeTab} tabId={ui.activeTab} />}
+        {selected && snapshot ? <GraphAppearanceProvider state={snapshot.graph} light={snapshot.personalizationSettings?.canvasBackgroundId === 'white-grid'}>
+          <TemporaryChat key={selected.id} session={selected} />
+        </GraphAppearanceProvider> : <UserNotebook key={ui.activeTab} tabId={ui.activeTab} />}
       </div>
       <AiError text={action.error} />
     </aside>}

@@ -11,7 +11,7 @@ $destination = Join-Path $releaseDirectory "Tuji-$version-source.zip"
 $temporary = Join-Path $releaseDirectory ('.source-' + [guid]::NewGuid().ToString('N') + '.zip')
 # Explicit inputs keep notes, attachments, credentials and installed dependencies out.
 $inputs = @(
-  'desktop', 'public', 'scripts', 'src', '.gitignore', 'README.md',
+  'desktop', 'public', 'scripts', 'src', '.gitattributes', '.gitignore', 'README.md',
   'api-config.example.json', 'package.json', 'package-lock.json',
   'index.html', 'postcss.config.js', 'tailwind.config.js', 'tsconfig.json',
   'tsconfig.node.json', 'vite.config.ts', 'electron-builder.config.cjs'

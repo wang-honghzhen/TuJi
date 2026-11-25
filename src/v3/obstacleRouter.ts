@@ -1,4 +1,4 @@
-import { makeEdgeRoute, makePolylineRoute, makeWaypointRoute, sideVector, type EdgeRoute } from './edgeGeometry';
+import { makeEdgeRoute, makePolylineRoute, makeUnobstructedRoute, makeWaypointRoute, orthogonalCandidates, sideVector, type EdgeRoute } from './edgeGeometry';
 import { RectangleIndex } from './rectangleIndex';
 import type { ConnectionSide, EdgeRouteStyle, Point, Rect } from './types';
 import { clearSegment, routeIsClear } from './routeValidation';
@@ -18,21 +18,23 @@ export function routeAroundObstacles(source: Point, target: Point, sourceSide: C
   const index = input instanceof RectangleIndex ? input : new RectangleIndex(input);
   const a = sideVector(sourceSide), b = sideVector(targetSide);
   const curve = style === 'curve';
-  const blocked = (p: Point, q: Point, terminal = true) => !clearSegment(p, q, index, terminal ? terminals : [], constraint);
-  const fallback = (retryable = false) => ({ ...makeEdgeRoute(source, target, sourceSide, targetSide), fallback: true, retryable });
+  const blocked = (p: Point, q: Point) => !clearSegment(p, q, index, terminals, constraint);
+  const fallback = () => ({ ...makeUnobstructedRoute(source, target, sourceSide, targetSide, style), fallback: true });
   const plain = makeEdgeRoute(source, target, sourceSide, targetSide);
   if (curve && routeIsClear(plain, index, terminals, constraint)) return plain;
-  const stub = (lead: number) => ({
-    start: { x: source.x + a.x * lead, y: source.y + a.y * lead },
-    end: { x: target.x + b.x * lead, y: target.y + b.y * lead },
-  });
-  // The short stub is the feasibility anchor: no route may need a longer free
-  // corridor than the port itself guarantees. A curved detour prefers the longer
-  // exit only when that whole stub is free, so its first round corner has room.
-  const short = stub(18);
-  if (blocked(source, short.start, false) || blocked(short.end, target, false)) return fallback();
-  const extended = curve ? stub(36) : short;
-  const { start, end } = !blocked(source, extended.start, false) && !blocked(extended.end, target, false) ? extended : short;
+  // Each end needs its own free lead. Narrow gaps between manually placed
+  // blocks often leave enough room to turn, even with less than 18px of runway.
+  const freeLead = (p: Point, v: Point) => {
+    for (const length of [18, 9, 4, 1]) {
+      const tip = { x: p.x + v.x * length, y: p.y + v.y * length };
+      if (!blocked(p, tip)) return tip;
+    }
+  };
+  const longStart = { x: source.x + a.x * 36, y: source.y + a.y * 36 };
+  const longEnd = { x: target.x + b.x * 36, y: target.y + b.y * 36 };
+  const longLeads = curve && !blocked(source, longStart) && !blocked(target, longEnd);
+  const start = longLeads ? longStart : freeLead(source, a), end = longLeads ? longEnd : freeLead(target, b);
+  if (!start || !end) return fallback();
   const rounded = (points: Point[]) => {
     for (const radius of CORNER_RADIUS[style]) {
       const route = makePolylineRoute(points, radius);
@@ -40,7 +42,7 @@ export function routeAroundObstacles(source: Point, target: Point, sourceSide: C
     }
   };
   const dx = target.x - source.x, dy = target.y - source.y, distance = Math.hypot(dx, dy) || 1;
-  if ((dx * a.x + dy * a.y) / distance > .999 && (-dx * b.x - dy * b.y) / distance > .999) {
+  if ((curve || dx === 0 || dy === 0) && (dx * a.x + dy * a.y) / distance > .999 && (-dx * b.x - dy * b.y) / distance > .999) {
     const straight = rounded([source, target]); if (straight) return straight;
   }
   // A symmetric bulge peaks at the chord midpoint, which misses an off-centre
@@ -57,20 +59,35 @@ export function routeAroundObstacles(source: Point, target: Point, sourceSide: C
       const base = { x: source.x + dx * Math.max(0, Math.min(1, along)), y: source.y + dy * Math.max(0, Math.min(1, along)) };
       const side = (cx - base.x) * nx + (cy - base.y) * ny;
       const halfWidth = Math.abs(nx) * blocker.width / 2 + Math.abs(ny) * blocker.height / 2;
+      // Parallel chords should keep their relative order beside a blocker.
+      // A fixed clearance sends every edge through the same waypoint.
+      // Nearly level/vertical edges funnel onto one point on the flat face.
+      // Taper the extra spacing as their endpoints already diverge on that axis.
+      const alignment = Math.max(0, 1 - Math.min(Math.abs(dx), Math.abs(dy)) / 32);
+      const shift = alignment * 24 * Math.tanh(side / 32);
       const offsets = [side - halfWidth - 40, side + halfWidth + 40].sort((a, b) => Math.abs(a) - Math.abs(b));
       for (const scale of [1, 1.6, 2.4, 3.2]) for (const offset of offsets) {
         const lead = Math.max(18, Math.min(32, distance * 0.12));
-        const aimed = makeWaypointRoute(source, target, sourceSide, targetSide,
-          { x: base.x + nx * offset * scale, y: base.y + ny * offset * scale },
-          { lead, bend: lead });
-        if (routeIsClear(aimed, index, terminals, constraint)) return aimed;
+        const at = (displacement: number) => makeWaypointRoute(source, target, sourceSide, targetSide,
+          { x: base.x + nx * displacement, y: base.y + ny * displacement }, { lead, bend: lead });
+        const aimed = at(offset * scale);
+        if (routeIsClear(aimed, index, terminals, constraint)) {
+          if (Math.abs(shift) < .01) return aimed;
+          const separated = at(offset * scale - shift);
+          return routeIsClear(separated, index, terminals, constraint) ? separated : aimed;
+        }
       }
     }
   }
-  if (!blocked(start, end)) {
+  if (!curve) {
+    for (const points of orthogonalCandidates(source, start, end, target)) {
+      if (points.slice(1).some((p, i) => blocked(points[i], p))) continue;
+      const route = rounded(points); if (route) return route;
+    }
+  } else if (!blocked(start, end)) {
     const route = rounded([source, start, end, target]); if (route) return route;
   }
-  for (const middle of [{ x: end.x, y: start.y }, { x: start.x, y: end.y }]) {
+  for (const middle of curve ? [{ x: end.x, y: start.y }, { x: start.x, y: end.y }] : []) {
     if (!blocked(start, middle) && !blocked(middle, end)) { const route = rounded([source, start, middle, end, target]); if (route) return route; }
   }
   // Deterministic last resort: fixed candidate lines, a fixed iteration cap and
@@ -89,8 +106,8 @@ export function routeAroundObstacles(source: Point, target: Point, sourceSide: C
   const insideY = constraint ? [constraint.y + 2, constraint.y + constraint.height - 2] : [];
   const clampX = (value: number) => constraint ? Math.max(constraint.x + 2, Math.min(constraint.x + constraint.width - 2, value)) : value;
   const clampY = (value: number) => constraint ? Math.max(constraint.y + 2, Math.min(constraint.y + constraint.height - 2, value)) : value;
-  const xs = [...new Set([start.x, end.x, ...nearby.flatMap(r => [r.x - margin, r.x + r.width + margin]), ...insideX].map(clampX))].sort((p, q) => p - q);
-  const ys = [...new Set([start.y, end.y, ...nearby.flatMap(r => [r.y - margin, r.y + r.height + margin]), ...insideY].map(clampY))].sort((p, q) => p - q);
+  const xs = [...new Set([start.x, end.x, ...nearby.flatMap(r => [r.x - margin, r.x + r.width + margin].map(clampX)), ...insideX])].sort((p, q) => p - q);
+  const ys = [...new Set([start.y, end.y, ...nearby.flatMap(r => [r.y - margin, r.y + r.height + margin].map(clampY)), ...insideY])].sort((p, q) => p - q);
   const width = xs.length, toId = (x: number, y: number) => y * width + x;
   const startId = toId(xs.indexOf(start.x), ys.indexOf(start.y)), endId = toId(xs.indexOf(end.x), ys.indexOf(end.y));
   const point = (id: number) => ({ x: xs[id % width], y: ys[Math.floor(id / width)] });
@@ -119,6 +136,7 @@ export function routeAroundObstacles(source: Point, target: Point, sourceSide: C
   points.reverse();
   const simple = points.filter((p, i) => !i || i === points.length - 1 ||
     (points[i - 1].x !== p.x || points[i + 1].x !== p.x) && (points[i - 1].y !== p.y || points[i + 1].y !== p.y));
+  if (!curve) return rounded([source, ...simple, target]) ?? fallback();
   const shortcut: Point[] = [simple[0]];
   for (let i = 0; i < simple.length - 1;) {
     let next = i + 1;

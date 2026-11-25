@@ -80,9 +80,35 @@ export async function renderArtifactImages(artifact: Artifact, directory: string
   }finally{await loading?.destroy();}
   return result;
 }
+export function uploadedImageRef(artifact: Artifact, maxEdge: number): ImageAssetRef | undefined {
+  const { width, height, mimeType, hash } = artifact;
+  if (artifact.status !== 'ready' || !mimeType.startsWith('image/') || !width || !height) return;
+  const scale = Math.min(1, maxEdge / Math.max(width, height));
+  return { source: 'upload', assetId: hash, artifactId: artifact.id, version: artifact.version,
+    width: Math.max(1, Math.round(width * scale)), height: Math.max(1, Math.round(height * scale)),
+    mimeType: mimeType === 'image/jpeg' ? 'image/jpeg' : 'image/png' };
+}
+
 export async function imageAssetData(directory:string, image:ImageAssetRef):Promise<string>{
   requireValue(/^[a-f0-9]{64}$/.test(image.assetId),'图像资产地址无效','IMAGE_UNAVAILABLE');
-  const bytes=await fs.readFile(path.join(directory,'visual',`${image.assetId}.png`));
+  const file = image.source === 'upload' ? path.join(directory, 'objects', image.assetId)
+    : path.join(directory, 'visual', image.assetId + '.png');
+  let bytes: Buffer = await fs.readFile(file);
   requireValue(createHash('sha256').update(bytes).digest('hex')===image.assetId,'图像资产校验失败','IMAGE_UNAVAILABLE');
+  if (image.source === 'upload') {
+    const header = imageHeader(bytes);
+    // EXIF orientation can swap the display axes. Older attachments stored the encoded axes.
+    const edge = Math.max(image.width, image.height);
+    requireValue(header && edge <= Math.max(header.width, header.height)
+      && Math.min(image.width, image.height) <= Math.min(header.width, header.height), '图片尺寸无效', 'IMAGE_UNAVAILABLE');
+    if (header.mimeType !== image.mimeType || edge !== Math.max(header.width, header.height)) {
+      const moduleName = '@napi-rs/canvas';
+      const { createCanvas, loadImage } = await import(moduleName) as typeof import('@napi-rs/canvas');
+      const decoded = await loadImage(bytes), scale = Math.min(1, edge / Math.max(decoded.width, decoded.height));
+      const canvas = createCanvas(Math.max(1, Math.round(decoded.width * scale)), Math.max(1, Math.round(decoded.height * scale)));
+      canvas.getContext('2d').drawImage(decoded, 0, 0, canvas.width, canvas.height);
+      bytes = image.mimeType === 'image/jpeg' ? await canvas.encode('jpeg', 90) : await canvas.encode('png');
+    }
+  }
   return `data:${image.mimeType};base64,${bytes.toString('base64')}`;
 }

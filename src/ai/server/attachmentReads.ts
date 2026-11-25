@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import type { AppSnapshot, Artifact, Task, ToolCallRecord, SourceRef } from '../domain';
 import type { FrozenRead } from '../contextState';
-import { attachmentLimits, attachmentVision, type AttachmentCatalogEntry, type ImageAssetRef } from '../attachments';
+import { attachmentLimits, type AttachmentCatalogEntry, type ImageAssetRef } from '../attachments';
 import { authorizedAttachments, assertProtectionCapacity, resolveAttachment, residentAttachmentTasks, protectedAttachmentEntries, attachmentKey } from './attachmentCatalog';
 import { requireValue } from './errors';
 import { readArtifact, searchArtifacts } from './artifacts';
@@ -109,7 +109,6 @@ export function attachmentRead(state: AppSnapshot, task: Task, call: ToolCallRec
     const found = workspace.frozenReads?.find(r => r.id === args.pointerId && r.attachmentRead);
     requireValue(found && found.expiresAt > Date.now(), '附件分页已过期，请从任务清单或原文入口重新读取', 'CURSOR_EXPIRED');
     read = found;
-    if (read.attachmentRead!.representation === 'image') requireValue(attachmentVision(state.provider,task.modelSelection?.model), '当前执行模型未声明视觉能力', 'VISION_UNSUPPORTED');
     if (read.attachmentRead!.protect) requireValue(read.taskId === task.id, '清单保护不跨任务继承，请重新读取清单', 'OUT_OF_SCOPE');
     const available = authorizedAttachments(state, task, read.attachmentRead!.taskIds);
     requireValue(Object.entries(read.attachmentRead!.versions).every(([id, version]) => available.some(f => f.ref.id === id && f.ref.version === version && f.artifact)),
@@ -138,7 +137,6 @@ export function attachmentRead(state: AppSnapshot, task: Task, call: ToolCallRec
         requireValue(pageBudget>=256,'清单读取预算不足，请提高 budget','READ_PAGE_CAPACITY');
       }while(true);
     } else if (call.name === 'workspace_view_artifact') {
-      requireValue(attachmentVision(state.provider,task.modelSelection?.model), '当前执行模型未声明视觉能力，请在 execution.supportsVision 配置；可继续读取可提取文本', 'VISION_UNSUPPORTED');
       const artifact = resolveAttachment(state, task, args.artifactId, args.version); files = [artifact]; representation = 'image';
       requireValue(images?.length && images.every(i => i.artifactId === artifact.id && i.version === artifact.version), '页面图像尚未准备或来源已变化', 'IMAGE_UNAVAILABLE');
       pages = images.map(image => ({ kind: 'attachment_images', representation, items: [image], firstFrameOnly: artifact.firstFrameOnly ?? false,

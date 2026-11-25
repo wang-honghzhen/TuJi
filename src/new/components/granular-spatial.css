@@ -1,0 +1,50 @@
+.granular-spatial { width:100%; height:100%; position:absolute; inset:0; touch-action:none; user-select:none; cursor:grab; outline:none; --text:#dce8ee; --outline:#15222c; --link:#93b5c5; }
+.granular-spatial.light { --text:#273e49; --outline:#f3f7f8; --link:#4d7180; }
+.granular-spatial:active { cursor:grabbing; }
+.granular-spatial [data-space-object] { cursor:pointer; outline:none; }
+.granular-spatial text { fill:var(--text); stroke:var(--outline); stroke-width:3px; paint-order:stroke; stroke-linejoin:round; font:12px system-ui,sans-serif; }
+.granular-spatial .group-face { fill:var(--group-color); fill-opacity:.035; stroke:var(--group-color); stroke-opacity:.68; pointer-events:none; }
+.granular-spatial .group-pick { fill:none; stroke:transparent; stroke-width:12px; pointer-events:stroke; }
+.granular-spatial .granular-group[data-covered] { opacity:.42; }
+.granular-spatial .granular-group[data-covered] .group-pick { pointer-events:none; }
+.granular-spatial .group-equator { fill:none; stroke:var(--group-color); stroke-opacity:.33; stroke-dasharray:4 6; pointer-events:none; }
+.granular-spatial .granular-group:is([data-selected=true],[data-related],:hover,:focus-visible) .group-face { stroke-opacity:1; stroke-width:1.9; }
+.granular-spatial [data-neighbor-focus] .group-face,
+.granular-spatial [data-neighbor-focus] .line-ink { stroke:var(--neighbor-focus-ink); stroke-opacity:1; }
+.granular-spatial [data-neighbor-focus] .group-face { stroke-dasharray:6 3; stroke-width:2.5; }
+.granular-spatial .granular-dot .neighbor-focus-ring { stroke:var(--neighbor-focus-ink); fill:none; stroke-width:2; pointer-events:none; }
+.granular-spatial .group-name { font-weight:600; fill:var(--group-color); }
+.granular-line { color:var(--state-color,var(--interaction-color,var(--line-target,var(--link)))); }
+.granular-spatial[data-granular-view=layered] :is([data-semantic-relation], [data-relation-branch], [data-relation-ports]) { opacity:.52; }
+.granular-line.relation-branch .line-hit { stroke-width:8px; }
+.granular-line.relation-branch .line-ink,
+.granular-line [data-original-section=source],.granular-line [data-original-section=target] { stroke-dasharray:2.5 3; stroke-linecap:round; }
+.granular-line:not(.relation,.relation-branch):is(:hover,:focus-visible,[data-peer-hover],[data-peer-focus],[data-highlighted=true],[data-related]) { --interaction-color:var(--active); }
+.granular-line .rim-socket { fill:var(--outline); stroke:var(--state-color,var(--interaction-color,var(--port-color))); stroke-width:1.55px; }
+.granular-line [data-relation-port] { fill:var(--state-color,var(--interaction-color,var(--port-color))); fill-opacity:.75; }
+.granular-spatial[data-granular-view=sphere] [data-relation-ports] { opacity:.52; }
+.granular-spatial .granular-line:is(.relation,.relation-branch):is(:hover,:focus-visible,[data-peer-hover],[data-peer-focus],[data-highlighted=true],[data-related]) { opacity:1; --relation-width-add:.65px; }
+.granular-line:is(:hover,:focus-visible,[data-peer-hover],[data-peer-focus],[data-highlighted=true]) .rim-socket { stroke-width:2px; }
+.granular-line .line-hit { fill:none; stroke:transparent; stroke-width:14px; pointer-events:stroke; }
+.granular-line .line-ink { stroke:var(--state-color,var(--interaction-color,var(--line-stroke,currentColor))); fill:none; pointer-events:none; }
+.granular-line .line-arrow { fill:currentColor; }
+.granular-spatial .relation-count { fill:currentColor; font-weight:700; }
+.granular-dot circle { stroke:var(--outline); stroke-width:1.2; }
+.granular-dot:hover circle,.granular-dot[data-related] circle { stroke:var(--active); stroke-width:2; }
+.granular-dot[data-selected=true] circle,.granular-dot:focus-visible circle { stroke:var(--active); stroke-width:2; }
+.granular-dot[data-ai-highlighted] circle { stroke:var(--ai-color); stroke-width:2; }
+.granular-link-handle { fill:var(--outline); stroke:var(--active); stroke-width:2; cursor:crosshair; }
+.granular-line[data-path-hop] { --interaction-color:#80d8ba; }
+.granular-line[data-path-step] { --interaction-color:#ffbc70; }
+.granular-spatial.light .granular-line[data-path-hop] { --interaction-color:#176c51; }
+.granular-spatial.light .granular-line[data-path-step] { --interaction-color:#985410; }
+.granular-path-layer { position:absolute; pointer-events:none; --spatial-card:#182632; --spatial-selected:#e1eef2; --spatial-trace:#80d8ba; }
+.granular-path-layer.light { --spatial-card:#f5f9fa; --spatial-selected:#273d4a; --spatial-trace:#176c51; }
+.spatial-count-button { opacity:.7; cursor:pointer; }
+.spatial-count-button:hover,.spatial-count-button:focus-visible { opacity:1; }
+.spatial-count-button rect { fill:var(--outline); stroke:currentColor; stroke-opacity:.28; }
+.spatial-count-button .relation-count { stroke:none; font-size:11px; }
+.spatial-hover-copy { pointer-events:auto; display:grid; gap:2px; width:fit-content; max-width:100%; box-sizing:border-box;
+  padding:5px 9px; border:1px solid color-mix(in srgb,var(--active) 35%,transparent); border-radius:6px;
+  color:var(--text); background:var(--outline); font:12px/1.45 system-ui,sans-serif; overflow-wrap:anywhere; }
+.spatial-hover-copy { max-height:100px; overflow:auto; overscroll-behavior:contain; white-space:pre-wrap; }

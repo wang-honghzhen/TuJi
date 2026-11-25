@@ -3,6 +3,7 @@ import type { ProjectedRelation } from './relationProjection';
 import type { Point } from './types';
 import { BLOCK_GAP } from './types';
 import { measureArrangement } from './arrangementMetrics';
+import { stressLayout } from './stressLayout';
 
 export interface StructuralCandidate extends LayeredLayout { algorithm: string }
 
@@ -59,7 +60,12 @@ function connectedCandidates(nodes: readonly LayeredNode[], relations: readonly 
   const edges = relations.filter(edge => edge.source !== edge.target && ids.has(edge.source) && ids.has(edge.target))
     .sort((a, b) => a.source.localeCompare(b.source) || a.target.localeCompare(b.target));
   if (!ordered.length) return [];
-  const result: StructuralCandidate[] = [{ ...sweepLayout(ordered, edges, flow), algorithm: 'layer-sweep' }];
+  // A connected directed path has exactly one card per rank. Placing those
+  // ranks a normal card gap apart already gives Dagre's compact chain.
+  const chain = edges.length === ordered.length - 1 && edges.every(edge => edge.directed !== false)
+    && new Set(edges.map(edge => edge.source)).size === edges.length && new Set(edges.map(edge => edge.target)).size === edges.length;
+  const result: StructuralCandidate[] = [{ ...sweepLayout(ordered, edges, flow, chain ? BLOCK_GAP : BLOCK_GAP * 2), algorithm: 'layer-sweep' }];
+  if (chain) return result;
   const cyclic = edges.some(edge => edge.directed === false) || !isAcyclic(ordered.map(node => node.id), edges);
   const ring = cyclic || edges.length >= nodes.length * 2 ? cycleLayout(ordered, edges) : undefined;
   if (ring) result.push({ ...ring, algorithm: 'cycle' });
@@ -70,10 +76,21 @@ function connectedCandidates(nodes: readonly LayeredNode[], relations: readonly 
     const dagre = layeredLayout(ordered, edges, flow);
     if (dagre) result.push({ ...dagre, algorithm: 'dagre' });
   }
+  if (cyclic && ordered.length >= 6 && ordered.length <= 100 && edges.length > ordered.length
+    && edges.length <= ordered.length * 6 && performance.now() + 10 < deadline) {
+    const stress = stressLayout(ordered, edges);
+    const sizes = new Map(ordered.map(node => [node.id, { x: 0, y: 0, width: node.width, height: node.height }]));
+    const metrics = (layout: LayeredLayout) => measureArrangement([...ids], sizes, Object.fromEntries(layout.positions), edges);
+    // Distance stress can shorten a dense hub by putting a great many edges
+    // across one another. Keep the improvement only if it also matches the
+    // crossing count of the best existing structural choice.
+    const reference = result.map(metrics).reduce((best, next) => next.score < best.score ? next : best);
+    if (metrics(stress).crossings <= reference.crossings) result.push({ ...stress, algorithm: 'stress' });
+  }
   return result;
 }
 
-function sweepLayout(nodes: readonly LayeredNode[], edges: readonly ProjectedRelation[], flow: LayeredFlow): LayeredLayout {
+function sweepLayout(nodes: readonly LayeredNode[], edges: readonly ProjectedRelation[], flow: LayeredFlow, rankGap: number): LayeredLayout {
   const nodeMap = new Map(nodes.map(node => [node.id, node]));
   const neighbours = new Map(nodes.map(node => [node.id, [] as Array<{ id: string; weight: number }>]));
   const outgoing = new Map(nodes.map(node => [node.id, [] as string[]]));
@@ -168,9 +185,9 @@ function sweepLayout(nodes: readonly LayeredNode[], edges: readonly ProjectedRel
       positions.set(id, horizontal ? { x: main, y: cross } : { x: cross, y: main });
       cross += crossSize(id) + BLOCK_GAP;
     }
-    main += Math.max(...layer.map(mainSize)) + BLOCK_GAP * 2;
+    main += Math.max(...layer.map(mainSize)) + rankGap;
   }
-  main = Math.max(0, main - BLOCK_GAP * 2);
+  main = Math.max(0, main - rankGap);
   const width = horizontal ? main : maxCross, height = horizontal ? maxCross : main;
   if (flow === 'left' || flow === 'up') for (const node of nodes) {
     const p = positions.get(node.id)!;

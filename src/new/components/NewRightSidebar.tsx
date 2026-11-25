@@ -2,7 +2,7 @@ import { FilePlus, MoreHorizontal, Upload } from 'lucide-react';
 import { SidebarToggle } from './SidebarToggle';
 import { DocumentMeta } from '@/types/document';
 import { useNewUiStore, beginSidebarResize } from '../newUiStore';
-import { useRef, useState, type ReactNode } from 'react';
+import { useMemo, useRef, useState, type ReactNode } from 'react';
 import { SearchField, SearchHighlight, type SidebarSearchKind, type SidebarSearchValues } from './SearchField';
 import { searchContains } from '../graphSearch';
 import { DirectoryTab, ReviewTab } from './NewDirectoryDock';
@@ -17,12 +17,12 @@ import { GraphContextMenu } from './GraphContextMenu';
 interface NewRightSidebarProps {
   documents: DocumentMeta[];
   /** 当前正在画布上渲染的文档 id（可能多个） */
-  activeDocumentIds: string[];
-  /** Direct canvas entries can be removed here; nested documents remain inside their parent. */
-  rootDocumentIds: string[];
+  activeDocumentIds: ReadonlySet<string>;
+  rootDocumentIds: ReadonlySet<string>;
   /** 点击：在画布上加入 / 移出该文档 */
   onAddDocument: (documentId: string) => void;
   onCreateDocument: () => void;
+  onRenameDocument: (document: DocumentMeta) => void;
   directoryPanel: ReactNode;
   reviewPanel: ReactNode;
   canvasId: string;
@@ -49,6 +49,7 @@ export function NewRightSidebar({
   rootDocumentIds,
   onAddDocument,
   onCreateDocument,
+  onRenameDocument,
   directoryPanel,
   reviewPanel,
   canvasId,
@@ -69,7 +70,7 @@ export function NewRightSidebar({
   const searchLabel = showDirectory ? '搜索节点、子图…' : showReview ? '搜索待审核提交' : '搜索图文档';
   const file = useRef<HTMLInputElement>(null), action = useAction();
   const [notice, setNotice] = useState('');
-  const [menu, setMenu] = useState<{ x: number; y: number; document: DocumentMeta }>();
+  const [menu, setMenu] = useState<{ x: number; y: number; document: DocumentMeta; trigger?: HTMLButtonElement }>();
   const exportDocument = (doc: DocumentMeta) => void action.run(async () => {
     setNotice('');
     const result = await useAiStore.getState().command('document.export', { documentId: doc.documentId });
@@ -88,17 +89,16 @@ export function NewRightSidebar({
       + (current && modeOf(current) !== result.mode ? `请切换到${MODE_LABELS[result.mode]}画布查看和使用。` : '可从列表加入画布。'));
   });
 
-  const byUpdatedDesc = (a: DocumentMeta, b: DocumentMeta) =>
-    new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime();
-
-  const pinned = documents
-    .filter((doc) => activeDocumentIds.includes(doc.documentId))
-    .sort(byUpdatedDesc);
-  const rest = documents
-    .filter((doc) => !activeDocumentIds.includes(doc.documentId))
-    .sort(byUpdatedDesc);
-  // 置顶组在前，其余按时间倒序 —— 两边各自排好，顺序是稳定的
-  const ordered = [...pinned, ...rest].filter(doc => searchContains(query, doc.documentName, doc.description));
+  const byDate = useMemo(() => [...documents].sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt)), [documents]);
+  const documentQuery = searches.documents.trim();
+  const { ordered, pinnedCount } = useMemo(() => {
+    const pinned: DocumentMeta[] = [], rest: DocumentMeta[] = [];
+    for (const doc of byDate) {
+      if (documentQuery && !searchContains(documentQuery, doc.documentName, doc.description)) continue;
+      (activeDocumentIds.has(doc.documentId) ? pinned : rest).push(doc);
+    }
+    return { ordered: [...pinned, ...rest], pinnedCount: pinned.length };
+  }, [byDate, activeDocumentIds, documentQuery]);
 
   return (
     <aside
@@ -142,7 +142,7 @@ export function NewRightSidebar({
         </div>
         {showDirectory || showReview ? <div className="flex-1 min-h-0 flex flex-col">{showDirectory ? directoryPanel : reviewPanel}</div> : <div data-document-library className="flex-1 min-h-0 flex flex-col">
           <div className="library-tools">
-            <span className="text-[11px] text-slate-500">{documents.length} 个图文档</span>
+            <span className="text-[11px] text-slate-400">{documentQuery ? `匹配 ${ordered.length} / ${documents.length}` : `${documents.length} 个图文档`}</span>
             <div className="flex items-center">
             <button type="button" title="导入图文档" aria-label="导入图文档" data-document-import disabled={action.busy} onClick={() => file.current?.click()}
               className="flex items-center gap-1.5 rounded-lg px-2 py-1.5 text-xs text-slate-400 hover:bg-white/5 hover:text-blue-300 disabled:opacity-40">
@@ -163,87 +163,94 @@ export function NewRightSidebar({
           <div className="flex-1 min-h-0 overflow-y-auto new-scroll px-2.5 pb-2.5 space-y-2">
           {!ordered.length && <p className="graph-search-empty">{query ? '没有匹配的图文档' : '还没有图文档'}</p>}
           {ordered.map((doc, index) => {
-            const isOnCanvas = activeDocumentIds.includes(doc.documentId);
-            // 置顶组与其余之间画一条分隔，让「为什么它在上面」一眼可读
-            const isFirstUnpinned = !isOnCanvas && index > 0 && pinned.length > 0;
+            const isOnCanvas = index < pinnedCount;
+            const isFirstUnpinned = pinnedCount > 0 && index === pinnedCount;
 
             return (
               <div key={doc.documentId}>
                 {isFirstUnpinned && (
                   <div className="flex items-center gap-2 px-1 pb-2 pt-1">
                     <span className="h-px flex-1 bg-space-700" />
-                    <span className="text-[10px] text-slate-600">其余图文档</span>
+                    <span className="text-[11px] text-slate-400">其余图文档</span>
                     <span className="h-px flex-1 bg-space-700" />
                   </div>
                 )}
 
-                <button
-                  data-library-document={doc.documentId}
-                  type="button"
-                  draggable
-                  onClick={() => { if (!isOnCanvas) onAddDocument(doc.documentId); }}
-                  onContextMenu={event => { event.preventDefault(); event.stopPropagation(); setMenu({ x: event.clientX, y: event.clientY, document: doc }); }}
-                  onDragStart={(event) => {
-                    event.dataTransfer.effectAllowed = 'copy';
-                    event.dataTransfer.setData(
-                      'application/x-qixue-document',
-                      doc.documentId
-                    );
-                  }}
-                  title={isOnCanvas ? '已在画布中；请在画布目录中右键操作' : '点击加入画布'}
-                  className={`group w-full text-left px-2.5 py-2.5 rounded-xl border transition-all ${
-                    isOnCanvas
-                      ? 'border-blue-500/40 bg-blue-500/10'
-                      : 'border-space-700 bg-space-850/25 hover:border-space-600 hover:bg-space-800/40'
-                  }`}
-                >
-                  <div className="flex items-start gap-2.5">
-                    {/* 图标 */}
-                    <div
-                      className="new-document-icon"
-                      data-active={isOnCanvas}
-                    >
-                      <NewTreeIcon />
-                    </div>
-
-                    {/* 信息 */}
-                    <div className="flex-1 min-w-0">
-                      <div className="flex items-center gap-1.5">
-                        {query ? <span className="flex-1 text-[13px] font-medium truncate"><SearchHighlight text={doc.documentName} query={query} /></span> : <GraphNameLabel id={doc.documentId} name={doc.documentName} kind="document" className="flex-1 text-[13px] font-medium truncate" />}
-                        {rootDocumentIds.includes(doc.documentId) && <span data-tree-root={doc.documentId} title={`${doc.documentName}目录树`} className="shrink-0 rounded border border-amber-400/25 px-1 py-0.5 text-[9px] text-amber-200">目录树根</span>}
-                        {/* 在画布上的加一个状态点 */}
-                        {isOnCanvas && (
-                          <span
-                            title="正在画布中渲染"
-                            className="shrink-0 w-1.5 h-1.5 rounded-full bg-blue-400 shadow-[0_0_6px_rgba(96,165,250,0.9)]"
-                          />
-                        )}
-                        <span className="shrink-0 w-5 h-5 rounded flex items-center justify-center text-slate-600 opacity-0 group-hover:opacity-100 transition-opacity">
-                          <MoreHorizontal size={14} />
-                        </span>
+                <div className="library-document-row">
+                  <button
+                    data-library-document={doc.documentId}
+                    type="button"
+                    draggable
+                    onClick={() => { if (!isOnCanvas) onAddDocument(doc.documentId); }}
+                    onContextMenu={event => { event.preventDefault(); event.stopPropagation(); setMenu({ x: event.clientX, y: event.clientY, document: doc }); }}
+                    onDragStart={(event) => {
+                      event.dataTransfer.effectAllowed = 'copy';
+                      event.dataTransfer.setData(
+                        'application/x-qixue-document',
+                        doc.documentId
+                      );
+                    }}
+                    title={isOnCanvas ? '已在画布中，右键可重命名或导出' : '点击加入画布，右键可重命名或导出'}
+                    className={`group w-full text-left px-2.5 py-2.5 rounded-xl border transition-all ${
+                      isOnCanvas
+                        ? 'border-blue-500/40 bg-blue-500/10'
+                        : 'border-space-700 bg-space-850/25 hover:border-space-600 hover:bg-space-800/40'
+                    }`}
+                  >
+                    <div className="flex items-start gap-2.5">
+                      {/* 图标 */}
+                      <div
+                        className="new-document-icon"
+                        data-active={isOnCanvas}
+                      >
+                        <NewTreeIcon />
                       </div>
 
-                      <p className="text-[11px] text-slate-500 truncate mt-0.5">
-                        {doc.description}
-                      </p>
+                      {/* 信息 */}
+                      <div className="flex-1 min-w-0">
+                        <div className="flex items-center gap-1.5">
+                          <GraphNameLabel id={doc.documentId} name={doc.documentName} kind="document" className="flex-1 text-[13px] font-medium truncate"><SearchHighlight text={doc.documentName} query={query} /></GraphNameLabel>
+                          {rootDocumentIds.has(doc.documentId) && <span data-tree-root={doc.documentId} title={`${doc.documentName}目录树`} className="shrink-0 rounded border border-amber-400/25 px-1 py-0.5 text-[9px] text-amber-200">目录树根</span>}
+                          {/* 在画布上的加一个状态点 */}
+                          {isOnCanvas && (
+                            <span
+                              title="正在画布中渲染"
+                              className="shrink-0 w-1.5 h-1.5 rounded-full bg-blue-400 shadow-[0_0_6px_rgba(96,165,250,0.9)]"
+                            />
+                          )}
+                        </div>
 
-                      <div className="flex items-center gap-2.5 mt-1.5 text-[10px] text-slate-500 tabular-nums">
-                        <span>{doc.stats.nodeCount} 节点</span>
-                        <span>{doc.stats.edgeCount} 边</span>
-                        <span className="ml-auto text-slate-600">
-                          {new Date(doc.updatedAt).toLocaleDateString('zh-CN')}
-                        </span>
+                        <p className="text-[12px] text-slate-400 truncate mt-0.5" title={doc.description}>
+                          {doc.description}
+                        </p>
+
+                        <div className="flex flex-wrap items-center gap-x-2.5 mt-1.5 text-[11px] text-slate-400 tabular-nums">
+                          <span>{doc.stats.nodeCount} 节点</span>
+                          <span>{doc.stats.edgeCount} 边</span>
+                          <span className="ml-auto">
+                            {new Date(doc.updatedAt).toLocaleDateString('zh-CN')}
+                          </span>
+                        </div>
                       </div>
                     </div>
-                  </div>
-                </button>
+                  </button>
+                  <button type="button" className="library-document-menu" title="更多图文档操作"
+                    aria-label={`${doc.documentName}的更多操作`} aria-haspopup="menu" aria-expanded={menu?.document.documentId === doc.documentId}
+                    onClick={event => {
+                      const trigger = event.currentTarget, rect = trigger.getBoundingClientRect();
+                      setMenu(current => current?.trigger === trigger ? undefined : { x: rect.left, y: rect.bottom, document: doc, trigger });
+                    }}>
+                    <MoreHorizontal size={16} aria-hidden="true" />
+                  </button>
+                </div>
               </div>
             );
           })}
           </div>
         </div>}
       </div>
-      {menu && <GraphContextMenu position={menu} onClose={() => setMenu(undefined)} items={[
+      {menu && <GraphContextMenu position={menu} trigger={menu.trigger} onClose={() => setMenu(undefined)} items={[
+        { key: 'renameDocument', label: '重命名图文档', disabled: action.busy, run: () => onRenameDocument(menu.document) },
         { key: 'exportDocument', label: '导出图文档', disabled: action.busy, run: () => exportDocument(menu.document) },
       ]} />}
     </aside>

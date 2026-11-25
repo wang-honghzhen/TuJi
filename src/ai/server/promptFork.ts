@@ -4,7 +4,7 @@ import type { ContextStage, Coverage } from '../contextState';
 import { allEvidence, artifactEvidence, currentEntries, fullCoverage, snapshotEvidence, summaryArchive } from './historyRepresentations';
 import { effectiveArtifacts } from '../memory';
 import { canvasGraphReferences, emptyGraphReferences, graphReferenceCodec, seedAddressableReferences, sessionGraphReferences } from './graphReferences';
-import { projectPromptEntries } from './promptProjection';
+import { projectPromptEntries, PROMPT_PROJECTION_VERSION } from './promptProjection';
 import { promptRouteSignature } from './promptPrefix';
 import { toolDefinitions } from './tools';
 import { webAccessEnabled } from '../webAccess';
@@ -42,7 +42,7 @@ export function capturePromptFork(state: AppSnapshot, source: Session): PromptFo
   const latest = state.tasks.filter(t=>t.sessionId===source.id).at(-1);
   if (!latest || latest.status !== 'completed' || !workspace.contextStage?.entries.length || !state.graph) return;
   if(workspace.contextStage.taskId!==latest.id&&workspace.contextStage.afterTaskId!==latest.id)return;
-  if(!workspace.contextStage.eventIds.includes(RULES_ID)
+  if(workspace.contextStage.projectionVersion!==PROMPT_PROJECTION_VERSION||!workspace.contextStage.eventIds.includes(RULES_ID)
     ||state.messages.some(m=>m.taskId===latest.id&&m.status==='streaming')
     ||state.toolCalls.some(c=>c.taskId===latest.id&&!['completed','rejected'].includes(c.status)))return;
   state=inheritedReadScope(state,latest);

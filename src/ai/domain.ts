@@ -12,6 +12,14 @@ export const TERMINAL_TASK_STATUSES: TaskStatus[] = ['completed'];
 export interface SourceRef { kind: 'message' | 'artifact' | 'node' | 'document' | 'edge' | 'note' | 'snapshot'; id: string; version: number | string; start?: number; end?: number; page?: number;
   /** Historical citations keep their version; current facts require review when their source changes. */
   tracking?: 'current' | 'historical'; unavailableReason?: 'history_reset' | 'source_unavailable' | 'source_cycle' }
+export interface SourcePrecondition extends SourceRef {
+  /** Host-owned field evidence from a verified, actually delivered summary source. */
+  summaryField?: {canvasId:string;field:string;version:string;start?:number;end?:number};
+  /** Host-owned footprint of an archived document read. The original object version remains its citation identity. */
+  documentRead?: { protocol: 1; canvasId: string;
+    fields: Array<{ field: string; version: string; start?: number; end?: number; total?: number }>;
+    parts: Array<{ part: import('./server/subgraphVersions').SubgraphPart; version: string }> };
+}
 export interface Session { id: string; canvasId: string; workspaceId: string; mode: SessionMode; title: string;
   titleSource?: 'manual' | 'pending' | 'message';
   temporaryContext?: { sourceSessionId?: string; revision: number; mode?: TemporaryMode; lockedAt?: string;
@@ -83,15 +91,14 @@ export interface Task { nodeReadEvidence?: Record<string,import('./server/nodeRe
   reviewFirstCommitSeq?: number; reviewWindowClosed?: boolean; notebookBinding?: { id: string; revision: number };
   pauseRequested?: boolean; pauseReturnStatus?: TaskStatus; waitingSince?: number; idleDurationMs?: number;
   presentation?: { owner: string; mode: 'follow'|'review'|'background'; epoch: number; cursor: number;
-    round?: { stepId:string; revision:number; lastSeq:number }; ack?: {stepId:string;epoch:number;lastSeq:number};
-    visiblePart?: {seq:number;since:number;epoch:number}; playbackPaused?: boolean };
+    playbackPaused?: boolean };
   presentationFocus?: string[];
   clientRequestId: string; instructionRevision: number; appliedInstructionRevision: number; status: TaskStatus; createdAt: string; updatedAt: string;
   finishedAt?: string; finishedSequence?: number;
   inputBindings: InputBinding; modelSelection?: ModelSelection; maxSteps: number; maxTokens: number; usedTokens: number; stepCount: number;
   readHashes?: Record<string, string>; maxDurationMs?: number; startedAt?: string;
   /** Versions sent in the response being executed, advanced only by its own committed writes. */
-  responseReadHashes?: { stepId: string; hashes: Record<string, string>; observations?: Observation[]; summaryObservations?: Observation[]; mutationLayoutVersion?: string };
+  responseReadHashes?: { stepId: string; hashes: Record<string, string>; observations?: Observation[]; mutationLayoutVersion?: string; textFieldBindings?:Record<string,string> };
   handoff?: { text: string; version: number }; memoryCalls?: number;
   canvasCapacity?: { fenceStepId?: string; organizing?: boolean; lastTokens?: number; noProgress?: number;
     grantedStep?: number; instructionRevision?: number };
@@ -129,6 +136,7 @@ export interface ToolCallRecord { id: string; providerCallId: string; taskId: st
   attachmentRead?: { artifactIds: string[]; versions: Record<string, number | string>; representation: 'index' | 'text' | 'image'; ranges?: unknown };
   readPageOrigins?:import('./server/readPageEvidence').ReadPageOrigin[];
   canvasOrigins?:import('./server/canvasReadEvidence').CanvasReadDelivery[];
+  unavailableRead?: { version: 1; canvasId: string; digest: string };
   directoryReplay?: import('./server/directoryEvidence').DirectoryReplayRequest;
   graphUsage?: import('./server/directoryEvidence').GraphUsageEvidence[];
   originResultId?: string; readOriginIds?: string[]; frozenSourceCallId?: string; resultRepresentation?: 'body' | 'receipt';
@@ -205,13 +213,13 @@ export interface ContextManifest { id: string; taskId: string; stepId?: string; 
   /** Host geometry snapshot for coordinate writes; not model-authored evidence. */
   mutationLayoutVersion?: string;
   canvasChecks?: Observation[];
-  /** Summary provenance checks never establish body-read or mutation evidence. */
-  summaryChecks?: Observation[];
+  textFieldBindings?:Record<string,string>;
   currentSources?: SourceRef[];
   /** Frozen transitive dependencies; rewriting a root cannot erase its old sources. */
-  sourceClosure?: SourceRef[];
+  sourceClosure?: SourcePrecondition[];
+  /** Submitted requests without this marker retain their original replacement rules. */
+  sourceClosureProtocol?: 2;
   notebookCheck?: import('./server/notebookChecks').NotebookCheck;
-  canvasPendingChanges?: Array<Record<string, unknown>>;
   /** Host-only versions actually advertised in this model input. */
   summaryVersions?: Record<string,string>; summaryViewHash?: string;
   memory?: { inputCapacity: number; apiInputCapacity?: number; contextPresetTokens?: import('./contextCapacity').ContextPresetTokens; occupancy: number; attachmentSummaryRequired: boolean;

@@ -1,9 +1,10 @@
-import type { AppSnapshot, ChangeSet, Task, ToolCallRecord } from '../domain';
+import type { AppSnapshot, ChangeSet, GraphPatch, Task, ToolCallRecord } from '../domain';
 import type { ReviewAction, ReviewDelta, ReviewGhost, ReviewPreview, ReviewUnit } from '../reviewTypes';
 import type { GraphState } from '@/v3/types';
 import { buildRenderModel } from '@/v3/layout';
 import { normalizeStructureSelection } from '@/v3/structure';
 import { getCanvasPaths } from '@/v3/paths';
+import { setSubgraphLayer } from '@/v3/spatialLevels';
 import { normalizedGraph, graphDiff, memberIds } from './graph';
 import { hash, id, now } from './repository';
 import { requireValue } from './errors';
@@ -12,6 +13,8 @@ import { allReviewChanges, reviewEntries, reviewGroups, reviewUnitRefs } from '.
 const object = (x: unknown): x is Record<string, unknown> => !!x && typeof x === 'object' && !Array.isArray(x);
 const memberships = new Set(['childIds', 'childNodeIds', 'childDocumentIds', 'memberIds', 'subjectIds', 'nodeReferenceIds', 'excludedDocumentIds']);
 const ignored = new Set(['rev', 'updatedAt', 'collapsed']);
+const edgeTopologyFields = new Set(['sourceNodeId', 'targetNodeId', 'directed', 'relationKind']);
+const changesEdgeTopology = (d: ReviewDelta) => d.collection === 'edges' && d.path.length === 1 && edgeTopologyFields.has(d.path[0]);
 function semantic(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(semantic);
   if (!object(value)) return value;
@@ -22,12 +25,18 @@ const comparable = (d: ReviewDelta, a: unknown, b: unknown) => same(d.layout ? a
 
 /** Membership edits are individual entries, never whole-list snapshots. */
 export function reviewDeltas(before: GraphState, after: GraphState): ReviewDelta[] {
+  return reviewPatchDeltas(graphDiff(before,after));
+}
+export function reviewPatchDeltas(patches:GraphPatch[]): ReviewDelta[] {
   const result: ReviewDelta[] = [];
-  for (const patch of graphDiff(before, after)) {
+  for (const patch of patches) {
     const walk = (a: unknown, b: unknown, path: string[]) => {
       if (same(a, b) || ignored.has(path.at(-1) ?? '')) return;
       const base = { collection: patch.collection, id: patch.id, path };
-      if (path.includes('placements') || path.includes('presentationPlacements')) {
+      if (path.length === 1 && path[0] === 'spatialLayerOffsets') {
+        const old = object(a) ? a : {}, next = object(b) ? b : {};
+        for (const ref of new Set([...Object.keys(old), ...Object.keys(next)])) walk(old[ref], next[ref], [...path, ref]);
+      } else if (path.includes('placements') || path.includes('presentationPlacements')) {
         if (path.at(-1) === 'placements' || path.at(-1) === 'presentationPlacements') {
           for (const key of new Set([...Object.keys(object(a) ? a : {}), ...Object.keys(object(b) ? b : {})]))
             walk(object(a) ? a[key] : undefined, object(b) ? b[key] : undefined, [...path, key]);
@@ -51,6 +60,7 @@ function identity(d: ReviewDelta): string | undefined {
 }
 export function overlap(a: ReviewDelta, b: ReviewDelta): boolean {
   if (a.collection !== b.collection || a.id !== b.id || a.layout || b.layout) return false;
+  if (changesEdgeTopology(a) && changesEdgeTopology(b)) return true;
   const length = Math.min(a.path.length, b.path.length);
   if (a.path.slice(0, length).some((part, i) => part !== b.path[i])) return false;
   return a.path.length !== b.path.length || a.member === undefined || b.member === undefined || a.member === b.member;
@@ -95,9 +105,10 @@ export function captureReviewUnits(before: GraphState, after: GraphState, canvas
       const edge = d.collection === 'edges' ? (d.after ?? d.before) : undefined;
       return object(edge) ? [edge.sourceNodeId, edge.targetNodeId].filter((v): v is string => typeof v === 'string') : [];
     })])], provides, removes, deltas, ghosts, dependencies: [], state: 'pending' };
-  const fields: Record<string, string> = { name: '名称', content: '正文', edgeContent: '关系说明', directed: '关系方向', sourceNodeId: '起点', targetNodeId: '终点' };
+  const fields: Record<string, string> = { name: '名称', content: '正文', edgeContent: '关系说明', directed: '关系方向', relationKind: '依赖类型', sourceNodeId: '起点', targetNodeId: '终点' };
   if (kind === 'updateNodeText' || kind === 'updateSubgraphText') base.label += ` · ${fields[String(command.field)] ?? '内容'}`;
   if (kind === 'patchNodeContent') base.label += ' · 正文';
+  if (kind === 'setSubgraphLayer') base.label = `调整「${name}」的空间层差至 ${command.offset}`;
   if (['move', 'moveCanvasItems', 'reparentContent'].includes(kind) && refs.length > 1) {
     const selected = normalizeStructureSelection(before, canvas, refs);
     const owners = new Map<string, string>();
@@ -116,9 +127,13 @@ export function captureReviewUnits(before: GraphState, after: GraphState, canvas
     const remaining = deltas.filter(d => !assigned.has(d));
     if (remaining.every(d => d.layout)) { moved[0]?.deltas.push(...remaining); return moved.filter(u => u.deltas.length); }
   }
-  // Independent edge text/direction fields can be selected separately. Design changes stay atomic with generated relations.
-  if (kind === 'updateEdge' && deltas.filter(d => !d.layout).length > 1) return deltas.filter(d => !d.layout).map(d => ({ ...base,
-    id: id('review:'), label: `${base.label} · ${fields[d.path.at(-1)!] ?? '关系'}`, deltas: [d] }));
+  if (kind === 'updateEdge') {
+    const topology = deltas.filter(changesEdgeTopology);
+    const groups = deltas.filter(d => !d.layout && !changesEdgeTopology(d)).map(d => [d]);
+    if (topology.length) groups.push(topology);
+    return groups.map((group,i) => ({ ...base, id: id('review:'), deltas: i === 0 ? [...group,...deltas.filter(d => d.layout)] : group,
+      label: `${base.label} · ${group.map(d => fields[d.path.at(-1)!] ?? '关系').join('、')}` }));
+  }
   return [base];
 }
 
@@ -177,7 +192,7 @@ function recordDecision(state: AppSnapshot, canvasId: string, action: ReviewActi
 /** Other canvases refresh only when their context actually used the shared data. */
 export function reviewAffectedWorkspaces(state: AppSnapshot, changes: ChangeSet[], units = changes.flatMap(c => c.review?.units ?? []), onlyWorkspaceId?: string): Set<string> {
   const changeIds = new Set(changes.map(c => c.id)), origins = new Set(changes.map(c => c.review?.canvasId));
-  const refs = new Set(units.flatMap(reviewUnitRefs));
+  const refs = new Set(units.filter(unit => unit.deltas.some(d => d.path[0] !== 'spatialLayerOffsets')).flatMap(reviewUnitRefs));
   const affected = new Set<string>();
   for (const workspace of state.workspaces) {
     if (onlyWorkspaceId && workspace.id !== onlyWorkspaceId) continue;
@@ -308,7 +323,9 @@ function inverse(graph: GraphState, unit: ReviewUnit): void {
     } else {
       if (delta.layout && !comparable(delta, current, delta.after)) continue;
       requireValue(comparable(delta, current, delta.after), `${unit.label}已有后续修改`, 'REVIEW_CONFLICT');
-      write(graph, delta, delta.before);
+      if (delta.collection === 'canvases' && delta.path[0] === 'spatialLayerOffsets' && unit.deltas.length === 1) {
+        graph.canvases = setSubgraphLayer({ ...graph }, delta.id, delta.path[1], Number(delta.before ?? 0)).canvases;
+      } else write(graph, delta, delta.before);
     }
   }
 }
@@ -337,8 +354,20 @@ export function planReview(state: AppSnapshot, canvasId: string, selectedIds: st
     chosen.add(unitId); reasons.set(unitId, reason); return true;
   };
   let graph: GraphState | undefined;
+  // Older field-level reviews stored reversed endpoints as separate units.
+  const topologyGroups = new Map<string, ReviewUnit[]>();
+  for (const {change,unit} of entries) if (change.review?.policy !== 'group') {
+    for (const edgeId of new Set(unit.deltas.filter(changesEdgeTopology).map(d => d.id))) {
+      const key = JSON.stringify([change.id,edgeId]);
+      const group = topologyGroups.get(key) ?? [];
+      group.push(unit); topologyGroups.set(key,group);
+    }
+  }
   for (let iteration = 0; iteration <= entries.length; iteration++) {
     let changed = false;
+    for (const group of topologyGroups.values()) if (group.length > 1 && group.some(unit => chosen.has(unit.id))) {
+      for (const unit of group) if (unit.state === 'pending') changed = add(unit.id, '同一次关系修改的方向、端点及依赖类型须一起决定') || changed;
+    }
     for (const { change, unit } of entries) if (chosen.has(unit.id) && change.review?.policy === 'group') {
       for (const member of entries.filter(e => e.change.review?.groupId === change.review!.groupId))
         changed = add(member.unit.id, '同一审阅组的完整提交必须一起决定') || changed;
@@ -382,7 +411,8 @@ export function planReview(state: AppSnapshot, canvasId: string, selectedIds: st
   }
   const affected = entries.filter(e => chosen.has(e.unit.id));
   const affectedCanvasIds = [...new Set([canvasId, ...affected.flatMap(e => e.change.affectedCanvasIds),
-    ...state.graph!.canvases.filter(c => affected.some(e => reviewUnitRefs(e.unit).some(ref => memberIds(state.graph!, c.canvasId).has(ref)))).map(c => c.canvasId)])];
+    ...state.graph!.canvases.filter(c => affected.some(e => e.unit.deltas.some(d => d.path[0] !== 'spatialLayerOffsets') &&
+      reviewUnitRefs(e.unit).some(ref => memberIds(state.graph!, c.canvasId).has(ref)))).map(c => c.canvasId)])];
   const preview: ReviewPreview = { planToken: '', canvasId, action, selectedIds: selected, unitIds: [...chosen], conflicts,
     selectedGroupIds: [...new Set(groupIds)], groupIds: [...new Set(affected.flatMap(e => e.change.review?.groupId ? [e.change.review.groupId] : []))],
     changeSetIds: [...new Set(affected.map(e => e.change.id))], affectedRefs: [...new Set(affected.flatMap(e => reviewUnitRefs(e.unit)))],

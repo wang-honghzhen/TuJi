@@ -2,7 +2,7 @@ import { AUTO_CONTEXT, type DirectoryRegion, type FrozenRead, type Observation }
 import type { DirectoryReplayRequest, GraphUsageEvidence } from './directoryEvidence';
 import type { DirectoryNode } from './directoryRead';
 
-export const DIRECTORY_POLICY_VERSION = 1;
+export const DIRECTORY_POLICY_VERSION = 2;
 export const DIRECTORY_CACHE_LIMITS = Object.freeze({ entries: AUTO_CONTEXT.directoryCacheEntries, metadataBytes: AUTO_CONTEXT.directoryCacheMetadataBytes });
 export interface CacheDirectoryEntry {
   id: string; replay: DirectoryReplayRequest; firstEnteredOrder?: number;

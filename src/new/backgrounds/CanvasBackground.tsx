@@ -54,7 +54,8 @@ export function CanvasBackground() {
   const source = id === 'custom' && customImageUrl ? customImageUrl : BUILTIN_BACKGROUND_URL;
   return <>
     <div aria-hidden="true" className={`canvas-background${id === 'white-grid' ? ' canvas-white-grid' : ''}`} data-canvas-background={id}>
-      {id !== 'white-grid' && <img src={source} alt="" draggable={false} />}
+      {id !== 'white-grid' && <img src={source} alt="" draggable={false}
+        style={source === BUILTIN_BACKGROUND_URL ? { opacity: .58 } : undefined} />}
     </div>
     {id === 'custom' && error && <p className="canvas-background-warning" role="status">自定义背景暂不可用，已显示内置星空。可在设置 → 个性化中重新上传。</p>}
   </>;

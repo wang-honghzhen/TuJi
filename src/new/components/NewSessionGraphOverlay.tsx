@@ -1,7 +1,7 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { useAiStore } from '@/ai/client';
 import { formatTime } from '@/ai/ui/common';
-import { AiCreateSessionDialog } from '@/ai/ui/AiSessionBar';
+import { AiCreateSessionDialog, AiRenameSessionDialog } from '@/ai/ui/AiSessionBar';
 import { layoutSessionDag, SESSION_ICON_SIZE, SESSION_NODE_HEIGHT, SESSION_NODE_WIDTH } from '../sessionGraphLayout';
 import { useNewUiStore, useSidebarInsets } from '../newUiStore';
 import { NewSessionIcon } from './NewSessionIcon';
@@ -23,10 +23,12 @@ export function NewSessionGraphOverlay({ canvasId, currentCanvasId, onSelect }: 
   const [viewport, setViewport] = useState({ width: 0, height: 0 });
   const [pan, setPan] = useState({ x: 0, y: 0 });
   const [dragging, setDragging] = useState(false);
-  const [menu, setMenu] = useState<{ x: number; y: number; parentId?: string }>();
+  const [menu, setMenu] = useState<{ x: number; y: number; parentId?: string; nodeId?: string }>();
+  const [renameId, setRenameId] = useState<string>();
   const [create, setCreate] = useState<{ parentId?: string }>();
   const [tooltip, setTooltip] = useState<{ title: string; x: number; y: number; width: number }>();
   const sessions = (snapshot?.sessions ?? []).filter(session => session.mode !== 'temporary' && session.canvasId === canvasId && session.lifecycle !== 'deleted');
+  const renameSession = sessions.find(session => session.id === renameId);
   const sessionKey = JSON.stringify(sessions.map(session => [session.id, session.title, session.mode, session.workspaceId, session.createdAt]));
   const firstByWorkspace = useMemo(() => {
     const first = new Map<string, string>();
@@ -38,7 +40,7 @@ export function NewSessionGraphOverlay({ canvasId, currentCanvasId, onSelect }: 
   const layout = useMemo(() => layoutSessionDag(sessions, edges), [sessionKey, edgeKey]);
   const canPan = sessions.length > 0 && (layout.width + 64 > viewport.width || layout.height + 64 > viewport.height);
   const points = new Map(layout.nodes.map(node => [node.session.id, node]));
-  useSessionGraphDismiss({ canvasId, nodes: layout.nodes, left, viewport, pan, suspended: dragging || !!menu || !!create, onDismiss: clearPreview });
+  useSessionGraphDismiss({ canvasId, nodes: layout.nodes, left, viewport, pan, suspended: dragging || !!menu || !!create || !!renameSession, onDismiss: clearPreview });
   useLayoutEffect(() => {
     const element = host.current; if (!element) return;
     const measure = () => setViewport({ width: element.clientWidth, height: element.clientHeight });
@@ -49,7 +51,7 @@ export function NewSessionGraphOverlay({ canvasId, currentCanvasId, onSelect }: 
     const escape = (event: KeyboardEvent) => { if (event.key === 'Escape' && !document.querySelector('[aria-modal="true"]')) { if (menu) setMenu(undefined); else clearPreview(null); } };
     window.addEventListener('keydown', escape); return () => window.removeEventListener('keydown', escape);
   }, [clearPreview, menu]);
-  return <div ref={host} className="new-session-graph-overlay" style={{ left, right: 0, cursor: canPan ? dragging ? 'grabbing' : 'grab' : 'default' }} data-ai-session-graph data-ai-graph-can-pan={canPan}
+  return <><div ref={host} className="new-session-graph-overlay" style={{ left, right: 0, cursor: canPan ? dragging ? 'grabbing' : 'grab' : 'default' }} data-ai-session-graph data-ai-graph-can-pan={canPan}
     onContextMenu={event => {
       event.preventDefault(); event.stopPropagation(); setTooltip(undefined);
       const id = (event.target as Element).closest<HTMLElement>('[data-ai-session-node]')?.dataset.aiSessionNode;
@@ -57,7 +59,7 @@ export function NewSessionGraphOverlay({ canvasId, currentCanvasId, onSelect }: 
       const parentId = candidates.find(session => session.id === id)?.id ?? (!id ? candidates.find(session => session.id === activeId)?.id ?? candidates[0]?.id : undefined);
       if (sessions.length && !parentId) return;
       const rect = event.currentTarget.getBoundingClientRect();
-      setMenu({ x: Math.max(rect.left + 8, Math.min(event.clientX, window.innerWidth - 180)), y: Math.min(event.clientY, window.innerHeight - 60), parentId });
+      setMenu({ x: Math.max(rect.left + 8, Math.min(event.clientX, window.innerWidth - 180)), y: Math.max(8, Math.min(event.clientY, window.innerHeight - (id ? 96 : 60))), parentId, nodeId: id });
     }}
     onPointerDown={event => {
       if (!(event.target as Element).closest('[data-ai-session-menu]')) setMenu(undefined);
@@ -102,8 +104,11 @@ export function NewSessionGraphOverlay({ canvasId, currentCanvasId, onSelect }: 
     {tooltip && <div role="tooltip" className="new-session-name-tooltip" style={{ left: tooltip.x, top: tooltip.y, maxWidth: tooltip.width }} data-ai-title-tooltip>{tooltip.title}</div>}
     {menu && <div role="menu" className="new-session-graph-menu" style={{ left: menu.x, top: menu.y }} data-ai-session-menu>
       <button type="button" role="menuitem" data-ai-graph-create onClick={() => { setCreate({ parentId: menu.parentId }); setMenu(undefined); }}>{sessions.length ? '创建子会话' : '创建根会话'}</button>
+      {menu.nodeId && <button type="button" role="menuitem" data-ai-graph-rename onClick={() => { setRenameId(menu.nodeId); setMenu(undefined); }}>重命名</button>}
     </div>}
+  </div>
+    {renameSession && <AiRenameSessionDialog key={renameSession.id} session={renameSession} onClose={() => setRenameId(undefined)} />}
     {create && <AiCreateSessionDialog key={`${canvasId}:${create.parentId ?? 'root'}`} canvasId={canvasId} initialParentId={create.parentId}
       onCreated={onSelect?sessionId=>onSelect(canvasId,sessionId):undefined} onClose={() => setCreate(undefined)} />}
-  </div>;
+  </>;
 }

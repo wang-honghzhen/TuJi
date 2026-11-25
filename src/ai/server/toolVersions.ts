@@ -2,8 +2,10 @@ import type { AppSnapshot, ContextManifest, SourceRef, Task, ToolCallRecord } fr
 import { visibleNoteEvidence } from './noteFreshness';
 import { requireValue } from './errors';
 import { withoutToolVersions } from './toolVersionProtocol';
-import { hash } from './repository';
+import { graphFieldVersion } from './graphReadTables';
 import { translateGraphPayload } from './graphReferences';
+import { canvasKey } from './canvasReadEvidence';
+import { isNavigationScope } from './graphQueries';
 
 /** Persisted on the submitted manifest, never added to messages or tools. */
 export interface ToolVersionBindings {
@@ -25,6 +27,17 @@ export function captureToolVersions(state:AppSnapshot,task:Task,manifest:Context
   const workspace=state.workspaces.find(w=>w.id===task.workspaceId)!;
   const progressSpans=new Map<string,Array<{start:number;end:number}>>();
   const bodyReadKeys=new Map<string,Set<string>>();
+  const navigationPages=new Map<string,Map<string,string>>();
+  for(const observation of manifest.canvasChecks??[]){
+    const {canvasPage,graphQuery}=observation;
+    if(!canvasPage||observation.evidenceUnknown||observation.canvasId!==task.canvasId
+      ||graphQuery?.tool!=='graph_search'||!isNavigationScope(graphQuery.arguments.scope))continue;
+    const fields=new Map<string,string>();
+    for(const {refId,field,start,version} of observation.canvasFacts??[])
+      if(start===undefined&&(field==='name'||field==='path'))fields.set(toolReadKey('graph_read_object_field',{refId,field}),version);
+    navigationPages.set(JSON.stringify([canvasPage.pointerId,canvasPage.page]),fields);
+  }
+  const navigationFields=new Map<string,string>();
   const sourceKeys=new Set<string>(),recordIds=new Set(manifest.items.flatMap(i=>i.derivedFrom));
   const addSource=(raw:unknown)=>{
     if(!object(raw)||!kinds.has(String(raw.kind))||typeof raw.id!=='string'||!validVersion(raw.version))return;
@@ -52,17 +65,38 @@ export function captureToolVersions(state:AppSnapshot,task:Task,manifest:Context
       readSources=new Map();
       for(const source of value.sources)if(object(source)&&['node','document'].includes(String(source.kind))&&typeof source.id==='string'&&typeof source.version==='string'){
         const id=decode(source.id);readSources.set(id,source.version);
-        for(const key of bodyReadKeys.get(id)??[])versions.reads[key]=source.version;
+      }
+      if(value.data.kind==='graph_search'&&value.data.output==='cards'&&typeof value.pointerId==='string'&&Array.isArray(value.data.items)){
+        const observed=navigationPages.get(JSON.stringify([decode(value.pointerId),value.page]));
+        if(observed)for(const card of value.data.items){
+          if(!object(card)||typeof card.refId!=='string')continue;
+          const refId=decode(card.refId);
+          for(const field of ['name','path'] as const){
+            if(card[field]===undefined||card[`${field}ReadWith`])continue;
+            const data=translateGraphPayload(card[field],decode);
+            const key=toolReadKey('graph_read_object_field',{refId,field});
+            if(observed.get(key)===canvasKey(data))navigationFields.set(key,graphFieldVersion(refId,field,data));
+          }
+        }
       }
     }
     if(typeof value.refId==='string'){
       const id=decode(value.refId),version=readSources.get(id);
+      if(version && typeof value.content==='string' && (value.field===undefined||value.field==='content')){
+        const text=value.content,start=typeof value.start==='number'?value.start:0,total=typeof value.contentLength==='number'?value.contentLength:text.length;
+        for(const key of bodyReadKeys.get(id)??[]){
+          const [, , , from,to]=JSON.parse(key);
+          if(from===null && start===0&&text.length===total)versions.reads[key]=graphFieldVersion(id,'content',text);
+          else if(typeof from==='number'&&typeof to==='number'&&from>=start&&to<=start+text.length)
+            versions.reads[key]=canvasKey([total,text.slice(from-start,to-start)]);
+        }
+      }
       // Complete replacement fields supersede an older truncated-field entry.
       // Hash the delivered value, never an unobserved live database field.
       if(version)for(const field of ['name','path','design']){
         const key=toolReadKey('graph_read_object_field',{refId:id,field});
         if(versions.reads[key]&&value[field]!==undefined&&!value[`${field}ReadWith`])
-          versions.reads[key]=hash([version,field,translateGraphPayload(value[field],decode)]);
+          versions.reads[key]=graphFieldVersion(id,field,translateGraphPayload(value[field],decode));
       }
     }
     if(typeof value.tool==='string'&&object(value.arguments))rememberRead(value.tool,value.arguments);
@@ -141,10 +175,15 @@ export function captureToolVersions(state:AppSnapshot,task:Task,manifest:Context
   // These are complete versions actually displayed in the current input. They
   // outrank older retained provenance, never a newer background database row.
   for(const source of [...manifest.canvasSources??[],...manifest.currentSources??[]]){
+    // A private summary-field digest cannot version a public whole-object citation.
+    if('summaryField' in source)continue;
     const key=JSON.stringify(source);if(sourceKeys.has(key))versions.sources=versions.sources.filter(s=>JSON.stringify(s)!==key);
     sourceKeys.delete(key);addSource(source);
   }
   for(const [id,version] of Object.entries(versions.notes))addSource({kind:'note',id,version});
+  // A confirmed current navigation field can refresh its old entry regardless of
+  // the order of cached messages. It cannot open a body reader or cite a node.
+  for(const [key,version] of navigationFields)if(versions.reads[key])versions.reads[key]=version;
   return versions;
 }
 
@@ -175,18 +214,18 @@ export function bindToolVersions(state:AppSnapshot,task:Task,call:ToolCallRecord
   if(call.name==='workspace_update_work_notes'){
     if(typeof args.noteId==='string')bindNumber(captured.notes[args.noteId],'expectedVersion',args.noteId);
   }
-  if(['graph_read_node_content','graph_read_directory_content','graph_read_object_field'].includes(call.name)){
+  if(args.current!==true&&['graph_read_node_content','graph_read_directory_content','graph_read_object_field'].includes(call.name)){
     const exact=captured.reads[toolReadKey(call.name,args)];
     let version:string|undefined=exact;
     if(!version&&call.name==='graph_read_node_content'&&(args.start!==undefined||args.end!==undefined)){
       version=captured.reads[toolReadKey(call.name,{refId:args.refId})];
       version??=captured.sources.filter(s=>s.kind==='node'&&s.id===args.refId).at(-1)?.version as string|undefined;
-      requireValue(typeof version==='string','该正文范围缺少已知来源，请先读取对象取得当前范围入口。','VERSION_BINDING_REQUIRED',
-        {executed:false,...recovery(call.name,String(args.refId))});
+      requireValue(typeof version==='string','该正文范围缺少已知版本；需要当前范围时可另开快照。','VERSION_BINDING_REQUIRED',
+        {executed:false,nextAction:'read_current_range',readWith:{tool:call.name,arguments:{...args,current:true}}});
     }
     if(version)args.expectedVersion=version;
   }
-  if(call.name==='graph_read_node_edges'){
+  if(call.name==='graph_read_node_edges'&&args.current!==true){
     const bind=(row:Record<string,unknown>)=>{
       const version=captured.reads[toolReadKey(call.name,row)];return {...row,...(version?{expectedRelationVersion:version}:{})};
     };

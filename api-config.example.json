@@ -9,9 +9,7 @@
     "maxOutputTokens": 16384,
     "supportsTools": true,
     "timeoutMs": 300000,
-    "thinkingEffort": "high",
-    "supportsVision": false,
-    "visionModels": []
+    "thinkingEffort": "high"
   },
   "summary": null,
   "webSearch": {

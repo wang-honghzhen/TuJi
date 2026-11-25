@@ -1,4 +1,4 @@
-import type { ConnectionSide, Point, Rect } from './types';
+import type { ConnectionSide, EdgeRouteStyle, GraphEdge, Point, Rect } from './types';
 import { RectangleIndex } from './rectangleIndex';
 import { routeIsClear } from './routeValidation';
 
@@ -71,8 +71,16 @@ export function choosePorts(source: Rect, target: Rect, obstacles: readonly Rect
   // First slide on the facing sides, using the actual obstacle boundaries.
   // The first feasible simple curve wins; there is no weighted visual score.
   const horizontal = a.side === 'top' || a.side === 'bottom';
+  // Distant obstacle boundaries often clamp to exactly the same pair of
+  // corners. Certifying that cubic again cannot change the result.
+  const shiftKey = (ports: typeof direct) =>
+    `${horizontal ? ports.source.x : ports.source.y}/${b.side === 'top' || b.side === 'bottom' ? ports.target.x : ports.target.y}`;
+  const tried = new Set([shiftKey(direct)]);
   for (const rect of obstacles) for (const at of horizontal ? [rect.x - 14, rect.x + rect.width + 14] : [rect.y - 14, rect.y + rect.height + 14]) {
     const shifted = pair(a.side, b.side, at, at);
+    const key = shiftKey(shifted);
+    if (tried.has(key)) continue;
+    tried.add(key);
     if (clear(shifted)) return shifted;
   }
   const alternateA = attachmentPoint(source, targetCentre, true).side;
@@ -89,6 +97,23 @@ export function choosePorts(source: Rect, target: Rect, obstacles: readonly Rect
       routeIsClear(makePolylineRoute([candidate.target, { x: candidate.target.x + b.x * 18, y: candidate.target.y + b.y * 18 }], 0), index);
   };
   return [direct, ...candidates].find(exitsClear) ?? direct;
+}
+
+// A drag rebuilds the render blocks, including rectangles nowhere near the
+// pointer. Keep one choice per immutable edge and check the precise geometry
+// (including obstacle order, which determines the first feasible detour).
+export function cachedPortChooser() {
+  type Choice = { source: Rect; target: Rect; obstacles: readonly Rect[]; ports: ReturnType<typeof choosePorts> };
+  const choices = new WeakMap<GraphEdge, Choice>();
+  const equal = (a: Rect, b: Rect) => a === b || a.x === b.x && a.y === b.y && a.width === b.width && a.height === b.height;
+  return (edge: GraphEdge, source: Rect, target: Rect, obstacles: readonly Rect[]) => {
+    const previous = choices.get(edge);
+    if (previous && equal(source, previous.source) && equal(target, previous.target) &&
+      obstacles.length === previous.obstacles.length && obstacles.every((rect, i) => equal(rect, previous.obstacles[i]))) return previous.ports;
+    const ports = choosePorts(source, target, obstacles);
+    choices.set(edge, { source, target, obstacles, ports });
+    return ports;
+  };
 }
 
 export type Cubic = [Point, Point, Point, Point];
@@ -120,9 +145,12 @@ export function pointOnRoute(route: EdgeRoute, t: number): Point {
   return { x: a.point.x + (b.point.x - a.point.x) * fraction, y: a.point.y + (b.point.y - a.point.y) * fraction };
 }
 export function routeBounds(route: EdgeRoute): Rect {
-  const points = route.segments.flat();
-  const x = Math.min(...points.map(p => p.x)), y = Math.min(...points.map(p => p.y));
-  return { x, y, width: Math.max(...points.map(p => p.x)) - x, height: Math.max(...points.map(p => p.y)) - y };
+  let left = Infinity, top = Infinity, right = -Infinity, bottom = -Infinity;
+  for (const segment of route.segments) for (const point of segment) {
+    left = Math.min(left, point.x); top = Math.min(top, point.y);
+    right = Math.max(right, point.x); bottom = Math.max(bottom, point.y);
+  }
+  return { x: left, y: top, width: right - left, height: bottom - top };
 }
 export function translateRoute(route: EdgeRoute, delta: Point): EdgeRoute {
   const segments = route.segments.map(segment => segment.map(p => ({ x: p.x + delta.x, y: p.y + delta.y })) as Cubic);
@@ -151,6 +179,51 @@ export function makePolylineRoute(input: Point[], cornerRadius = 8): EdgeRoute {
   }
   line(points[points.length - 1]);
   const route: EdgeRoute = { path, middle: points[0], segments }; route.middle = pointOnRoute(route, .5); return route;
+}
+
+/** Remove redundant straight-through vertices. A reversal would turn back into
+ * a port or trace the same segment twice, so discard that candidate. */
+function simplifyElbows(points: Point[]): Point[] | undefined {
+  const result: Point[] = [];
+  for (const p of points) {
+    const b = result.at(-1), a = result.at(-2);
+    if (b && p.x === b.x && p.y === b.y) continue;
+    if (a && b && (p.x === b.x && b.x === a.x || p.y === b.y && b.y === a.y)) {
+      if ((p.x - b.x) * (b.x - a.x) + (p.y - b.y) * (b.y - a.y) < 0) return undefined;
+      result.pop();
+    }
+    result.push(p);
+  }
+  return result;
+}
+
+/** Try the shortest port-tangent elbows first. The perimeter channels also
+ * cover an edge whose ports point away from each other. */
+export function orthogonalCandidates(source: Point, start: Point, end: Point, target: Point): Point[][] {
+  const midX = (start.x + end.x) / 2, midY = (start.y + end.y) / 2;
+  const byX = (x: number) => [{ x, y: start.y }, { x, y: end.y }];
+  const byY = (y: number) => [{ x: start.x, y }, { x: end.x, y }];
+  const elbows = [
+    byX(midX), byY(midY), [{ x: start.x, y: end.y }], [{ x: end.x, y: start.y }],
+    byX(Math.min(start.x, end.x) - 18), byX(Math.max(start.x, end.x) + 18),
+    byY(Math.min(start.y, end.y) - 18), byY(Math.max(start.y, end.y) + 18),
+  ];
+  const score = (points: Point[]) => points.reduce((value, p, i) => i ? value +
+    Math.abs(points[i - 1].x - p.x) + Math.abs(points[i - 1].y - p.y) + 18 : value, 0);
+  return elbows.flatMap(via => {
+    const points = simplifyElbows([source, start, ...via, end, target]);
+    return points ? [{ points, cost: score(points) }] : [];
+  }).sort((a, b) => a.cost - b.cost).map(candidate => candidate.points);
+}
+
+export function makeUnobstructedRoute(source: Point, target: Point, sourceSide: ConnectionSide, targetSide: ConnectionSide,
+  style: EdgeRouteStyle = 'curve'): EdgeRoute {
+  if (style === 'curve') return makeEdgeRoute(source, target, sourceSide, targetSide);
+  const a = vectors[sourceSide], b = vectors[targetSide];
+  const start = { x: source.x + a.x * 18, y: source.y + a.y * 18 };
+  const end = { x: target.x + b.x * 18, y: target.y + b.y * 18 };
+  return makePolylineRoute(orthogonalCandidates(source, start, end, target)[0] ??
+    [source, start, { x: end.x, y: start.y }, end, target]);
 }
 /** Handle length from a port to its control point. Facing ports get the classic
  *  third of the gap; a port whose normal points away from the target gets a
@@ -213,20 +286,19 @@ export function makeStubRoute(source: Point, target: Point): EdgeRoute {
     segments: [[source, source, middle, middle], [middle, middle, target, target]] };
 }
 
-/** Distance from a point to the drawn line, in world units. Overlapping hit
- *  bands are resolved by this: the band you press is the line you aimed at, not
- *  whichever one happened to be painted last. Sampled finer than rendering,
- *  because a press that lands on the line must measure as touching it. */
+/** Distance to the sampled curve in world units, including the spans between
+ * samples. Long straight runs can be picked anywhere along their length. */
 export function distanceToRoute(route: EdgeRoute, point: Point): number {
-  let best = Infinity;
-  for (const curve of route.segments) {
-    for (let step = 0; step <= 16; step += 1) {
-      const sample = cubicPoint(curve, step / 16);
-      const distance = Math.hypot(sample.x - point.x, sample.y - point.y);
-      if (distance < best) best = distance;
-    }
+  const points = samples(route);
+  let bestSquared = Infinity;
+  for (let i = 1; i < points.length; i++) {
+    const a = points[i - 1].point, b = points[i].point;
+    const dx = b.x - a.x, dy = b.y - a.y, lengthSquared = dx * dx + dy * dy;
+    const t = lengthSquared ? Math.max(0, Math.min(1, ((point.x - a.x) * dx + (point.y - a.y) * dy) / lengthSquared)) : 0;
+    const x = point.x - (a.x + t * dx), y = point.y - (a.y + t * dy);
+    bestSquared = Math.min(bestSquared, x * x + y * y);
   }
-  return best;
+  return Math.sqrt(bestSquared);
 }
 
 export interface EdgeLabel { text: string; point: Point; anchor: Point; rect: Rect }
@@ -256,18 +328,25 @@ function tangentOnRoute(route: EdgeRoute, t: number): Point {
   return { x: (b.x - a.x) / length, y: (b.y - a.y) / length };
 }
 
-export function placeEdgeLabel(route: EdgeRoute, content: string, occupied: Rect[] | RectangleIndex, viewport?: Rect): EdgeLabel {
+export function placeEdgeLabel(route: EdgeRoute, content: string, occupied: Rect[] | RectangleIndex, viewport?: Rect, scale = 1): EdgeLabel {
   const index = occupied instanceof RectangleIndex ? occupied : new RectangleIndex(occupied);
   const text = content.trim() || '关系';
   const lineWidths = text.split(/\r?\n/).map(line => [...line].reduce((sum, char) => sum + (char.charCodeAt(0) > 255 ? 11 : 6.5), 0));
-  const width = Math.min(240, Math.max(64, lineWidths.reduce((max, length) => Math.max(max, length), 0) + 16));
-  const rows = Math.min(3, lineWidths.reduce((sum, length) => sum + Math.max(1, Math.ceil(length / (width - 16))), 0));
-  const height = rows * 22;
-  const lift = height / 2 + LABEL_CLEARANCE;
+  const naturalWidth = Math.min(240, Math.max(64, lineWidths.reduce((max, length) => Math.max(max, length), 0) + 16));
+  const rows = Math.min(3, lineWidths.reduce((sum, length) => sum + Math.max(1, Math.ceil(length / (naturalWidth - 16))), 0));
+  const width = naturalWidth * scale, height = rows * 22 * scale;
+  const clearance = LABEL_CLEARANCE * scale;
+  const lift = height / 2 + clearance;
   const place = (anchor: Point, point: Point): EdgeLabel => {
     const rect = { x: point.x - width / 2, y: point.y - height / 2, width, height };
     index.add(rect); if (Array.isArray(occupied)) occupied.push(rect);
     return { text, point, anchor, rect };
+  };
+  const free = (point: Point) => {
+    const rect = {x: point.x - width / 2, y: point.y - height / 2, width, height};
+    if (viewport && (rect.x < viewport.x + clearance || rect.y < viewport.y + clearance ||
+      rect.x + width > viewport.x + viewport.width - clearance || rect.y + height > viewport.y + viewport.height - clearance)) return false;
+    return !index.collides(rect, 5 * scale) && labelClearsRoute(route, rect, clearance);
   };
   // Along the line's normal, further out in whole label heights on each ring:
   // the box must not sit on the line it describes, and a crowded area pushes it
@@ -277,14 +356,20 @@ export function placeEdgeLabel(route: EdgeRoute, content: string, occupied: Rect
       const anchor = pointOnRoute(route, t), tangent = tangentOnRoute(route, t);
       const normal = { x: -tangent.y, y: tangent.x };
       for (const sign of [-1, 1]) {
-        const distance = lift + ring * 28;
+        const distance = lift + ring * 28 * scale;
         const point = { x: anchor.x + normal.x * distance * sign, y: anchor.y + normal.y * distance * sign };
-        const rect = { x: point.x - width / 2, y: point.y - height / 2, width, height };
-        if (viewport && (rect.x < viewport.x + 6 || rect.y < viewport.y + 6 || rect.x + width > viewport.x + viewport.width - 6
-          || rect.y + height > viewport.y + viewport.height - 6)) continue;
-        if (index.collides(rect, 5) || !labelClearsRoute(route, rect)) continue;
-        return place(anchor, point);
+        if (free(point)) return place(anchor, point);
       }
+    }
+  }
+  // Short vertical/horizontal links can have their entire normal between rows
+  // of cards. For a screen-sized caption search around the midpoint as well.
+  if (scale > 1) {
+    const anchor = pointOnRoute(route, .5);
+    for (let ring = 1; ring <= 16; ring++) for (let direction = 0; direction < 12; direction++) {
+      const angle = direction * Math.PI / 6, distance = ring * 20 * scale;
+      const point = {x: anchor.x + Math.cos(angle) * distance, y: anchor.y + Math.sin(angle) * distance};
+      if (free(point)) return place(anchor, point);
     }
   }
   // Bounded search failed: a readable label at the nearest offset beats none.

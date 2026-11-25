@@ -1,5 +1,5 @@
 import { modeOf, MODE_LABELS } from '@/v3/design';
-import { useMemo, type ReactNode } from 'react';
+import { useMemo, useState, type ReactNode } from 'react';
 import { LayoutList, Plus, Settings } from 'lucide-react';
 import { SidebarToggle } from './SidebarToggle';
 import type { CanvasRecord } from '@/v3/types';
@@ -8,18 +8,22 @@ import { beginSidebarResize, useNewUiStore } from '../newUiStore';
 import { canvasListSummaries } from '../canvasListSummary';
 import { NewSessionIcon } from './NewSessionIcon';
 import { DirectoryTab, ReviewTab, NewDirectoryDock } from './NewDirectoryDock';
+import { GraphContextMenu } from './GraphContextMenu';
 
 interface NewLeftSidebarProps {
   canvases: CanvasRecord[];
+  currentDraft?: CanvasRecord;
   activeCanvasId: string | null;
   onOpenCanvas: (canvasId: string) => void;
   onCreateCanvas: () => void;
+  onRenameCanvas: (canvas: CanvasRecord) => void;
   directoryPanel: ReactNode;
   reviewPanel: ReactNode;
   onSettings?: () => void;
 }
 
-export function NewLeftSidebar({ canvases, activeCanvasId, onOpenCanvas, onCreateCanvas, directoryPanel, reviewPanel, onSettings }: NewLeftSidebarProps) {
+export function NewLeftSidebar({ canvases, currentDraft, activeCanvasId, onOpenCanvas, onCreateCanvas, onRenameCanvas, directoryPanel, reviewPanel, onSettings }: NewLeftSidebarProps) {
+  const [menu, setMenu] = useState<{ x: number; y: number; canvas: CanvasRecord }>();
   const isOpen = useNewUiStore(s => s.isLeftSidebarOpen), toggle = useNewUiStore(s => s.toggleLeftSidebar);
   const width = useNewUiStore(s => s.leftWidth), resizing = useNewUiStore(s => s.isResizing);
   const preview = useNewUiStore(s => s.previewCanvasId), setPreview = useNewUiStore(s => s.setPreviewCanvasId);
@@ -31,6 +35,10 @@ export function NewLeftSidebar({ canvases, activeCanvasId, onOpenCanvas, onCreat
   const showDirectory = placement === 'left' && tab === 'directory' && !drag;
   const showReview = reviewPlacement === 'left' && tab === 'review' && !reviewDrag;
   const showCanvases = !showDirectory && !showReview;
+  const openMenu = (event: React.MouseEvent, canvas: CanvasRecord) => {
+    event.preventDefault(); event.stopPropagation(); setPreview(null);
+    setMenu({ x: event.clientX, y: event.clientY, canvas });
+  };
 
   return <>
     <aside data-sidebar="left" aria-hidden={!isOpen} style={{ width: isOpen ? width : 0 }}
@@ -41,7 +49,7 @@ export function NewLeftSidebar({ canvases, activeCanvasId, onOpenCanvas, onCreat
         <div onMouseEnter={() => setPreview(null)} className="px-3 pt-4 pb-2.5">
           <div className="flex items-center justify-between gap-2.5 px-1">
             <div className="tuji-brand" aria-label="图记">
-              <span className="tuji-brand-mark"><img src="/brand/tuji.jpg" alt="" draggable={false} /></span>
+              <span className="tuji-brand-mark"><img src="/brand/sidebar-mark.webp" width={40} height={40} alt="" draggable={false} /></span>
               <span className="tuji-brand-name">图记</span>
             </div>
             <SidebarToggle side="left" expanded onClick={toggle} label="折叠侧栏" />
@@ -59,11 +67,17 @@ export function NewLeftSidebar({ canvases, activeCanvasId, onOpenCanvas, onCreat
           {showDirectory ? directoryPanel : showReview ? reviewPanel : <>
             <div className="px-4 pt-3 pb-1.5 flex items-center justify-between"><span className="text-[11px] font-medium text-slate-500">画布</span><span className="text-[11px] text-slate-600 tabular-nums">{canvases.length}</span></div>
             <div className="flex-1 min-h-0 overflow-y-auto new-scroll px-2 pb-2">
+              {currentDraft && <button type="button" data-current-draft={currentDraft.canvasId} aria-haspopup="menu"
+                title="当前临时画布，点击或右键可重命名" onClick={event => openMenu(event, currentDraft)} onContextMenu={event => openMenu(event, currentDraft)}
+                className="mb-1.5 flex w-full items-center gap-2 rounded-lg bg-blue-500/10 px-3 py-2 text-left text-[13px] text-blue-200">
+                <span className="min-w-0 flex-1 truncate">{currentDraft.canvasName}</span><span className="text-[11px] text-slate-400">草稿</span>
+              </button>}
               <div aria-hidden="true" className="new-session-rule mx-auto" />
               {canvases.map((canvas, index) => {
                 const active = canvas.canvasId === activeCanvasId, summary = summaries.get(canvas.canvasId)!;
                 const updated = new Date(summary.updatedAt).toLocaleString('zh-CN', { year: 'numeric', month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false });
                 return <button key={canvas.canvasId} data-ai-canvas-button={canvas.canvasId} type="button" data-active={active} aria-pressed={active}
+                  onContextMenu={event => openMenu(event, canvas)}
                   onClick={() => onOpenCanvas(canvas.canvasId)} onMouseEnter={() => { const s = useNewUiStore.getState(); if (!s.directoryDrag && !s.reviewDrag) setPreview(canvas.canvasId); }}
                   title={active ? '当前画布；再次点击返回临时画布' : `打开画布：${canvas.canvasName}`}
                   className={`new-session-btn group relative w-full text-left pl-12 pr-2.5 py-2.5 rounded-xl transition-all duration-300 ${active ? 'bg-blue-500/10' : 'hover:bg-white/5'} ${preview === canvas.canvasId ? 'ring-1 ring-inset ring-blue-400/30' : ''}`}>
@@ -82,6 +96,9 @@ export function NewLeftSidebar({ canvases, activeCanvasId, onOpenCanvas, onCreat
         </div>
       </div>
     </aside>
+    {menu && <GraphContextMenu position={menu} onClose={() => setMenu(undefined)} items={[
+      { key: 'renameCanvas', label: '重命名画布', run: () => onRenameCanvas(menu.canvas) },
+    ]} />}
     <NewDirectoryDock>{directoryPanel}</NewDirectoryDock>
   </>;
 }

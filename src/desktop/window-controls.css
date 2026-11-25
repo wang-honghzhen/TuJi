@@ -1,15 +1,13 @@
-/* Native pointer tracking reveals this strip at the actual 2-DIP top edge.
-   Buttons touch the top edge; their centres remain below the resize border. */
 .desktop-window-controls {
-  position: fixed; top: 0; right: 0; width: 116px; height: 0;
+  position: fixed; top: 0; right: 0; width: max-content; height: 0;
   z-index: 2147483646; outline: none; user-select: none;
   -webkit-app-region: no-drag;
 }
-.desktop-window-controls[data-maximized='true'] { width: 80px; }
 .desktop-window-controls:is([data-visible='true'], :focus-visible, :has(:focus-visible)) { height: 32px; }
 .desktop-window-buttons {
-  position: absolute; top: 0; right: 0; display: flex; gap: 0; padding: 0 8px 0 0;
-  border: 0; border-radius: 0 0 0 6px; background: #102541d9;
+  display: flex; gap: 0; padding: 0;
+  border: 0; border-radius: 0 0 0 6px; background: rgb(16 37 65 / 56%);
+  backdrop-filter: blur(4px);
   opacity: 0; visibility: hidden; pointer-events: none;
   transition: opacity 100ms ease;
 }
@@ -19,7 +17,7 @@
 .desktop-window-button {
   display: grid; place-items: center; flex: 0 0 36px; width: 36px; min-width: 36px;
   height: 32px; padding: 0; border: 0; border-radius: 0; background: transparent;
-  color: #d9e5f5; cursor: pointer; -webkit-app-region: no-drag;
+  color: #f2f6ff; cursor: pointer; -webkit-app-region: no-drag;
   transition: background 100ms, color 100ms;
 }
 .desktop-window-button:hover { background: #9fcaff24; color: #fff; }

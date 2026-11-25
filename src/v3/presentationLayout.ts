@@ -3,6 +3,7 @@ import { getNaturalGeometry, nearestRegionSpace, type RegionGeometry } from './r
 import { nodeGeometry } from './nodeGeometry';
 import { getCanvasPaths } from './paths';
 import { intersects } from './rectangleIndex';
+import { manualProtection, recentManualPlacement } from './placementPolicy';
 import type { CanvasRecord, GraphState, Placement, Rect } from './types';
 import { COLLAPSED_HEIGHT, COLLAPSED_WIDTH, RECORD_HEADER_HEIGHT, RECORD_PADDING } from './types';
 
@@ -61,15 +62,14 @@ export function presentationGeometry(state: GraphState, canvas: CanvasRecord,
   return { ...natural, document: size, directory: (_canvas, id) => size(id) };
 }
 
-/** Opening a region is a view transaction. Resolve its new collisions, then
- * propagate any resulting frame growth upward. Existing manual neighbours stay
- * fixed; a manually anchored opener yields only when another manual peer blocks
- * it. Every displacement is scoped to this canvas and can be undone with it. */
+/** Resolve new collisions in this view, then propagate frame growth upward.
+ * More recent manual positions take priority when two placed regions meet. */
 export function avoidExpandedRegion(state: GraphState, previous: CanvasRecord, expanded: CanvasRecord, id: string,
   options: { protectedIds?: ReadonlySet<string>; preserveExisting?: boolean } = {}): CanvasRecord {
   let canvas = expanded;
   const paths = getCanvasPaths(state, expanded), parents = new Map(paths.map(row => [row.id, row.parentId]));
   const natural = getNaturalGeometry(state);
+  const solveTime = Date.now();
   const oldGeometry = presentationGeometry(state, previous, natural);
   let current: string | undefined = id;
   while (current && parents.get(current)) {
@@ -93,7 +93,7 @@ export function avoidExpandedRegion(state: GraphState, previous: CanvasRecord, e
     // Preserve deliberate overlaps that were already visible while folded.
     const blockers = siblings.filter(child => intersects(target, rect(child)) &&
       (options.preserveExisting === false || !intersects(original, oldRect(child))));
-    const isManual = (child: string) => options.protectedIds?.has(child) || positions[child].source === 'manual' || Boolean(positions[child].manualAnchor);
+    const priority = (child: string) => options.protectedIds?.has(child) ? Infinity : manualProtection(positions[child], solveTime);
     const place = (child: string, obstacles: Rect[]) => {
       if (options.protectedIds?.has(child)) return;
       const before = rect(child), point = nearestRegionSpace(before, before, obstacles, parentId === canvas.canvasId);
@@ -104,9 +104,9 @@ export function avoidExpandedRegion(state: GraphState, previous: CanvasRecord, e
     };
     if (blockers.length) {
       if (options.protectedIds?.has(current)) {
-        for (const blocker of blockers.filter(child => !isManual(child)))
+        for (const blocker of blockers.filter(child => !recentManualPlacement(positions[child], solveTime)))
           place(blocker, ids.filter(child => child !== blocker && positions[child]).map(rect));
-      } else if (!isManual(current) || blockers.some(isManual)) place(current, siblings.map(rect));
+      } else if (blockers.some(child => priority(child) >= priority(current!))) place(current, siblings.map(rect));
       else for (const blocker of blockers) place(blocker, ids.filter(child => child !== blocker && positions[child]).map(rect));
     }
     current = parentId;

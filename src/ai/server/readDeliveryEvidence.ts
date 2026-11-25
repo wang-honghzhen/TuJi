@@ -16,7 +16,7 @@ const representation=(kind:string,result:Row,read?:FrozenRead):PageDeliveryEvide
   if(read?.attachmentRead?.representation==='image'||kind==='attachment_local'&&result.data?.representation==='image')return 'image';
   if(read?.attachmentRead?.representation==='index'||kind==='attachment_local'&&result.data?.representation==='index')return 'index';
   if(read?.summaryOrigin?.pure||kind==='summary_tree'||kind==='summary_children')return 'summary';
-  if(kind==='graph_read_directory'||kind==='graph_search'&&result.selection?.countOnly)return 'index';
+  if(kind==='graph_read_directory'||kind==='graph_read_dependencies'||kind==='graph_search'&&(result.selection?.countOnly||result.data?.output==='cards'))return 'index';
   if(result.recordDirectory&&!(result.data?.items??[]).some((i:Row)=>typeof i.content==='string'))return 'index';
   const items=result.data?.items;
   if(Array.isArray(items)&&items.length){

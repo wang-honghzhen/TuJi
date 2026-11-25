@@ -11,6 +11,7 @@ import { requestTokens } from './providers';
 import { planFrozenReads } from './frozenReadCommit';
 import { graphReadContext,type GraphReadContext } from './graphReadContext';
 import { contextNoteNoticeIds } from './taskNotices';
+import { canvasAvailability } from './unavailableCanvasReads';
 
 export interface NoticeFact { key:string; version:string; callIds:string[]; kind:string;labels:string[];detail?:string;nonCallSource?:boolean }
 export interface NoticeState {
@@ -25,19 +26,35 @@ export const noticeThreshold=(capacity:number)=>Math.max(1,Math.min(Math.floor(c
 interface ResolvedNoticeEvidence {
   canvasPending:ReturnType<typeof pendingCanvasChanges>;
   summaryEvidence:ReturnType<typeof summarySourceEvidence>;
+  noteFacts: ReturnType<typeof noteNoticeFacts>;
+  unavailable?: NoticeFact;
+}
+
+export function unavailableNoticeFact(canvasId:string,refs:ReadonlySet<string>,encode:(id:string)=>string):NoticeFact|undefined {
+  if(!refs.size)return;
+  const ids=[...refs].sort();
+  return {key:'canvas:unavailable',version:digest([canvasId,ids]),callIds:[],nonCallSource:true,
+    kind:'当前画布不可用',labels:ids.map(encode),detail:'定点读取已确认当前不可用，旧正文仅代表当时。'};
 }
 
 /** Private identities/versions, never parsed back from the abbreviated model-facing lines. */
 export function captureNoticeState(state:AppSnapshot,task:Task,stage:ContextStage,tokens:number,encode:(id:string)=>string=id=>id,requestSize?:number,readContext?:GraphReadContext,resolved?:ResolvedNoticeEvidence):NoticeState {
   readContext??=state.graph?graphReadContext(state):undefined;
+  if(!resolved){
+    const observations=visibleCanvasEvidence(state,task,stage),availability=canvasAvailability(state,task,stage,readContext);
+    resolved={canvasPending:pendingCanvasChanges(state,task,stage,readContext,observations,availability),
+      summaryEvidence:summarySourceEvidence(state,task,stage,observations,encode,availability,readContext),
+      noteFacts:noteNoticeFacts(state,task,stage,observations,availability),unavailable:unavailableNoticeFact(task.canvasId,availability.settled,encode)};
+  }
   const facts:NoticeFact[]=[];
-  for(const [key,{change,observations,observation}] of (resolved?.canvasPending??pendingCanvasChanges(state,task,stage,readContext)))facts.push({key:`canvas:${key}`,
+  for(const [key,{change,observations,observation}] of resolved.canvasPending)facts.push({key:`canvas:${key}`,
     version:digest(change),callIds:[...new Set(observations.flatMap(o=>o.callId?[o.callId]:[]))].sort(),
     ...canvasNoticeLabels(state,task,change,observation,encode,readContext),nonCallSource:observations.some(o=>!o.callId)});
-  for(const fact of noteNoticeFacts(state,task,stage))facts.push({key:fact.key,version:digest(fact.state),callIds:fact.callIds,
+  for(const fact of resolved.noteFacts)facts.push({key:fact.key,version:digest(fact.state),callIds:fact.callIds,
     ...noteNoticeLabels(fact,encode),nonCallSource:!fact.callIds.length});
-  for(const fact of (resolved?.summaryEvidence??summarySourceEvidence(state,task,stage,visibleCanvasEvidence(state,task,stage),encode)).facts)
+  for(const fact of resolved.summaryEvidence.facts)
     facts.push({...fact,version:digest(fact.state),nonCallSource:true});
+  if(resolved.unavailable)facts.push(resolved.unavailable);
   const noteNotices=contextNoteNoticeIds(state,task.workspaceId);
   const timelineNotices=stage.entries.filter(e=>e.representation!=='receipt'&&e.contextUpdate?.kind!=='note'&&!noteNotices.has(e.noticeId??'')
     &&(e.category==='review'||e.noticeId));

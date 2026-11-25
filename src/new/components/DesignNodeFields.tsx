@@ -1,3 +1,4 @@
+import { GraphPathLabel } from './GraphPathLabel';
 import type { CanvasRecord, DesignNodeData, DesignNodeType, GraphState } from '@/v3/types';
 import { DESIGN_LABELS } from '@/v3/design';
 import { getStructurePaths } from '@/v3/structure';
@@ -21,7 +22,7 @@ export function DesignNodeFields({ value, onChange, state, canvas, nodeId }: { v
     </>}
     {relationKey && <fieldset><legend className="mb-2 text-slate-400">{value.type === 'combination' ? '成员方案' : '描述的方案或组合'}</legend>
       <div className="max-h-40 overflow-auto new-scroll space-y-2 rounded border border-slate-700 p-2">
-        {options.map(row => <label key={row.id} className="flex gap-2 items-start break-words"><input type="checkbox" data-design-ref={row.id} checked={selected.includes(row.id)} onChange={event => onChange({ ...value, [relationKey]: event.target.checked ? [...selected, row.id] : selected.filter(id => id !== row.id) })} /><span>{row.path}</span></label>)}
+        {options.map(row => <label key={row.id} className="flex gap-2 items-start break-words"><input type="checkbox" data-design-ref={row.id} checked={selected.includes(row.id)} onChange={event => onChange({ ...value, [relationKey]: event.target.checked ? [...selected, row.id] : selected.filter(id => id !== row.id) })} /><GraphPathLabel segments={row.segments} /></label>)}
         {hidden.map(id => <label key={id} className="flex gap-2 text-slate-400"><input type="checkbox" checked onChange={() => onChange({ ...value, [relationKey]: selected.filter(ref => ref !== id) })} />当前画布外的已关联内容（取消勾选可解除）</label>)}
         {!options.length && !hidden.length && <p className="text-slate-500">尚无可关联的方案。可以先保存，再补充关联。</p>}
       </div>

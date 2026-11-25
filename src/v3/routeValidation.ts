@@ -3,8 +3,14 @@ import { RectangleIndex } from './rectangleIndex';
 import type { Point, Rect } from './types';
 
 const bounds = (points: Point[]): Rect => {
-  const x = Math.min(...points.map(p => p.x)), y = Math.min(...points.map(p => p.y));
-  return { x, y, width: Math.max(...points.map(p => p.x)) - x, height: Math.max(...points.map(p => p.y)) - y };
+  let left = Infinity, top = Infinity, right = -Infinity, bottom = -Infinity;
+  for (const point of points) {
+    left = Math.min(left, point.x);
+    top = Math.min(top, point.y);
+    right = Math.max(right, point.x);
+    bottom = Math.max(bottom, point.y);
+  }
+  return { x: left, y: top, width: right - left, height: bottom - top };
 };
 export function segmentEntersRect(a: Point, b: Point, r: Rect, gap = 0): boolean {
   let low = 0, high = 1;
@@ -33,9 +39,9 @@ export function routeIsClear(route: Pick<EdgeRoute, 'segments'>, input: Rect[] |
   deadline = Infinity): boolean {
   const index = input instanceof RectangleIndex ? input : new RectangleIndex(input);
   let remaining = 4096;
-  const visit = (curve: Cubic, obstacles: Rect[], depth: number): boolean => {
+  const visit = (curve: Cubic, obstacles: Rect[], depth: number, knownBounds?: Rect): boolean => {
     if (--remaining < 0 || performance.now() >= deadline) return false;
-    const box = bounds(curve), candidates = obstacles.filter(r => overlaps(box, r));
+    const box = knownBounds ?? bounds(curve), candidates = obstacles.filter(r => overlaps(box, r));
     const inside = !constraint || curve.every(p => contains(constraint, p));
     if (!candidates.length && inside) return true;
     const [a, b, c, d] = curve;
@@ -50,10 +56,11 @@ export function routeIsClear(route: Pick<EdgeRoute, 'segments'>, input: Rect[] |
     return visit([a, ab, abc, mid], candidates, depth + 1) && visit([mid, bcd, cd, d], candidates, depth + 1);
   };
   for (const curve of route.segments) {
-    const obstacles = index.query(bounds(curve), 5).map(r => ({ x: r.x - 5, y: r.y - 5, width: r.width + 10, height: r.height + 10 }));
+    const box = bounds(curve);
+    const obstacles = index.query(box, 5).map(r => ({ x: r.x - 5, y: r.y - 5, width: r.width + 10, height: r.height + 10 }));
     // Endpoint contact is legal; the interior of either terminal is not.
     obstacles.push(...terminals.map(r => ({ x: r.x + .001, y: r.y + .001, width: Math.max(0, r.width - .002), height: Math.max(0, r.height - .002) })));
-    if (!visit(curve, obstacles, 0)) return false;
+    if (!visit(curve, obstacles, 0, box)) return false;
   }
   return route.segments.length > 0;
 }

@@ -9,7 +9,7 @@ import { historyTurns, residentHistoryTurns } from '../history';
 import { digest } from './directGraph';
 import { requireValue } from './errors';
 import { historicalRecordView, viewedContent } from './historyRecordView';
-import { summaryProjection } from './summaryBindings';
+import { summaryProjection, usableSummaryReferences } from './summaryBindings';
 import { isDataRead } from './toolContextKinds';
 import { isReceipted, isWriteReceipted, visibleCallResult, visibleCallArguments, RETENTION_POLICY_VERSION } from './readVisibility';
 import { reviewEvidence } from './reviewContext';
@@ -62,7 +62,7 @@ export function validSummary(summary:SummarySnapshot,records:Evidence[],archive:
   if(visiting.has(summary.id)||!summary.coverage.length)return false;
   if(summary.semanticType!=='artifact'&&summary.retentionPolicyVersion!==RETENTION_POLICY_VERSION)return false;
   const tasks=new Set(summary.coverage.map(c=>c.taskId));
-  if(summary.semanticType==='task'&&tasks.size!==1)return false;
+  if(summary.semanticType==='task'&&(tasks.size!==1||!usableSummaryReferences(summary)))return false;
   if(new Set(summary.children).size!==summary.children.length)return false;
   if(summary.children.length){
     const children=summary.children.map(id=>archive.find(s=>s.id===id));

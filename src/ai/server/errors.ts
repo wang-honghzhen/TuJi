@@ -1,6 +1,13 @@
 export class DomainError extends Error {
   constructor(message: string, public code = 'INVALID_REQUEST', public status = 400, public details?: unknown) { super(message); }
 }
+/** Only the scoped graph_read membership check can establish this receipt. */
+export class CanvasObjectsUnavailable extends DomainError {
+  constructor(refs: string[]) {
+    super('对象不属于当前读取范围', 'OUT_OF_SCOPE', 400,
+      { failedRefs: refs, executed: false, nextAction: 'retry_with_in_scope_refs' });
+  }
+}
 export function requireValue(condition: unknown, message: string, code = 'INVALID_REQUEST', details?: unknown): asserts condition {
   if (!condition) throw new DomainError(message, code, 400, details);
 }

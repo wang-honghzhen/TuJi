@@ -1,4 +1,4 @@
-import { isReferenceField } from './graphReferences';
+import { isProtocolScope, isReferenceField } from './graphReferences';
 
 export interface ReferenceEdit { start:number; end:number; text:string }
 export type EmbeddedReferenceEdits = (key:string, row:Record<string,unknown>) => ReferenceEdit[] | undefined;
@@ -7,7 +7,7 @@ export function referenceEdits(text:string,encode:(id:string)=>string,record=tru
   embeddedRootFields:readonly string[]=record?['arguments','result']:[], embedded?:EmbeddedReferenceEdits):ReferenceEdit[] {
   let at=0;const edits:ReferenceEdit[]=[];
   let root:unknown;
-  if(embedded)try{root=JSON.parse(text);}catch{return [];}
+  try{root=JSON.parse(text);}catch{return [];}
   const whitespace=()=>{while(at<text.length&&/\s/.test(text[at]))at++;};
   const string=()=>{
     const start=at++;
@@ -18,6 +18,7 @@ export function referenceEdits(text:string,encode:(id:string)=>string,record=tru
     if(depth>100)throw new Error('Deep JSON');whitespace();
     if(text[at]==='"'){
       const token=string();
+      if(key==='scope'&&parent&&isProtocolScope(parent,token.value))return;
       if(isReferenceField(key)||arrayKey!==undefined&&isReferenceField(arrayKey,true)){
         const alias=encode(token.value);if(alias!==token.value)edits.push({start:token.start,end:token.end,text:JSON.stringify(alias)});
       }else{

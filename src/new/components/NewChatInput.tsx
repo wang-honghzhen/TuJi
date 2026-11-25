@@ -18,7 +18,7 @@ import { filterTargetGroups, targetGroupRefs } from '@/ai/targetGroups';
 import { flushCanvasEdits } from '../canvasEditFlush';
 import { trackDraftAction } from '@/ai/draftTransfers';
 
-export function NewChatInput({ canvasId = 'qixue-draft-canvas', sessionId }: { canvasId?: string; sessionId?: string }) {
+export function NewChatInput({ canvasId = 'qixue-draft-canvas', sessionId, surface = 'canvas' }: { canvasId?: string; sessionId?: string; surface?: 'canvas' | 'chat' }) {
   const snapshot = useAiStore((state) => state.snapshot);
   const activeId = useAiStore((state) => state.activeSessionByCanvas[canvasId]);
   const session = sessionId ? snapshot?.sessions.find(s => s.id === sessionId) : getSession(snapshot, canvasId, activeId);
@@ -40,7 +40,6 @@ export function NewChatInput({ canvasId = 'qixue-draft-canvas', sessionId }: { c
   const setDraft = useAiStore((state) => state.setDraft);
   const connection = useAiStore((state) => state.connection);
   const serviceError = useAiStore((state) => state.error);
-  const view = useAiStore((state) => state.view);
   const draft = draftState ?? getDraft(draftId);
   const modelSelection = draft.modelSelection && [snapshot?.provider.model, ...(snapshot?.provider.apiFamily === 'deepseek' ? DEEPSEEK_MODELS.map(model => model.id) : [])].includes(draft.modelSelection.model)
     ? draft.modelSelection : { model: snapshot?.provider.model ?? '', thinkingEffort: snapshot?.provider.thinkingEffort ?? 'high' as const };
@@ -90,7 +89,7 @@ export function NewChatInput({ canvasId = 'qixue-draft-canvas', sessionId }: { c
     const result = await command<Task>('input.send', { sessionId: currentSession.id, text: draft.text.trim(), clientMessageId,
       intent: sendIntent, ...(targetTask && sendIntent === 'amend' ? { targetTaskId: targetTask.id } : {}),
       targetIds: [...selected], targetGroups, artifactIds: draft.artifactIds, modelSelection, progressSelection:draft.progressSelection,
-      ...(!temporary && useAiStore.getState().view==='canvas'?{presentationOwner,
+      ...(!temporary && surface==='canvas'?{presentationOwner,
         ...(playback?.taskId&&playback.cursor>=0?{viewedPart:{taskId:playback.taskId,part:playback.cursor,
           version:snapshot?.presentationParts?.find(p=>p.taskId===playback.taskId&&p.seq===playback.cursor)?.version}}:{})}:{}) } satisfies SendInput);
     const sentGroups = new Set(targetGroups.map(group => group.groupId));
@@ -121,12 +120,12 @@ export function NewChatInput({ canvasId = 'qixue-draft-canvas', sessionId }: { c
   const unavailable = sessionUnavailable || session?.lifecycle === 'archived';
   const mainAction=()=>{if(composing)return;if(hasContent){send();return;}if(controlTask)void action.run(async()=>{await command(isPaused?'task.resume':'task.pause',{taskId:controlTask.id});});};
   const mainLabel=hasContent?(task?'补充当前任务':'发送消息'):controlTask?(isPaused?'继续任务':'暂停任务'):'发送消息';
-  const replyError = view === 'canvas' ? sessionTasks(snapshot, session?.id).at(-1)?.error || serviceError : undefined;
+  const replyError = surface === 'canvas' ? sessionTasks(snapshot, session?.id).at(-1)?.error || serviceError : undefined;
   return <div className="ai-composer" data-ai-composer data-ai-session-id={session?.id} data-session-unselected={!session||undefined}
     onDragOver={event=>{if(event.dataTransfer.types.includes('Files'))event.preventDefault();}}
     onDrop={event=>{if(!event.dataTransfer.files.length)return;event.preventDefault();if(!unavailable)upload(Array.from(event.dataTransfer.files));}}>
     <fieldset disabled={!session} aria-disabled={!session} className="ai-composer-box canvas-composer-surface">
-    {!temporary && view === 'canvas' && task?.interaction && <div className="canvas-composer-interaction"><AiInteractionView task={task} /></div>}
+    {!temporary && surface === 'canvas' && task?.interaction && <div className="canvas-composer-interaction"><AiInteractionView task={task} /></div>}
     {snapshot && !snapshot.credentialConfigured && <p className="px-4 pt-2 ai-muted">API Key 尚未配置，请在左侧边栏的设置中填写。</p>}
     {session?.lifecycle === 'archived' && <p className="px-4 pt-2 ai-muted">此会话已归档，当前仅可查看历史。</p>}
     {uploadAction.busy && <p className="px-4 pt-2 ai-muted">正在解析附件，解析完成后即可发送（可以先继续输入）。</p>}

@@ -26,7 +26,10 @@ export function AiHistoryPicker({ canvasId, initial = [], initialSourceId, singl
     const next=[...old],target=index+delta;if(target<0||target>=next.length)return old;
     [next[index],next[target]]=[next[target],next[index]];return next;
   });
-  return <AiModal title="选择继承任务及顺序" wide onClose={onClose}>
+  return <AiModal title="选择继承任务及顺序" wide onClose={onClose} dismissible={!busy}
+    footer={<><span className="ai-history-total">已选 {draft.length} 个任务</span>
+      <button type="button" className="ai-button" onClick={onClose} disabled={busy}>取消</button>
+      <button type="button" className="ai-button ai-button-primary" data-ai-selection-done data-ai-selection-apply disabled={busy} onClick={() => onApply(draft)}>{busy ? '正在应用…' : '应用选择'}</button></>}>
     <AiError text={error} />
     <p className="ai-muted">按点击顺序继承完整任务。可调整顺序，容量不足时最前面的任务先退出提示词。</p>
     {!singleSource && <div className="ai-row">{sessions.map(session => <button key={session.id} className="ai-button" data-ai-select-source={session.id}
@@ -41,7 +44,5 @@ export function AiHistoryPicker({ canvasId, initial = [], initialSourceId, singl
           <button className="ai-button" aria-label={`下移第${index+1}个任务`} disabled={index===draft.length-1} onClick={()=>move(index,1)}>下移</button>
           <button className="ai-button" onClick={()=>setDraft(old=>old.filter(t=>t.taskId!==item.taskId))}>移除</button></span></li>;
     })}</ol>}
-    <div className="ai-row"><button className="ai-button" onClick={onClose}>取消</button>
-      <button className="ai-button ai-button-primary" data-ai-selection-done data-ai-selection-apply disabled={busy} onClick={()=>onApply(draft)}>{busy?'正在应用…':'应用选择'}</button></div>
   </AiModal>;
 }

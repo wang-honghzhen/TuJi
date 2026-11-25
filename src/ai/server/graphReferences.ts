@@ -132,6 +132,14 @@ const scalarRefs = new Set(['subgraphRef', 'rootRefId', 'membershipFor', 'refId'
   'sourceRefId', 'targetRefId', 'sessionId', 'sourceSessionId', 'taskRef', 'currentTask', 'recordId', 'callId', 'originResultId', 'archiveEntry', 'archiveRef', 'taskId', 'originTaskId', 'stepId', 'toolCallId', 'scope']);
 const arrayRefs = new Set(['addMemberIds','removeMemberIds','addSubjectIds','removeSubjectIds', 'dependencyRefs', 'memberIds', 'subjectIds', 'targets', 'missingIds', 'refs', 'requestedRefs', 'displayedRefs', 'notDisplayedRefs', 'remainingRefs', 'selectedRefs', 'selectedIds', 'targetRefs', 'targetIds', 'explicitReadRefs', 'affectedRefs', 'childIds', 'childNodeIds', 'childDocumentIds', 'ids', 'recordIds', 'summaryIds', 'displayedSummaries', 'remainingSummaries', 'alreadyDisplayed', 'changeSetIds', 'operationIds', 'relatedOperationIds', 'callIds', 'taskIds', 'stepIds', 'toolCallIds', 'children', 'sourceTasks', 'boundaries', 'failedRefs']);
 export const isReferenceField=(key:string,array=false)=>array?arrayRefs.has(key):key==='id'||scalarRefs.has(key);
+const searchArgumentFields = new Set(['query','scope','refId','segments','match','recursive','designTypes','output','limit','budget']);
+/** The same key carries an enum in search requests/selection and an object ID in result data. */
+export function isProtocolScope(row:Record<string,unknown>, scope:unknown):boolean {
+  if(scope==='page')return ['full','partial','none'].includes(String(row.extent))&&Array.isArray(row.reasons);
+  if(!['node_names','all','children','path'].includes(String(scope)))return false;
+  return (typeof row.totalMatches==='number'&&typeof row.selectedMatches==='number')
+    || Object.keys(row).every(key=>searchArgumentFields.has(key));
+}
 arrayRefs.add('unavailableRefs');
 const graphKinds = ['node', 'document', 'edge'];
 /** Objects whose own `id` names a record of a known series, so an unseeded id still gets the right prefix. */
@@ -157,8 +165,7 @@ export function translateGraphPayload(value: unknown, translate: Translate, miss
   const hint = source || identityKinds.includes(kind) ? kind : message ? 'message'
     : kind === 'nodes' ? 'node' : kind === 'documents' ? 'document' : kind === 'edges' ? 'edge' : undefined;
   for (const [key, item] of Object.entries(value)) {
-    // coverage.scope is an enum, unlike graph query scope (an object identity).
-    if(key==='scope'&&item==='page'&&['full','partial','none'].includes(String(value.extent))&&Array.isArray(value.reasons)){
+    if(key==='scope'&&isProtocolScope(value,item)){
       result[key]=item;continue;
     }
     if(key==='__proto__') { Object.defineProperty(result,key,{value:translateGraphPayload(item,translate,missingSources),enumerable:true,writable:true,configurable:true});continue; }

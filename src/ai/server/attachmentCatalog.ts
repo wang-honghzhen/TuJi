@@ -36,7 +36,7 @@ export function authorizedAttachments(state: AppSnapshot, task: Task, taskIds?: 
       name: artifact?.name, mimeType: artifact?.mimeType, size: artifact?.size, pages: artifact?.pages, ocrPages:artifact?.ocrPages,
       chunks: artifact?.chunks.length, status: artifact?.status ?? 'unavailable', error: artifact?.error?.slice(0, 300),
       visualState: artifact?.visualState, owners: [owner],
-      readWith: { tool: imagesOnly ? 'workspace_view_artifact' : 'workspace_read_artifact', arguments: { artifactId: ref.id, version: ref.version } },
+      readWith: { tool: imagesOnly || artifact?.mimeType.startsWith('image/') ? 'workspace_view_artifact' : 'workspace_read_artifact', arguments: { artifactId: ref.id, version: ref.version } },
       ...(visual ? { viewWith: { tool: 'workspace_view_artifact' as const, arguments: { artifactId: ref.id, version: ref.version } } } : {}) } });
   };
   for (const m of state.messages.filter(m => localTasks.has(m.taskId) && requested.has(m.taskId) && m.workspaceId === workspace.id))
@@ -46,9 +46,14 @@ export function authorizedAttachments(state: AppSnapshot, task: Task, taskIds?: 
       for (const ref of messageAttachments(m)) add(ref, m.taskId, m.id, memory.artifacts ?? []);
   // Compatibility for pre-message-binding tasks, never a grant to the live parent of a snapshot.
   for (const t of state.tasks.filter(t => localTasks.has(t.id) && requested.has(t.id))) {
-    if (state.messages.find(m=>m.id===t.rootUserMessageId)?.attachments !== undefined) continue;
-    for (const id of t.inputBindings.artifactIds) add({ kind: 'artifact', id, version: t.inputBindings.artifactVersions[id] }, t.id, undefined,
-      state.artifacts.filter(a => a.workspaceId === workspace.id));
+    const root = state.messages.find(m => m.id === t.rootUserMessageId);
+    if (root && (root.attachments !== undefined || !sourceVisible(state, task, root.sourceRefs))) continue;
+    const bound = new Set(state.messages.filter(m => m.taskId === t.id && m.workspaceId === workspace.id)
+      .flatMap(m => messageAttachments(m, state)).map(ref => `${ref.id}:${ref.version}`));
+    for (const id of t.inputBindings.artifactIds) {
+      const version = t.inputBindings.artifactVersions[id];
+      if (!bound.has(`${id}:${version}`)) add({ kind: 'artifact', id, version }, t.id, undefined, state.artifacts.filter(a => a.workspaceId === workspace.id));
+    }
   }
   return [...found.values()];
 }

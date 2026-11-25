@@ -9,15 +9,15 @@ import type { DirectionSample, GrowthDirection, InsertionNeighbour } from './ins
 import { packMembers } from './packingLayout';
 import type { LayeredFlow } from './layeredSeed';
 import { structuralCandidates } from './structuralLayout';
+import { slotCandidates } from './slotLayout';
 import { measureArrangement } from './arrangementMetrics';
 import type { GraphState, Placement, Point, Rect } from './types';
-import { BLOCK_GAP } from './types';
+import { BLOCK_GAP, NODE_WIDTH, NODE_HEIGHT } from './types';
 import { choosePorts, portPoint, pointOnRoute } from './edgeGeometry';
 import { routeAroundObstacles } from './obstacleRouter';
-import { getHierarchyIndex } from './hierarchyIndex';
+import { getCanvasMembership, getHierarchyIndex } from './hierarchyIndex';
 import { layoutRelatedView } from './relatedViewLayout';
-import { relationEndpointGeometry } from './relationEndpointGeometry';
-import { refineEndpointPlacements } from './endpointRefinement';
+import { automaticPlacement, hasManualIntent, manualMovementCost, manualProtection, recentManualPlacement } from './placementPolicy';
 export { manualProtection } from './placementPolicy';
 
 export interface RelationshipLayoutOptions {
@@ -28,8 +28,10 @@ export interface RelationshipLayoutOptions {
   protectedIds?: string[];
   permittedIds?: string[];
   changedEdgeIds?: string[];
-  /** Objects moved or expanded by the user; also follows their internal edge endpoints. */
+  /** Objects moved or expanded by the user in the current view. */
   changedObjectIds?: string[];
+  /** Visible distance from pointer-down to the committed drop, in canvas units. */
+  dragDistance?: number;
   /** Keep shared canonical placements intact; adjust only this canvas's view. */
   viewOnly?: boolean;
   /** Children that arrived without a position (the AI writes a path, never a point). */
@@ -47,6 +49,8 @@ export interface LayoutStats {
   seeded?: number;
   /** Unrelated children tidied into reading order; organise mode only. */
   packed?: number;
+  /** Objects with a previous manual placement included in the organise preview. */
+  manualMoved?: number;
   /** Relation crossings and occupied area, measured before and after organising. */
   crossingsBefore?: number; crossingsAfter?: number;
   areaBefore?: number; areaAfter?: number;
@@ -91,7 +95,9 @@ export function layoutRelationships(input: GraphState, options: RelationshipLayo
   }
   const movable = new Set(options.movableIds), changedEdges = new Set(options.changedEdgeIds);
   const inserted = new Set([...(options.provisionalIds ?? []), ...(options.insertedIds ?? [])]);
-  const projection = getRelationProjection(input);
+  const triggers = options.movableIds || options.insertedIds || options.changedEdgeIds
+    ? new Set([...movable, ...(options.insertedIds ?? [])]) : inserted;
+  const projection = getRelationProjection(input, options.canvasId);
   let state = input;
   // A directory whose children carry no relations has nothing for the relation
   // solver to weigh: it is tidied into reading order instead. Organising is the
@@ -102,7 +108,7 @@ export function layoutRelationships(input: GraphState, options: RelationshipLayo
   }
   const regions = [...projection.values()].filter(region =>
     (!region.canvasId || region.canvasId === options.canvasId) && (!options.regionId || region.id === options.regionId) &&
-    (options.mode === 'organize' || region.relations.some(r => movable.has(r.source) || movable.has(r.target) || inserted.has(r.source) || inserted.has(r.target) || r.edgeIds.some(id => changedEdges.has(id)))))
+    (options.mode === 'organize' || region.relations.some(r => triggers.has(r.source) || triggers.has(r.target) || r.edgeIds.some(id => changedEdges.has(id)))))
     .sort((a, b) => b.depth - a.depth || a.key.localeCompare(b.key));
   for (const region of regions) {
     // The deadline bounds refinement, not coverage: every affected directory
@@ -120,7 +126,7 @@ export function layoutRelationships(input: GraphState, options: RelationshipLayo
     const incident = new Set(relations.flatMap(r => [r.source, r.target]));
     const touched = new Set(relations.filter(r => r.edgeIds.some(edge => changedEdges.has(edge))).flatMap(r => [r.source, r.target]));
     const candidates = ids.filter(id => incident.has(id) && !protectedIds.has(id) && (!permitted || permitted.has(id)) &&
-      !positions[id]?.manualAnchor && positions[id]?.source !== 'manual' &&
+      !recentManualPlacement(positions[id], options.solveTime) &&
       (options.mode === 'organize' || movable.has(id) || inserted.has(id) || touched.has(id)));
     // Every provisional child participates, independent of the refinement
     // budget. A partial batch must not strand later members at their first slot.
@@ -133,16 +139,19 @@ export function layoutRelationships(input: GraphState, options: RelationshipLayo
     const initial = { ...positions }; let best = initial;
     const root = Boolean(region.canvasId) && region.id === canvas.canvasId;
     const obstacleIds = ids;
-    const endpoints = relationEndpointGeometry(state, canvas, ids, sizes, relations, false);
+    const preferences = new Map(candidates.map(id => [id, manualProtection(initial[id], options.solveTime)]));
     const scoreCache = new WeakMap<Record<string, Placement>, number>();
     const score = (p: Record<string, Placement>) => {
       const cached = scoreCache.get(p); if (cached !== undefined) return cached;
-      let value = measureArrangement(ids, sizes, p, relations, endpoints.nested ? endpoints : undefined).score;
-      for (const id of candidates) value += distance(p[id], initial[id]) / 180 *
-        (inserted.has(id) ? 0 : movable.has(id) ? .05 : options.mode === 'auto' ? 2 : .05);
+      let value = measureArrangement(ids, sizes, p, relations).score;
+      for (const id of candidates) {
+        const weight = options.mode === 'organize' ? .45 : inserted.has(id) ? 0 : movable.has(id) ? .05 : 2;
+        value += distance(p[id], initial[id]) / 180 * weight
+          + manualMovementCost(initial[id], initial[id], p[id], preferences.get(id)!);
+      }
       scoreCache.set(p, value); return value;
     };
-    const baselineMetrics = measureArrangement(ids, sizes, initial, relations, endpoints.nested ? endpoints : undefined);
+    const baselineMetrics = measureArrangement(ids, sizes, initial, relations);
     const baselineScore = baselineMetrics.score;
     scoreCache.set(initial, baselineScore);
     // The region's own reading direction steers where an arriving child lands,
@@ -152,9 +161,10 @@ export function layoutRelationships(input: GraphState, options: RelationshipLayo
     const settled = anchorIds.length ? ids.filter(id => !anchorSet.has(id) && positions[id]) : [];
     const settledSet = new Set(settled);
     const samples: DirectionSample[] = [];
-    if (settled.length) for (const relation of relations) {
+    const organizing = options.mode === 'organize';
+    if (organizing || settled.length) for (const relation of relations) {
       if (relation.directed === false) continue;
-      if (!settledSet.has(relation.source) || !settledSet.has(relation.target)) continue;
+      if (!organizing && (!settledSet.has(relation.source) || !settledSet.has(relation.target))) continue;
       const sourceSize = sizes.get(relation.source), targetSize = sizes.get(relation.target);
       const source = initial[relation.source], target = initial[relation.target];
       if (!sourceSize || !targetSize || !source || !target) continue;
@@ -174,6 +184,9 @@ export function layoutRelationships(input: GraphState, options: RelationshipLayo
       for (const id of anchorIds) {
         if (skip?.has(id)) continue;
         const current = positions[id]; if (!current) continue;
+        // A historical anchor participates in optimisation, but starts from
+        // its current slot instead of being reinserted beside its strongest link.
+        if (hasManualIntent(current)) continue;
         if (performance.now() >= deadline) stats.exhausted = true;
         const size = sizes.get(id)!;
         const neighbours: InsertionNeighbour[] = [];
@@ -182,7 +195,7 @@ export function layoutRelationships(input: GraphState, options: RelationshipLayo
           const otherId = relation.source === id ? relation.target : relation.source;
           const otherSize = sizes.get(otherId), otherPoint = best[otherId];
           if (!otherSize || !otherPoint) continue;
-          neighbours.push({ id: otherId, weight: relation.weight,
+          neighbours.push({ id: otherId, weight: relation.weight, upstream: relation.directed !== false && relation.source === id,
             rect: { x: otherPoint.x, y: otherPoint.y, width: otherSize.width, height: otherSize.height } });
         }
         if (!neighbours.length) continue;
@@ -194,7 +207,7 @@ export function layoutRelationships(input: GraphState, options: RelationshipLayo
           occupiedRects.push({ x: otherPoint.x, y: otherPoint.y, width: otherSize.width, height: otherSize.height });
         }
         const occupied = new RectangleIndex(occupiedRects);
-        const point = chooseInsertionPoint(size, neighbours, occupied, { x: 0, y: 0 }, BLOCK_GAP, direction ?? 'right');
+        const point = chooseInsertionPoint(size, neighbours, occupied, { x: 0, y: 0 }, BLOCK_GAP, direction ?? 'right', root);
         const placed = { ...size, ...point };
         if (ids.some(other => other !== id && best[other] && sizes.get(other) &&
           intersects(placed, { ...sizes.get(other)!, ...best[other] }, BLOCK_GAP - .01))) continue;
@@ -205,12 +218,15 @@ export function layoutRelationships(input: GraphState, options: RelationshipLayo
     // Compare whole structural candidates before considering individual slots.
     let seeded: ReadonlySet<string> | undefined;
     if (anchorIds.length >= LAYERED_SEED_MIN) {
-      const cluster = seedLayeredCluster({ anchorIds, sizes, relations, positions: best, settled: settledRects, flow: direction, root, deadline, score });
+      const cluster = seedLayeredCluster({ anchorIds, sizes, relations, positions: best, settled: settledRects, flow: direction,
+        preservePosition: organizing, root, deadline, score });
       if (cluster) { best = cluster.best; seeded = cluster.placed; stats.seeded = (stats.seeded ?? 0) + cluster.count; }
     }
     anchorInserted(seeded);
+    if (options.mode === 'organize' && score(best) >= baselineScore) best = initial;
     let bestScore = score(best), iterations = 0;
-    for (let pass = 0; pass < (seeded ? 0 : 2); pass++) for (const id of candidates) {
+    const localCandidates = seeded ? candidates.filter(id => hasManualIntent(initial[id])) : candidates;
+    for (let pass = 0; pass < 2; pass++) for (const id of localCandidates) {
       if (performance.now() >= deadline || iterations >= (options.maxIterations ?? 500)) { stats.exhausted = true; break; }
       const size = sizes.get(id)!; const current = best[id];
       const maxMove = movable.has(id) ? 1600 : options.mode === 'auto' ? 160 : 800;
@@ -223,6 +239,11 @@ export function layoutRelationships(input: GraphState, options: RelationshipLayo
       }
       for (const step of [48, 112, 228]) trial.push({ x: current.x + step, y: current.y }, { x: current.x - step, y: current.y },
         { x: current.x, y: current.y + step }, { x: current.x, y: current.y - step });
+      if (preferences.get(id) && current !== initial[id]) {
+        for (const fraction of [0, .25, .5, .75]) trial.push({
+          x: initial[id].x + fraction * (current.x - initial[id].x), y: initial[id].y + fraction * (current.y - initial[id].y),
+        });
+      }
       const seen = new Set<string>();
       for (const point of trial) {
         if (performance.now() >= deadline || iterations++ >= (options.maxIterations ?? 500)) { stats.exhausted = true; break; }
@@ -237,11 +258,6 @@ export function layoutRelationships(input: GraphState, options: RelationshipLayo
         if (value < bestScore - .12) { best = proposed; bestScore = value; }
       }
     }
-    if (endpoints.nested && performance.now() < deadline) {
-      const refined = refineEndpointPlacements({ ids, sizes, relations, endpoints, positions: best, movable: candidates,
-        root, deadline, score });
-      best = refined.positions; bestScore = score(best); stats.candidates += refined.trials;
-    }
     const changed = [...new Set([...candidates, ...anchorIds])]
       .filter(id => best[id] && initial[id] && (best[id].x !== initial[id].x || best[id].y !== initial[id].y));
     if (!changed.length) continue;
@@ -250,7 +266,7 @@ export function layoutRelationships(input: GraphState, options: RelationshipLayo
     // discarded instead of shipped. The user keeps the arrangement they had.
     if (options.mode === 'organize') {
       const before = { ...baselineMetrics, score: baselineScore };
-      const after = { ...measureArrangement(ids, sizes, best, relations, endpoints.nested ? endpoints : undefined), score: bestScore };
+      const after = { ...measureArrangement(ids, sizes, best, relations), score: bestScore };
       stats.crossingsBefore = before.crossings; stats.crossingsAfter = after.crossings;
       stats.areaBefore = before.area; stats.areaAfter = after.area;
       if (!improvesArrangement(before, after)) { stats.rejected = true; continue; }
@@ -275,28 +291,31 @@ export function layoutRelationships(input: GraphState, options: RelationshipLayo
       const before = routeCost(initial), after = routeCost(best);
       if (before !== undefined && after !== undefined && after > before * 1.25 + 2 && baselineScore - bestScore < 4) continue;
     }
-    stats.moved += changed.length;
+    for (const id of changed) best[id] = automaticPlacement(initial[id], best[id]);
     if (doc) state = { ...state, documents: { ...state.documents, [doc.documentId]: { ...doc, placements: best, rev: doc.rev + 1,
       metadata: { ...doc.metadata, updatedAt: new Date(options.solveTime).toISOString() } } } };
     else state = { ...state, canvases: state.canvases.map(c => c === canvas ? { ...c, placements: best, updatedAt: new Date(options.solveTime).toISOString() } : c) };
     state = normalizeRegionLayout(state, input, protectedIds);
   }
-  stats.moved = Object.values(state.documents).reduce((count, doc) => count + Object.keys(doc.placements).filter(id =>
-    doc.placements[id].x !== input.documents[doc.documentId]?.placements[id]?.x || doc.placements[id].y !== input.documents[doc.documentId]?.placements[id]?.y).length, 0) +
-    state.canvases.reduce((count, canvas) => {
-      const old = input.canvases.find(c => c.canvasId === canvas.canvasId);
-      return count + Object.keys(canvas.placements).filter(id => canvas.placements[id].x !== old?.placements[id]?.x || canvas.placements[id].y !== old?.placements[id]?.y).length;
-    }, 0);
+  const countChanges = (placements: Record<string, Placement>, before?: Record<string, Placement>) => {
+    for (const [id, p] of Object.entries(placements)) {
+      const old = before?.[id];
+      if (p.x === old?.x && p.y === old.y) continue;
+      stats.moved++;
+      if (options.mode === 'organize' && hasManualIntent(old)) stats.manualMoved = (stats.manualMoved ?? 0) + 1;
+    }
+  };
+  stats.moved = 0;
+  for (const doc of Object.values(state.documents)) countChanges(doc.placements, input.documents[doc.documentId]?.placements);
+  for (const canvas of state.canvases) countChanges(canvas.placements, input.canvases.find(c => c.canvasId === canvas.canvasId)?.placements);
   stats.elapsedMs = performance.now() - started;
   if (performance.now() > deadline) stats.exhausted = true;
   return { state, stats };
 }
 
 /**
- * Reading order for a region that has no projected relations. Hand-placed and
- * protected children keep their rectangles; only automatic ones are re-shelved,
- * and only when the whole directory has no relation to optimise — a relational
- * directory keeps the solver's arrangement instead of being flattened.
+ * Reading order for loose notes. Try leaving historical placements alone
+ * before allowing the shelf to reclaim space they occupy.
  */
 function packUnrelatedChildren(
   state: GraphState,
@@ -305,7 +324,7 @@ function packUnrelatedChildren(
 ): { state: GraphState; moved: number } {
   const regionId = options.regionId;
   const canvas = state.canvases.find(c => c.canvasId === options.canvasId);
-  if (!regionId || !canvas) return { state, moved: 0 };
+  if (!regionId || !canvas || !getCanvasMembership(state, canvas).members.has(regionId)) return { state, moved: 0 };
   const doc = state.documents[regionId];
   const directory = doc ? undefined : canvasDirectory(canvas, regionId);
   if (!doc && !directory) return { state, moved: 0 };
@@ -318,6 +337,7 @@ function packUnrelatedChildren(
   const placements = doc?.placements ?? canvas.placements;
   const geometry = getNaturalGeometry(state);
   const protectedIds = new Set(options.protectedIds);
+  const permittedIds = options.permittedIds && new Set(options.permittedIds);
   const members: Array<{ id: string; size: { width: number; height: number }; position: Point }> = [];
   const fixed: Rect[] = [];
   for (const id of ids) {
@@ -325,13 +345,38 @@ function packUnrelatedChildren(
     if (!placement) continue;
     const size = state.nodes[id] ? nodeGeometry(state.nodes[id]) : state.documents[id] ? geometry.document(id) : geometry.directory(canvas, id);
     const rect = { x: placement.x, y: placement.y, width: size.width, height: size.height };
-    if (placement.source === 'manual' || placement.manualAnchor || protectedIds.has(id)) fixed.push(rect);
+    if (recentManualPlacement(placement, options.solveTime) || protectedIds.has(id) || permittedIds && !permittedIds.has(id)) fixed.push(rect);
     else members.push({ id, size: { width: size.width, height: size.height }, position: { x: placement.x, y: placement.y } });
   }
   if (members.length < 2) return { state, moved: 0 };
-  const packed = packMembers(members, { fixed });
+  // Tidy this cluster where it is already visible, including on a canvas
+  // panned far from its origin. The top left of a tidy shelf is a fixed point.
+  const shelf = (items: typeof members, obstacles: Rect[]) => {
+    const origin = { x: Math.min(...items.map(m => m.position.x)), y: Math.min(...items.map(m => m.position.y)) };
+    return packMembers(items, { fixed: obstacles, origin });
+  };
+  let packed = shelf(members, fixed);
+  const anchored = members.filter(m => hasManualIntent(placements[m.id]));
+  if (anchored.length) {
+    const cost = (points: ReadonlyMap<string, Point>) => {
+      let left = Infinity, right = -Infinity, top = Infinity, bottom = -Infinity, travel = 0;
+      for (const { id, position, size } of members) {
+        const p = points.get(id) ?? position, base = placements[id];
+        left = Math.min(left, p.x); right = Math.max(right, p.x + size.width);
+        top = Math.min(top, p.y); bottom = Math.max(bottom, p.y + size.height);
+        travel += .45 * distance(position, p) / NODE_WIDTH + manualMovementCost(base, position, p, manualProtection(base, options.solveTime));
+      }
+      return (right - left) * (bottom - top) / (NODE_WIDTH * NODE_HEIGHT) + travel;
+    };
+    const automatic = members.filter(m => !hasManualIntent(placements[m.id]));
+    if (automatic.length) {
+      const preserved = shelf(automatic, [...fixed, ...anchored.map(m => ({ ...m.position, ...m.size }))]);
+      if (cost(preserved.positions) <= cost(packed.positions)) packed = preserved;
+    }
+    if (cost(packed.positions) + .5 >= cost(new Map())) return { state, moved: 0 };
+  }
   if (!packed.moved.length) return { state, moved: 0 };
-  const updates = Object.fromEntries(packed.moved.map(id => [id, { ...placements[id], ...packed.positions.get(id)! }]));
+  const updates = Object.fromEntries(packed.moved.map(id => [id, automaticPlacement(placements[id], packed.positions.get(id)!)]));
   const updatedAt = new Date(options.solveTime).toISOString();
   const next: GraphState = doc
     ? { ...state, documents: { ...state.documents, [doc.documentId]: { ...doc, placements: { ...doc.placements, ...updates }, rev: doc.rev + 1,
@@ -349,6 +394,7 @@ function seedLayeredCluster(input: {
   positions: Readonly<Record<string, Placement>>;
   settled: readonly Rect[];
   flow: GrowthDirection | undefined;
+  preservePosition: boolean;
   root: boolean;
   deadline: number;
   score: (positions: Record<string, Placement>) => number;
@@ -365,6 +411,12 @@ function seedLayeredCluster(input: {
     input.flow ? FLOW[input.flow] : 'down', input.deadline);
   let winner: Record<string, Placement> | undefined, bestScore = Infinity;
   for (const candidate of candidates) {
+    if (input.preservePosition && input.flow && candidate.algorithm === 'layer-sweep') {
+      for (const slots of slotCandidates(candidate, input.positions, input.sizes, fixed, input.flow, input.root)) {
+        const score = input.score(slots);
+        if (score < bestScore) { winner = slots; bestScore = score; }
+      }
+    }
     const positions = new Map(candidate.positions);
     const entry = external.slice().sort((a, b) => b.weight - a.weight || a.source.localeCompare(b.source) || a.target.localeCompare(b.target))[0];
     let delta = { x: Math.min(...participants.map(id => input.positions[id].x)), y: Math.min(...participants.map(id => input.positions[id].y)) };
@@ -372,9 +424,17 @@ function seedLayeredCluster(input: {
       const id = member.has(entry.source) ? entry.source : entry.target, other = id === entry.source ? entry.target : entry.source;
       const otherSize = input.sizes.get(other)!, partner = input.positions[other];
       const slot = chooseInsertionPoint(blank(input.sizes.get(id)!),
-        [{ id: other, rect: { ...otherSize, ...partner }, weight: entry.weight }],
-        new RectangleIndex([...fixed]), { x: 0, y: 0 }, BLOCK_GAP, input.flow ?? 'right');
+        [{ id: other, rect: { ...otherSize, ...partner }, weight: entry.weight, upstream: entry.directed !== false && entry.source === id }],
+        new RectangleIndex([...fixed]), { x: 0, y: 0 }, BLOCK_GAP, input.flow ?? 'right', input.root);
       delta = { x: slot.x - positions.get(id)!.x, y: slot.y - positions.get(id)!.y };
+    } else if (input.preservePosition || !fixed.length) {
+      // A rigid translation leaves internal edge geometry unchanged. Coordinate
+      // medians minimise total horizontal + vertical travel and ignore outliers.
+      const offset = (axis: keyof Point) => {
+        const offsets = participants.map(id => input.positions[id][axis] - positions.get(id)![axis]).sort((a, b) => a - b);
+        return (offsets[Math.floor((offsets.length - 1) / 2)] + offsets[Math.floor(offsets.length / 2)]) / 2;
+      };
+      delta = { x: offset('x'), y: offset('y') };
     }
     if (!input.root) { delta.x = Math.max(0, delta.x); delta.y = Math.max(0, delta.y); }
     // A partially generated large graph can have hundreds of unrelated initial

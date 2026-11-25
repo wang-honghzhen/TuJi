@@ -1,4 +1,5 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { GraphReferenceLabel } from './GraphPathLabel';
+import { Fragment, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { Info, Scan, Sparkles } from 'lucide-react';
 import { useAiStore } from '@/ai/client';
 import { reviewEntries, expandReviewSelection } from '@/ai/changeReview';
@@ -11,25 +12,31 @@ import { SearchField, type PanelSearchProps } from './SearchField';
 import { searchPendingReviews } from '../graphSearch';
 
 const EMPTY: string[] = [];
-function displayDelta(delta: ReviewDelta, name: (ref: string) => string) {
-  const field = delta.path.at(-1) ?? '', labels: Record<string, string> = { name: '名称', content: '正文', description: '子图说明', edgeContent: '关系说明', directed: '关系方向', sourceNodeId: '起点', targetNodeId: '终点', pros: '优点', cons: '不足', type: '类型' };
-  const value = (v: unknown): string => {
+function displayDelta(delta: ReviewDelta, name: (ref: string, text?: string) => ReactNode) {
+  const field = delta.path.at(-1) ?? '', labels: Record<string, string> = { name: '名称', content: '正文', description: '子图说明', edgeContent: '关系说明', relationKind: '依赖类型', directed: '关系方向', sourceNodeId: '起点', targetNodeId: '终点', pros: '优点', cons: '不足', type: '类型' };
+  const ownerId = delta.path[0] === 'directories' ? delta.path[1] : delta.id;
+  const lines = (values: ReactNode[]) => values.map((line, i) => <Fragment key={i}>{i > 0 && '\n'}{line}</Fragment>);
+  const value = (v: unknown): ReactNode => {
     if (delta.member) return v ? '包含此成员' : '不包含此成员';
+    if (field === 'relationKind') return v === 'dependency' ? '起点依赖终点' : '普通关系';
     if (v === undefined) return '不存在';
     if (field === 'directed') return v ? '有向关系' : '无向关系';
-    if (typeof v === 'string') return ['sourceNodeId', 'targetNodeId'].includes(field) ? name(v) : v || '（空）';
-    if (Array.isArray(v)) return v.map(x => typeof x === 'string' ? x : value(x)).join('\n');
+    if (typeof v === 'string') {
+      if (['sourceNodeId', 'targetNodeId'].includes(field)) return name(v);
+      return field === 'name' && v ? name(ownerId, v) : v || '（空）';
+    }
+    if (Array.isArray(v)) return lines(v.map(x => typeof x === 'string' ? x : value(x)));
     if (v && typeof v === 'object') {
       const r = v as Record<string, unknown>;
       if (delta.layout) return `横向 ${Math.round(Number(r.x))}，纵向 ${Math.round(Number(r.y))}`;
-      if (typeof r.sourceNodeId === 'string' && typeof r.targetNodeId === 'string') return `${name(r.sourceNodeId)} ${r.directed ? '→' : '—'} ${name(r.targetNodeId)}\n${r.edgeContent ?? ''}`;
-      if ('name' in r) return [r.name, r.content, r.description, (r.metadata as { description?: string } | undefined)?.description,
-        Array.isArray(r.childIds) ? `${r.childIds.length} 个子项` : undefined].filter(x => x !== undefined && x !== '').join('\n');
-      return Object.entries(r).map(([key, v]) => `${labels[key] ?? key}：${value(v)}`).join('\n');
+      if (typeof r.sourceNodeId === 'string' && typeof r.targetNodeId === 'string') return <>{name(r.sourceNodeId)} {r.relationKind === 'dependency' ? '依赖' : r.directed ? '→' : '—'} {name(r.targetNodeId)}{'\n'}{String(r.edgeContent ?? '')}</>;
+      if (typeof r.name === 'string') return lines([name(ownerId, r.name), ...[r.content, r.description, (r.metadata as { description?: string } | undefined)?.description,
+        Array.isArray(r.childIds) ? `${r.childIds.length} 个子项` : undefined].filter(x => x !== undefined && x !== '').map(String)]);
+      return lines(Object.entries(r).map(([key, v]) => <>{labels[key] ?? key}：{value(v)}</>));
     }
     return String(v);
   };
-  return { label: delta.member ? `成员 · ${name(delta.member)}` : delta.layout ? '位置' : labels[field] ?? name(delta.id), before: value(delta.before), after: value(delta.after) };
+  return { label: delta.member ? <>成员 · {name(delta.member)}</> : delta.layout ? '位置' : labels[field] ?? name(delta.id), before: value(delta.before), after: value(delta.after) };
 }
 
 export function CanvasReviewPanel({ canvasId, query: controlledQuery, onQueryChange, showSearch = true }: { canvasId: string } & PanelSearchProps) {
@@ -45,9 +52,13 @@ export function CanvasReviewPanel({ canvasId, query: controlledQuery, onQueryCha
   const panel = useReviewUi(s => s.panels[canvasId] ?? DEFAULT_REVIEW_PANEL), configure = useReviewUi(s => s.panel);
   const entries = useMemo(() => snapshot ? reviewEntries(snapshot).filter(e => e.unit.state === 'pending' && e.change.review!.canvasId === canvasId) : [], [snapshot?.changes, snapshot?.reviewChanges, canvasId]);
   const taskIds = snapshot?.canvasReviewStates?.[canvasId]?.taskIds ?? EMPTY;
-  const matchingChanges = new Set(snapshot ? searchPendingReviews(snapshot, canvasId, query).map(r => r.id) : []);
-  const matchingGroups = new Set(entries.filter(e => matchingChanges.has(e.change.id)).map(e => e.change.review?.groupId).filter(Boolean));
-  const roundTaskId = taskIds.at(-1 - panel.round), shown = entries.filter(e => query.trim() ? matchingChanges.has(e.change.id) || !!e.change.review?.groupId && matchingGroups.has(e.change.review.groupId) : e.change.taskId === roundTaskId);
+  const roundTaskId = taskIds.at(-1 - panel.round);
+  const shown = useMemo(() => {
+    if (!snapshot || !query.trim()) return entries.filter(e => e.change.taskId === roundTaskId);
+    const matchingChanges = new Set(searchPendingReviews(snapshot, canvasId, query).map(result => result.id));
+    const matchingGroups = new Set(entries.filter(e => matchingChanges.has(e.change.id)).map(e => e.change.review?.groupId).filter(Boolean));
+    return entries.filter(e => matchingChanges.has(e.change.id) || !!e.change.review?.groupId && matchingGroups.has(e.change.review.groupId));
+  }, [snapshot, query, entries, roundTaskId, canvasId]);
   const roundTask = snapshot?.tasks.find(t => t.id === roundTaskId);
   const archived=[...snapshot?.reviewChanges ?? [], ...snapshot?.changes ?? []].find(c=>c.taskId===roundTaskId&&c.reviewArchive)?.reviewArchive;
   const roundRequest = snapshot?.messages.find(m => m.id === roundTask?.rootUserMessageId)?.text??archived?.request??archived?.title;
@@ -82,6 +93,7 @@ export function CanvasReviewPanel({ canvasId, query: controlledQuery, onQueryCha
     <p className="review-help">AI 修改后，点击画布上的标记即可保留或回退。</p>
   </div></>;
   const name = reviewObjectName(snapshot, canvasId);
+  const labelFor = (id: string, text = name(id)) => <GraphReferenceLabel id={id} name={text} graph={snapshot.graph} canvasId={canvasId} />;
   const groups = new Map<string, typeof shown>();
   for (const e of shown) {
     const key = e.change.review?.groupId ?? 'legacy:' + (e.unit.parentId ?? canvasId);
@@ -93,7 +105,7 @@ export function CanvasReviewPanel({ canvasId, query: controlledQuery, onQueryCha
   };
   const differences = (unit: typeof shown[number]['unit']) => <details className="review-unit-diff"><summary>查看变化</summary>
     {unit.deltas.filter(d => !d.layout || unit.kind === 'move' && unit.refs.includes(d.path.at(-1)!)).map((d, i) => {
-      const diff = displayDelta(d, name);
+      const diff = displayDelta(d, labelFor);
       return <div key={i} className="review-diff"><strong>{diff.label}</strong>
         <div className="review-before"><span>修改前</span><pre>{diff.before}</pre></div>
         <div className="review-after"><span>修改后</span><pre>{diff.after}</pre></div></div>;
@@ -121,14 +133,15 @@ export function CanvasReviewPanel({ canvasId, query: controlledQuery, onQueryCha
           const groupIds = group.map(e => e.unit.id), count = groupIds.filter(id => ids.includes(id)).length;
           const grouped = group[0].change.review?.policy === 'group';
           const refs = reviewObjectRefs(snapshot, groupIds), names = refs.map(name);
-          const label = grouped ? names.slice(0, 2).join('、') + (names.length > 2 ? ' 等 ' + names.length + ' 个对象' : '')
-            : name(group[0].unit.parentId ?? canvasId);
+          const displayRefs = grouped ? refs.slice(0, 2) : [group[0].unit.parentId ?? canvasId];
           const kinds = [...new Set(group.map(e => ({ create: '新增', update: '修改', delete: '删除', move: '移动' }[e.unit.kind])))].join('、');
           const commits = [...new Set(group.map(e => e.change.id))];
           return <div key={key} className={'review-group' + (count ? ' is-selected' : '')} data-review-group={grouped ? key : undefined}>
             <label className="review-group-label"><input type="checkbox" checked={count === group.length} disabled={working}
               ref={el => { if (el) el.indeterminate = count > 0 && count < group.length; }} onChange={() => toggle(groupIds)} />
-              <span title={names.join('、')}>{label}</span></label>
+              <span title={names.join('、')}>{displayRefs.map((id, i) => <Fragment key={id}>{i > 0 && '、'}
+                {labelFor(id)}</Fragment>)}
+                {grouped && names.length > 2 && ` 等 ${names.length} 个对象`}</span></label>
             {grouped ? <><p className="review-group-caption">{kinds}{refs.length > 1 ? ' · 一起处理' : ''}</p>
               <details className="review-group-details"><summary>查看修改</summary>
                 {group.map(({ unit, change }, index) => <div key={unit.id} data-review-unit={unit.id} className="review-item">

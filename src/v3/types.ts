@@ -71,6 +71,8 @@ export interface CanvasRecord {
   directories: Record<string, CanvasDirectory>;
   placements: Record<string, Placement>;
   collapsed: Record<string, true>;
+  /** Relative integer elevation for mounted regions on this canvas. An omitted offset inherits the parent plane. */
+  spatialLayerOffsets?: Record<string, number>;
   /** Canvas-only collision adjustments made while opening a folded region.
    * The canonical anchor remains unchanged, including shared document content. */
   presentationPlacements?: Record<string, Point & { parentId: string; baseX: number; baseY: number }>;
@@ -89,6 +91,8 @@ export type ConnectionSide = 'top' | 'right' | 'bottom' | 'left';
 export type EdgeRouteStyle = 'curve' | 'orthogonal';
 
 export interface GraphEdge {
+  /** A directed node-to-node dependency: the source depends on the target. Absent on ordinary links. */
+  relationKind?: 'dependency';
   /** Generated from combination membership; edit members on the combination. */
   membershipFor?: string;
   edgeId: string;
@@ -115,6 +119,9 @@ export const NODE_WIDTH = 180;
 export const NODE_HEIGHT = 64;
 export const RECORD_MIN_WIDTH = 260;
 export const RECORD_HEADER_HEIGHT = 52;
+/** Height of an expanded title in the 2D view. Saved layout coordinates keep
+ * their original record geometry for imports, manual placements and 3D. */
+export const PLANAR_HEADER_HEIGHT = 32;
 export const RECORD_PADDING = 24;
 export const COLLAPSED_WIDTH = 240;
 export const COLLAPSED_HEIGHT = 112;

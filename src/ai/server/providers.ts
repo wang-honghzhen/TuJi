@@ -221,7 +221,7 @@ function validateRequest(request: ModelRequest, config: ProviderConfig): void {
 
 function makeBody(config: ProviderConfig, request: ModelRequest, urls?:Map<string,string>): JsonObject {
   const content=(message:ModelMessage)=>message.images?.length
-    ? [{type:config.protocol==='responses'?'input_text':'text',text:message.content},...message.images.map(image=>config.protocol==='responses'
+    ? [...(message.content ? [{type:config.protocol==='responses'?'input_text':'text',text:message.content}] : []),...message.images.map(image=>config.protocol==='responses'
       ? {type:'input_image',image_url:urls?.get(image.assetId)??`qixue-asset:${image.assetId}`,detail:'high'}
       : {type:'image_url',image_url:{url:urls?.get(image.assetId)??`qixue-asset:${image.assetId}`,detail:'high'}})] : message.content;
   const common: JsonObject = { model: config.model, stream: config.stream !== false, store: false };
@@ -288,7 +288,7 @@ function parseRetryAfter(value: string | null): number | undefined {
   return Number.isFinite(time) ? Math.min(86_400_000, Math.max(0, time - Date.now())) : undefined;
 }
 
-function httpError(status: number, body: unknown, headers: Headers, credential: string): ProviderError {
+function httpError(status: number, body: unknown, headers: Headers, credential: string, sentImages = false): ProviderError {
   const error = record(body) && record(body.error) ? body.error : record(body) ? body : {};
   const providerCode = safeIdentifier(error.code ?? error.type, credential);
   const details = { status, providerCode, requestId: safeIdentifier(headers.get('x-request-id'), credential),
@@ -298,6 +298,10 @@ function httpError(status: number, body: unknown, headers: Headers, credential: 
   if (status >= 500) return new ProviderError('server', '模型提供方暂时不可用。', { ...details, retryable: true });
   if (providerCode === 'context_length_exceeded' || providerCode === 'context_window_exceeded') return new ProviderError('context_limit', '提示词超过提供方的上下文上限。', details);
   const diagnostic = `HTTP ${status}${providerCode ? '，' + providerCode : ''}${details.parameter ? '，参数 ' + details.parameter : ''}`;
+  if (sentImages && [400, 415, 422].includes(status) &&
+    /image_url|input_image|vision|multimodal|image (?:input|content)|图片输入|图像输入/i.test(String(error.message))) {
+    return new ProviderError('invalid_request', `模型服务拒绝了这次图片输入（${diagnostic}）。请核对服务端的图像输入支持或更换模型后重试。`, details);
+  }
   const schemaTool = typeof error.message === 'string'
     ? safeIdentifier(error.message.match(/Invalid schema for function ['"]([a-zA-Z0-9_-]{1,64})['"]/i)?.[1], credential) : undefined;
   if ((status === 400 || status === 422) && (providerCode === 'invalid_request_error' || schemaTool)) {
@@ -590,7 +594,7 @@ export async function callModel(config: ProviderConfig, credential: string, requ
   let payload: string;
   const images=request.messages.flatMap(m=>m.images??[]),urls=new Map<string,string>();
   if(images.length){
-    if(config.supportsVision!==true||!options.resolveImage)throw new ProviderError('invalid_config','当前模型未配置视觉能力或图像加载器。');
+    if(!options.resolveImage)throw new ProviderError('invalid_config','请求中的图片缺少图像加载器。');
     for(const image of images)if(!urls.has(image.assetId))urls.set(image.assetId,await options.resolveImage(image));
   }
   try { payload = JSON.stringify(makeBody(config, request,urls)); } catch { throw new ProviderError('invalid_request', '提示词或工具定义无法序列化。'); }
@@ -613,7 +617,7 @@ export async function callModel(config: ProviderConfig, credential: string, requ
       let value: unknown = {};
       try { value = parseJson(await readLimited(response.body, pulse, 64 * 1024)); }
       catch (error) { if (controller.signal.aborted) throw error; }
-      throw httpError(response.status, value, response.headers, credential);
+      throw httpError(response.status, value, response.headers, credential, images.length > 0);
     }
     const limit = config.maxResponseBytes ?? 16 * 1024 * 1024;
     const streamOptions: CallModelOptions = { onDelta: options.onDelta, signal: controller.signal };

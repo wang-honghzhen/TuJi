@@ -1,5 +1,6 @@
 import { readSubgraphEdges } from './subgraphEdgeRead';
-import { SUBGRAPH_EDGE_TOOLS } from './graphQueries';
+import { inheritedReadScope } from './inheritedReadScope';
+import { SUBGRAPH_EDGE_TOOLS, bodyRangeQuery, nodeDependencies, isNavigationScope, navigationMatches, searchMatches, textMatches } from './graphQueries';
 import { graphReadUsage, attachFrozenDirectoryEvidence } from './directoryEvidence';
 import { randomUUID } from 'node:crypto';
 import type { AppSnapshot, Task, ToolCallRecord, SourceRef } from '../domain';
@@ -10,46 +11,67 @@ import { graphTables } from './graphReadTables';
 import { fieldReadWith } from './graphReadFields';
 import { assertDesignQuery, validateNodeSearch, nodeSearchMatches, designReferences, graphQueryKey, graphQueryVersion, type GraphQuery } from './graphQueries';
 import { directReadBudgets, readCapacityReceipt } from './directReadBudget';
-import { readCoverage, readKind, pageCoverage, READ_FORMAT_VERSION } from './readCoverage';
+import { FROZEN_GRAPH_PAGE_STATUS, readCoverage, readKind, pageCoverage, READ_FORMAT_VERSION } from './readCoverage';
 import { requireValue } from './errors';
-import { GRAPH_READ_LIMITS, resourceLimit, checkFrozenStorage, checkGraphReadSource } from './graphReadLimits';
+import { GRAPH_READ_LIMITS, resourceLimit, checkFrozenStorage } from './graphReadLimits';
 import { captureSubgraphHashes } from './subgraphVersions';
-import { GRAPH_READ_DEPENDENCIES_VERSION, captureGraphReadHashes, rememberGraphReadHashes } from './graphReadDependencies';
+import { GRAPH_READ_DEPENDENCIES_VERSION, rememberGraphReadHashes } from './graphReadDependencies';
 import { rememberReadPage } from './readVisibility';
 import { fittingTextEnd } from './textSlicePacking';
-import { rememberCanvasRead, stampCanvasObservation } from './canvasReadEvidence';
+import { deliveredCanvasFacts, rememberCanvasRead, stampBodyRanges, stampCanvasObservation, stampDisplayedCanvasFields, stampCanvasVersionDependencies } from './canvasReadEvidence';
+export {textMatches} from './graphQueries';
 
 type Row = Record<string,unknown>;
-/** Literal matching keeps UTF-16 offsets even when case folding changes character length. */
-export function textMatches(content: string, query: string, caseSensitive = false): Array<{start:number;end:number}> {
-  if (!query) return [];
-  const escaped = query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  const pattern = new RegExp(escaped, caseSensitive ? 'gu' : 'giu');
-  const result: Array<{start:number;end:number}> = [];
-  for (const match of content.matchAll(pattern)) {
-    result.push({start:match.index!,end:match.index!+match[0].length});
-    resourceLimit(result.length<=GRAPH_READ_LIMITS.objects,'matches');
-  }
-  return result;
-}
 export function graphQueryRead(state:AppSnapshot,task:Task,call:ToolCallRecord,args:Row):Row {
+  state=inheritedReadScope(state,task);
   if(SUBGRAPH_EDGE_TOOLS.has(call.name))return readSubgraphEdges(state,task,call,args);
   const index=graphIndex(state,task.canvasId),tables=graphTables(index),workspace=state.workspaces.find(w=>w.id===task.workspaceId)!;
-  const query:GraphQuery={tool:call.name,arguments:{...args}};
+  const navigation = call.name === 'graph_search' && isNavigationScope(args.scope) ? args.scope : undefined;
+  const dependencies = call.name === 'graph_read_dependencies';
+  // Page size and the optional cards spelling change delivery, not the result set.
+  // Keep the original arguments in canvasOrigin for exact replay.
+  const {budget:_budget,output:_output,...filters}=args;
+  const query:GraphQuery={...((call.name==='graph_search'&&!navigation)||call.name==='graph_search_node_content'?{version:2 as const}:{}),tool:call.name,arguments:navigation ? {
+    scope:navigation,
+    ...(args.refId!==undefined&&(navigation==='path'||args.refId!==index.rootId)?{refId:args.refId}:{}),
+    ...(navigation==='path'?{segments:args.segments}:{}),
+  } : dependencies ? {refId:args.refId,direction:args.direction??'outgoing'} : call.name==='graph_search'?{...filters,scope:args.scope??'all',limit:args.limit??12}:filters};
   let refs:string[]=[],rows:Row[]=[],selection:FrozenRead['searchSelection'],extra:Row={};
   const card=(refId:string):Row=>{
-    const node=index.graph.nodes[refId],path=tables.path(refId);
-    return {refId,kind:'node',bodyState:'not_loaded',version:tables.source(refId)!.version,
-      ...(node.name.length<=256?{name:node.name}:{nameReadWith:fieldReadWith(index,refId,'name')}),
+    const row=index.rows.get(refId);
+    if(!row)return {refId,kind:'edge',bodyState:'not_loaded',readWith:{tool:'graph_read',arguments:{refs:[refId]}}};
+    const node=index.graph.nodes[refId],path=tables.path(refId),name=row.segments.at(-1)!.name;
+    return {refId,kind:row.kind,bodyState:'not_loaded',
+      ...(name.length<=256?{name}:{nameReadWith:fieldReadWith(index,refId,'name')}),
       ...(JSON.stringify(path).length<=512?{path}:{pathReadWith:fieldReadWith(index,refId,'path')}),
-      ...(node.design?{designType:node.design.type}:{}),readWith:{tool:'graph_read',arguments:{refs:[refId]}}};
+      ...(node?.design?{designType:node.design.type}:{}),readWith:{tool:node?'graph_read_node_content':'graph_read_directory_content',arguments:{refId}}};
   };
-  if(call.name==='graph_search'){
-    const spec=validateNodeSearch(index,args);if(spec.designTypes)assertDesignQuery(state,task);
-    const matches=nodeSearchMatches(index,spec);resourceLimit(matches.length<=GRAPH_READ_LIMITS.objects,'objects');
-    refs=matches.slice(0,spec.limit==='all'?matches.length:Math.min(50,Number(spec.limit??12)));
-    selection={scope:'node_names',totalMatches:matches.length,selectedMatches:refs.length,...(spec.limit===0?{countOnly:true,countComplete:true}:{})};
-    rows=refs.map(card);extra={output:'cards',...(spec.limit===0?{countOnly:true}:{})};
+  if(dependencies){
+    rows=nodeDependencies(index,String(args.refId),query.arguments.direction);
+    extra={refId:args.refId,direction:query.arguments.direction,totalEdges:rows.length};
+  }else if(navigation){
+    refs = navigationMatches(index,args);
+    resourceLimit(refs.length <= GRAPH_READ_LIMITS.objects,'objects');
+    selection = {scope:navigation,totalMatches:refs.length,selectedMatches:refs.length};
+    rows = refs.map(refId => {
+      const row = index.rows.get(refId)!, name = row.segments.at(-1)!.name;
+      const card:Row = {refId,kind:row.kind,...(name.length <= 256 ? {name} : {nameReadWith:fieldReadWith(index,refId,'name')})};
+      if(navigation === 'path'){
+        const path = tables.path(refId);
+        Object.assign(card,JSON.stringify(path).length <= 512 ? {path} : {pathReadWith:fieldReadWith(index,refId,'path')});
+      }
+      return card;
+    });
+    extra = {output:'cards',scope:args.refId ?? index.rootId};
+  }else if(call.name==='graph_search'){
+    const spec=args.scope==='node_names'?validateNodeSearch(index,args):undefined;
+    if(spec?.designTypes)assertDesignQuery(state,task);
+    if(!spec)requireValue(typeof args.query==='string','请输入搜索词','INVALID_ARGUMENT');
+    const matches=spec?nodeSearchMatches(index,spec):searchMatches(index,String(args.query));
+    resourceLimit(matches.length<=GRAPH_READ_LIMITS.objects,'objects');
+    refs=matches.slice(0,args.limit==='all'?matches.length:Math.min(50,Number(args.limit??12)));
+    selection={...(spec?{scope:'node_names' as const}:{}),totalMatches:matches.length,selectedMatches:refs.length,...(args.limit===0?{countOnly:true,countComplete:true}:{})};
+    rows=refs.map(card);extra={output:'cards',...(args.limit===0?{countOnly:true}:{})};
   }else{
     requireValue(Array.isArray(args.refs)&&args.refs.length>0&&args.refs.length<=20,'需要1至20个节点','INVALID_ARGUMENT');
     refs=[...new Set(args.refs as string[])];
@@ -63,7 +85,7 @@ export function graphQueryRead(state:AppSnapshot,task:Task,call:ToolCallRecord,a
       extra={requestedRefs:refs,totalReferences:rows.length,referenceVersion:graphQueryVersion(index,query),scopeNotice:'仅当前画布内两端可访问的直接设计引用'};
     }else{
       requireValue(typeof args.query==='string'&&args.query.length>0,'query不能为空','INVALID_ARGUMENT');
-      checkGraphReadSource(index,refs,[]);
+      resourceLimit(refs.reduce((bytes,id)=>bytes+Buffer.byteLength(index.graph.nodes[id].content),0)<=GRAPH_READ_LIMITS.sourceBytes,'sourceBytes');
       let totalMatches=0;
       for(const refId of refs){
         const content=index.graph.nodes[refId].content,matches=textMatches(content,args.query as string,args.caseSensitive===true);
@@ -77,8 +99,9 @@ export function graphQueryRead(state:AppSnapshot,task:Task,call:ToolCallRecord,a
           const last=windows.at(-1);
           if(last&&last.end>=start){last.end=Math.max(last.end,end);last.matches.push(match);}else windows.push({start,end,matches:[match]});
         }
-        rows.push(...windows.map(w=>({refId,field:'content',objectVersion:tables.source(refId)!.version,...w,content:content.slice(w.start,w.end),contentLength:content.length,
-          readWith:{tool:'graph_read_node_content',arguments:{refId,start:w.start,end:w.end,expectedVersion:tables.source(refId)!.version}}})));
+        rows.push(...windows.map(w=>({refId,field:'content',...w,content:content.slice(w.start,w.end),contentLength:content.length,
+          readWith:{tool:'graph_read_node_content',arguments:{refId,start:w.start,end:w.end,
+            expectedVersion:graphQueryVersion(index,bodyRangeQuery(refId,'content',w.start,w.end))}}})));
       }
       extra={requestedRefs:refs,totalMatches};
     }
@@ -90,7 +113,8 @@ export function graphQueryRead(state:AppSnapshot,task:Task,call:ToolCallRecord,a
   const limited=!!selection&&!selection.countOnly&&selection.selectedMatches<selection.totalMatches;
   const coverage=readCoverage(readKind(call.name),limited?['search_limit']:[]);
   const frame=(items:Row[])=>({status:'ok',pointerId,page:99999999,totalPages:99999999,hasMorePages:true,isLastPage:false,data:data(items),sources:sourcesFor(items),
-    coverage:pageCoverage(coverage,2),...(selection?{selection}:{}),freshness:'unknown',stale:true,notice:'这是冻结版本的原文，可用于历史比较；仅需当前版本时重新读取。',nextCursor:{pointerId,page:99999999}});
+    coverage:pageCoverage(coverage,2),...(selection?{selection}:{}),...FROZEN_GRAPH_PAGE_STATUS,
+    ...(call.name==='graph_search'||call.name==='graph_read_design_references'?{continuationFreshness:'stale'}:{}),nextCursor:{pointerId,page:99999999}});
   const fits=(items:Row[])=>estimateTokens(JSON.stringify(frame(items)))<=budget;
   const batches:Row[][]=[];let batch:Row[]=[];
   const push=(items:Row[])=>{batches.push(items);resourceLimit(batches.length<=GRAPH_READ_LIMITS.pages,'pages');};
@@ -103,7 +127,8 @@ export function graphQueryRead(state:AppSnapshot,task:Task,call:ToolCallRecord,a
     while(offset<content.length){
       const part=(end:number):Row=>{const start=base+offset,stop=base+end;return {...row,start,end:stop,content:content.slice(offset,end),
         matches:(row.matches as Array<{start:number;end:number}>).filter(m=>m.start<stop&&m.end>start),
-        readWith:{tool:'graph_read_node_content',arguments:{refId:row.refId,start,end:stop,expectedVersion:row.objectVersion}}};};
+        readWith:{tool:'graph_read_node_content',arguments:{refId:row.refId,start,end:stop,
+          expectedVersion:graphQueryVersion(index,bodyRangeQuery(String(row.refId),'content',start,stop))}}};};
       const end=fittingTextEnd(content,offset,budget,end=>fits([part(end)]));
       if(end<=offset)return readCapacityReceipt(call,args,availableTokens,undefined,{limits,usePageBudget:true});
       push([part(end)]);offset=end;
@@ -112,25 +137,62 @@ export function graphQueryRead(state:AppSnapshot,task:Task,call:ToolCallRecord,a
   if(batch.length||!batches.length)push(batch);
   if(!fits(batches[0]))return readCapacityReceipt(call,args,availableTokens,undefined,{limits,usePageBudget:true});
   const pages=batches.map(data),pageSources=batches.map(sourcesFor);
+  const queryKey = graphQueryKey(index.canvasId,query), queryVersion = graphQueryVersion(index,query);
+  const countQuery:GraphQuery={...query,projection:'count'};
+  const dependencyPageQuery=pages.length===1?query:countQuery;
+  const countVersion=dependencies?graphQueryVersion(index,countQuery):undefined;
   const pageObservations=batches.map((items,i)=>{
-    const ids=new Set<string>();
-    const visit=(value:unknown)=>{if(Array.isArray(value)){value.forEach(visit);return;}if(!value||typeof value!=='object')return;
-      const r=value as Row;if(typeof r.refId==='string'&&index.rows.get(r.refId)?.kind==='node')ids.add(r.refId);
-      Object.entries(r).filter(([key])=>key!=='readWith'&&key!=='nameReadWith'&&key!=='pathReadWith').forEach(([,v])=>visit(v));};visit(items);
-    const o=observe(state,task,index,[...ids],[],false,undefined,undefined,query);
-    o.objects={};o.contentLengths={};o.directories={};o.paths={};o.sources=pageSources[i];
-    o.readHashes={...captureGraphReadHashes(index.graph,o.sources,[],index.canvasId),
-      ...captureSubgraphHashes(index,[...ids],'name'),...captureSubgraphHashes(index,[...ids],'path'),
-      ...captureSubgraphHashes(index,[...ids],'design'),[graphQueryKey(index.canvasId,query)]:graphQueryVersion(index,query)};
-    stampCanvasObservation(index,o,pages[i]);o.canvasPage={pointerId,page:i+1,totalPages:pages.length};return o;
+    if(dependencies){
+      const o=observe(state,task,index,[]);
+      o.graphQuery=dependencyPageQuery;
+      o.refs=[...new Set([String(args.refId),...items.flatMap(e=>[String(e.edgeId),String(e.sourceNodeId),String(e.targetNodeId)])])];
+      o.readHashes={[graphQueryKey(index.canvasId,countQuery)]:countVersion!,
+        ...(pages.length===1?{[queryKey]:queryVersion}:{})};
+      for(const item of items){
+        const edgeQuery:GraphQuery={...query,projection:'edge',arguments:{...query.arguments,edgeId:item.edgeId}};
+        o.readHashes[graphQueryKey(index.canvasId,edgeQuery)]=graphQueryVersion(index,edgeQuery);
+      }
+      o.provenEmpty=rows.length===0;
+      o.canvasPage={pointerId,page:i+1,totalPages:pages.length};
+      stampCanvasObservation(index,o,pages[i]);
+      return o;
+    }
+    const displayed=call.name==='graph_read_design_references'
+      ? items.flatMap(item=>[item.source as Row,item.target as Row])
+      : items;
+    const o=observe(state,task,index,[]);
+    const refsWith=(field:string)=>displayed.filter(item=>item[field]!==undefined && typeof item.refId==='string').map(item=>String(item.refId));
+    o.refs=[...new Set(displayed.flatMap(item=>typeof item.refId==='string'?[item.refId]:[]))];
+    o.sources=pageSources[i];
+    o.graphQuery=query;
+    o.readHashes={
+      ...captureSubgraphHashes(index,refsWith('name'),'name'),
+      ...captureSubgraphHashes(index,refsWith('path'),'path'),
+      ...captureSubgraphHashes(index,refsWith('designType'),'designType'),
+      [queryKey]:queryVersion,
+    };
+    o.continuationHashes={
+      ...captureSubgraphHashes(index,refsWith('nameReadWith'),'name'),
+      ...captureSubgraphHashes(index,refsWith('pathReadWith'),'path'),
+    };
+    stampDisplayedCanvasFields(index,o,pages[i]);
+    if(call.name==='graph_search_node_content')stampBodyRanges(index,o);
+    stampCanvasVersionDependencies(index,o);
+    o.canvasPage={pointerId,page:i+1,totalPages:pages.length};
+    if(navigation==='children' && pages.length===1){
+      const scope=String(args.refId??index.rootId);
+      const complete=deliveredCanvasFacts(index,[o]).find(f=>f.refId===scope && f.field==='members');
+      if(complete)(o.canvasFacts??=[]).push(complete);
+    }
+    return o;
   });
   const result:Row={status:'ok',pointerId,page:1,totalPages:pages.length,hasMorePages:pages.length>1,isLastPage:pages.length===1,data:pages[0],sources:pageSources[0],coverage:pageCoverage(coverage,pages.length),
     freshness:'current',stale:false,...(selection?{selection}:{}),...(pages.length>1?{nextCursor:{pointerId,page:2}}:{})};
   const needed=estimateTokens(JSON.stringify(result));if(needed>availableTokens)return readCapacityReceipt(call,args,availableTokens,needed,{limits});
   const observation=pageObservations[0];observation.callId=call.id;
-  const snapshotObservation={...observation,refs:[...new Set(pageObservations.flatMap(o=>o.refs))],sources:pageSources.flat(),readHashes:Object.assign({},...pageObservations.map(o=>o.readHashes))};
+  const snapshotObservation={...observation,graphQuery:query,refs:[...new Set(pageObservations.flatMap(o=>o.refs))],sources:pageSources.flat(),readHashes:Object.assign({[queryKey]:queryVersion},...pageObservations.map(o=>({...o.readHashes,...o.continuationHashes})))};
   const snapshot:FrozenRead={id:pointerId,taskId:task.id,callId:call.id,canvasId:task.canvasId,kind:call.name,pages,pageBudget:budget,
-    canvasOrigin:{version:1,tool:call.name,arguments:structuredClone(args)},
+    canvasOrigin:{version:1,tool:call.name,arguments:{...structuredClone(args),...(call.name==='graph_search'&&!navigation?{output:'cards'}:{})}},
     pageGraphUsage:pages.map(page=>graphReadUsage(index,call.name,page,call.id)),readFormatVersion:READ_FORMAT_VERSION,coverage,searchSelection:selection,pageSources,pageObservations,snapshotObservation,observation,
     graphReadDependenciesVersion:GRAPH_READ_DEPENDENCIES_VERSION,pageReadHashes:pageObservations.map(o=>o.readHashes!),sources:pageSources.flat(),createdAt:new Date().toISOString(),expiresAt:Date.now()+GRAPH_READ_LIMITS.ttlMs};
   checkFrozenStorage(workspace.frozenReads??[],[snapshot]);

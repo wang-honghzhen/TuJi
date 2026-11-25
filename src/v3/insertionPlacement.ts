@@ -1,6 +1,7 @@
 import type { Point, Rect } from './types';
 import { BLOCK_GAP } from './types';
 import { RectangleIndex } from './rectangleIndex';
+import { nearestRegionSpace } from './regionLayout';
 
 /**
  * Deterministic insertion placement.
@@ -17,6 +18,8 @@ export interface InsertionNeighbour {
   rect: Rect;
   /** The projected relation weight; repeated edges between one pair count more. */
   weight: number;
+  /** A predecessor belongs upstream of this neighbour's incoming edge. */
+  upstream?: boolean;
 }
 
 export interface InsertionSize {
@@ -37,6 +40,7 @@ const AXES: Record<GrowthDirection, readonly [Point, Point]> = {
   left: [{ x: -1, y: 0 }, { x: 0, y: -1 }],
   up: [{ x: 0, y: -1 }, { x: 1, y: 0 }],
 };
+const opposite: Record<GrowthDirection, GrowthDirection> = { left: 'right', right: 'left', down: 'up', up: 'down' };
 
 const grow = (rect: Rect, amount: number): Rect => ({
   x: rect.x - amount,
@@ -90,16 +94,17 @@ export function inferGrowthDirection(
     vx += (dx / length) * weight; vy += (dy / length) * weight; total += weight;
   }
   // A diagonal relation still has a dominant axis; a tie is not evidence.
-  if (total > 0 && Math.abs(vx) > Math.abs(vy) * 1.05) return vx > 0 ? 'right' : 'left';
-  if (total > 0 && Math.abs(vy) > Math.abs(vx) * 1.05) return vy > 0 ? 'down' : 'up';
+  // Opposing flows cancel. Residual noise from a few short edges should not
+  // pick the orientation of a whole previously organised region.
+  if (Math.abs(vx) > total * .5 && Math.abs(vx) > Math.abs(vy) * 1.05) return vx > 0 ? 'right' : 'left';
+  if (Math.abs(vy) > total * .5 && Math.abs(vy) > Math.abs(vx) * 1.05) return vy > 0 ? 'down' : 'up';
   if (extent && extent.height > extent.width * 1.15) return 'down';
   if (extent && extent.width > extent.height * 1.15) return 'right';
   return undefined;
 }
 
-/** Where a child that arrived without a position belongs, in region-local
- *  coordinates. The strongest partner wins; slots stay inside the region
- *  (x, y >= 0), and the result is stable for a given region and weight order. */
+/** Place the child relative to the strongest partner, on the appropriate side
+ * of its edge. The root canvas permits negative coordinates. */
 export function chooseInsertionPoint(
   size: InsertionSize,
   neighbours: readonly InsertionNeighbour[],
@@ -107,17 +112,24 @@ export function chooseInsertionPoint(
   origin: Point = { x: 0, y: 0 },
   gap = BLOCK_GAP,
   direction: GrowthDirection = 'right',
+  root = false,
 ): Point {
-  const free = (point: Point) => point.x >= 0 && point.y >= 0 && !occupied.collides({ ...size, ...point }, gap);
+  const free = (point: Point) => (root || point.x >= 0 && point.y >= 0) && !occupied.collides({ ...size, ...point }, gap);
   const ordered = [...neighbours].sort((a, b) => b.weight - a.weight || a.id.localeCompare(b.id));
-  for (const neighbour of ordered) for (const point of insertionSlots(neighbour.rect, size, gap, direction)) if (free(point)) return point;
+  const slots = (neighbour: InsertionNeighbour, ring: number) => insertionSlots(
+    ring ? grow(neighbour.rect, ring * gap) : neighbour.rect, size, gap, neighbour.upstream ? opposite[direction] : direction);
+  for (const neighbour of ordered) for (const point of slots(neighbour, 0)) if (free(point)) return point;
   // A dense neighbourhood expands outward in whole gaps, so the new child keeps
   // its partner's reading direction instead of drifting back to the origin.
   for (let ring = 1; ring <= 6; ring++) {
     for (const neighbour of ordered) {
-      for (const point of insertionSlots(grow(neighbour.rect, ring * gap), size, gap, direction)) if (free(point)) return point;
+      for (const point of slots(neighbour, ring)) if (free(point)) return point;
     }
   }
+  // A fully occupied attachment area is common around a large subgraph.
+  // Search from the intended attachment side, even when every ring is full.
+  if (ordered.length && gap === BLOCK_GAP)
+    return nearestRegionSpace({ ...size, x: 0, y: 0 }, slots(ordered[0], 0)[0], occupied, root);
   // No relation yet: a stable band anchored at the region origin.
   const stepX = size.width + gap;
   const stepY = size.height + gap;
@@ -125,5 +137,5 @@ export function chooseInsertionPoint(
     const point = { x: origin.x + col * stepX, y: origin.y + row * stepY };
     if (free(point)) return point;
   }
-  return { x: Math.max(0, origin.x), y: Math.max(0, origin.y) };
+  return { x: Math.max(0, origin.x, ...occupied.rects.map(rect => rect.x + rect.width + gap)), y: Math.max(0, origin.y) };
 }

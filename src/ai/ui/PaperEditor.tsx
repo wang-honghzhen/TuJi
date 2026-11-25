@@ -45,6 +45,12 @@ export const PaperEditor = forwardRef<PaperEditorHandle, {
   const pending = useRef<Promise<void>>(), timer = useRef<ReturnType<typeof setTimeout>>(), composing = useRef(false), removing = useRef(false);
   const scope = useContext(PaperSaveScope), api = useRef<PaperEditorHandle>(null!), key = useRef(Symbol());
   const clearTimer = () => { clearTimeout(timer.current); timer.current = undefined; };
+  const syncSnapshot = () => {
+    const { text, version } = options.current;
+    if (pending.current || current.current !== saved.current.text) return;
+    if (typeof version === 'number' && typeof saved.current.version === 'number' && version <= saved.current.version) return;
+    saved.current = { text, version }; current.current = text; setValue(text);
+  };
   const flush = (): Promise<void> => {
     clearTimer();
     if (pending.current) return pending.current;
@@ -59,7 +65,11 @@ export const PaperEditor = forwardRef<PaperEditorHandle, {
       }
     };
     pending.current = request().catch(cause => { setError(cause instanceof Error ? cause.message : '保存失败，文字仍保留在此处'); throw cause; })
-      .finally(() => { pending.current = undefined; setBusy(false); });
+      .finally(() => {
+        pending.current = undefined; setBusy(false);
+        // A newer AI note can arrive before the save response. Fixed-requirement revisions are opaque.
+        if (typeof options.current.version === 'number') syncSnapshot();
+      });
     return pending.current;
   };
   const remove = async () => {
@@ -79,11 +89,7 @@ export const PaperEditor = forwardRef<PaperEditorHandle, {
     const token = key.current; scope?.current.set(token, () => api.current.flush()); liveEditors.set(token, () => api.current.flush());
     return () => { scope?.current.delete(token); liveEditors.delete(token); clearTimer(); };
   }, [scope]);
-  useEffect(() => {
-    if (!pending.current && current.current === saved.current.text) {
-      saved.current = { text: props.text, version: props.version }; current.current = props.text; setValue(props.text);
-    }
-  }, [props.text, props.version]);
+  useEffect(syncSnapshot, [props.text, props.version]);
   useLayoutEffect(() => {
     const element = input.current; if (!element) return;
     const resize = () => { element.style.height = '0px'; element.style.height = `${Math.ceil(element.scrollHeight / 32) * 32}px`; };

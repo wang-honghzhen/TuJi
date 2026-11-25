@@ -1,7 +1,7 @@
 import { ATTACHMENT_TOOLS, attachmentRead } from './attachmentReads';
 import { authorizedAttachments } from './attachmentCatalog';
 import { TASK_ARCHIVE_TOOLS, directTaskArchiveRead } from './taskArchive';
-import { assertDesignQuery, graphQueryDependency } from './graphQueries';
+import { assertDesignQuery, graphQueryDependency, isNavigationScope } from './graphQueries';
 import { inheritedReadScope } from './inheritedReadScope';
 import { rememberPageOrigin } from './readPageEvidence';
 import { randomUUID } from 'node:crypto';
@@ -11,6 +11,8 @@ import { AUTO_CONTEXT } from '../contextState';
 import { effectiveArtifacts } from '../memory';
 import { allEvidence, historyEntries, validArtifactSummary, summaryArchive } from './historyRepresentations';
 import { graphIndex, observationChange } from './directGraph';
+import { graphReadContext } from './graphReadContext';
+import { canvasObservationChanges } from './contextFreshness';
 import { resultPages } from './resultPaging';
 import { DomainError, requireValue } from './errors';
 import { estimateTokens } from '../tokens';
@@ -19,9 +21,9 @@ import { historicalRecordView, HISTORY_VIEW_VERSION } from './historyRecordView'
 import { READ_FORMAT_VERSION, readCoverage, pageCoverage } from './readCoverage';
 import { summaryProjection } from './summaryBindings';
 import { repeatReadNotice } from './readRepetition';
-import { frozenGraphReadHashes, rememberGraphReadHashes } from './graphReadDependencies';
+import { currentObservationReadHashes, frozenGraphReadHashes, rememberGraphReadHashes } from './graphReadDependencies';
 import { relationDependency } from './graphRelationDependencies';
-import { subgraphDependency } from './subgraphVersions';
+import { subgraphDependency, currentSubgraphHashes } from './subgraphVersions';
 import { summaryReadScope, assertSummaryRead } from './summaryReadScope';
 import { readSummaryTree } from './summaryTreeRead';
 import { isReceipted, rememberReadPage } from './readVisibility';
@@ -118,12 +120,37 @@ export function directContextRead(state:AppSnapshot,task:Task,call:ToolCallRecor
     if(read.kind==='graph_read_design_references')assertDesignQuery(state,task);
     const graph=read.kind.startsWith('graph_');
     const readHashes=graph?frozenGraphReadHashes(read,page):undefined;
-    const change=graph?observationChange(state,read.snapshotObservation??read.observation):{changes:[]};
-    const unknown=graph&&!read.pageObservations?.[page-1],data=read.pages[page-1],stale=unknown||change.changes.length>0||!!note&&note.version!==read.noteBinding!.version;
+    const context=graph && state.graph?graphReadContext(state):undefined;
+    const pageObservation=read.pageObservations?.[page-1];
+    const pageChanges=graph && pageObservation?canvasObservationChanges(state,pageObservation,context):[];
+    const unknown=graph && (!pageObservation || pageChanges.some(c=>c.kind==='unknown'));
+    const data=read.pages[page-1],stale=unknown||pageChanges.length>0||!!note&&note.version!==read.noteBinding!.version;
+    const handles=pageObservation?.continuationHashes;
+    const liveHandles=graph && handles && state.graph?currentSubgraphHashes(state.graph,Object.keys(handles),context):{};
+    const expiredHandle=graph && Object.entries(handles??{}).some(([key,version])=>liveHandles[key]!==version);
+    const batchChanged=graph && (expiredHandle || pageChanges.some(c=>c.kind!=='unknown') ||
+      !!observationChange(state,read.snapshotObservation??read.observation,context).changes.length);
+    const snapshotFreshness=batchChanged?'stale':unknown||!read.snapshotObservation||read.snapshotObservation.evidenceUnknown?'unknown':'current';
     const sources=read.pageSources?.[page-1]??[];
     if(graph){
-      const index=graphIndex(state,task.canvasId),edges=new Set(index.edges.map(edge=>edge.edgeId));
+      const index=graphIndex(state,task.canvasId,context),edges=new Set(index.edges.map(edge=>edge.edgeId));
       const failedRefs=sources.filter(source=>source.kind==='edge'?!edges.has(source.id):!index.rows.get(source.id)?.readable).map(source=>source.id);
+      if(isNavigationScope(read.searchSelection?.scope)||read.kind==='graph_search'&&data.output==='cards'){
+        for(const item of (data.items ?? []) as Array<{refId:string;kind?:string;path?:Array<{refId:string}>}>){
+          if(item.kind==='edge'?!edges.has(item.refId):!index.rows.get(item.refId)?.readable)failedRefs.push(item.refId);
+          for(const segment of item.path ?? [])if(!index.rows.has(segment.refId))failedRefs.push(segment.refId);
+        }
+      }
+      if(read.kind==='graph_read_dependencies'||read.kind==='graph_read_design_references'){
+        type EndpointCard={path?:Array<{refId:string}>};
+        const items=(data.items??[]) as Array<{edgeId:string;sourceNodeId:string;targetNodeId:string;source?:EndpointCard;target?:EndpointCard}>;
+        const permitted=items.every(item=>(read.kind!=='graph_read_dependencies'||edges.has(item.edgeId))
+          && [item.sourceNodeId,item.targetNodeId].every(id=>{const endpoint=index.rows.get(id);return endpoint?.kind==='node'&&endpoint.readable;})
+          && [item.source,item.target].every(card=>card?.path?.every(segment=>index.rows.has(segment.refId))??true));
+        // The caller might never have received this page. Keep inaccessible identities out of the failure receipt.
+        requireValue(permitted,'分页包含已退出当前画布读取范围的关系，请重新查询','OUT_OF_SCOPE',
+          {executed:false,nextAction:'reread_current_canvas'});
+      }
       for(const key of Object.keys(readHashes??{})){const q=graphQueryDependency(key);if(q){
         if(q.query.arguments.designTypes!==undefined)assertDesignQuery(state,task);
         const targets=[...(Array.isArray(q.query.arguments.refs)?q.query.arguments.refs as string[]:[]),...(typeof q.query.arguments.refId==='string'?[q.query.arguments.refId]:[]),...[q.query.arguments.sourceRefId,q.query.arguments.targetRefId].filter((v):v is string=>typeof v==='string')];
@@ -134,7 +161,7 @@ export function directContextRead(state:AppSnapshot,task:Task,call:ToolCallRecor
         {failedRefs,executed:false,nextAction:'reread_current_canvas'});
     }
     const result={status:data.status==='blocked'?'partial':'ok',pointerId:read.id,page,totalPages:read.pages.length,hasMorePages:page<read.pages.length,isLastPage:page===read.pages.length,data,coverage:pageCoverage(read.coverage,read.pages.length,data.status==='blocked'),
-      sources,...(graph?{freshness:unknown?'unknown':stale?'stale':'current'}:{}),...(!unknown?{stale}:{}),...(page===1&&read.recordDirectory?{recordDirectory:read.recordDirectory}:{}),...(read.searchSelection?{selection:read.searchSelection}:{}),...(unknown?{notice:'无法确认冻结页相对当前源的版本；证据不足，不能作为当前版本已读依据。'}:stale?{notice:'这是冻结版本的原文，可用于历史比较；仅需当前版本时重新读取。'}:{}),...(page<read.pages.length?{nextCursor:{pointerId:read.id,page:page+1}}:{})};
+      sources,...(graph?{freshness:unknown?'unknown':stale?'stale':'current',snapshotFreshness,...(expiredHandle?{continuationFreshness:'stale'}:{})}:{}),...(!unknown?{stale}:{}),...(page===1&&read.recordDirectory?{recordDirectory:read.recordDirectory}:{}),...(read.searchSelection?{selection:read.searchSelection}:{}),...(unknown?{notice:'本页缺少可核验的版本依据；按原范围补读。'}:stale?{notice:'本页为旧版，可按同指针继续读取历史页。'}:expiredHandle?{notice:'本页字段仍有效，旧补读入口需从对象刷新。'}:batchChanged?{notice:'本页仍有效，同指针继续交付原快照。'}:{}),...(page<read.pages.length?{nextCursor:{pointerId:read.id,page:page+1}}:{})};
     const requiredTokens=estimateTokens(JSON.stringify(result)),limits=directReadBudgets(state,task,call,args.budget??read.pageBudget),budget=limits.availableTokens;
     if(requiredTokens>limits.maximumTokens)return frozenPageCapacityReceipt(call,args,budget,requiredTokens,limits.maximumTokens);
     if(requiredTokens>budget)return readCapacityReceipt(call,args,budget,requiredTokens,{limits});
@@ -148,7 +175,13 @@ export function directContextRead(state:AppSnapshot,task:Task,call:ToolCallRecor
     rememberSummaryOrigin(call,read);
     if(graph)rememberCanvasRead(call,read,page);
     attachFrozenDirectoryEvidence(call,read,page);
-    if(readHashes&&!unknown)rememberGraphReadHashes(task,readHashes,stale);
+    if(readHashes&&!unknown){
+      rememberGraphReadHashes(task,readHashes,stale||batchChanged);
+      if(!stale && batchChanged && pageObservation && state.graph){
+        const current=currentObservationReadHashes(state.graph,[pageObservation],task.canvasId,context);
+        rememberGraphReadHashes(task,Object.fromEntries(Object.entries(readHashes).filter(([key,version])=>current[key]===version)));
+      }
+    }
     if(read.kind==='history'||summaryTree)recordUse(state,task,call,read.observation.refs,read.targetVersions!,read.pageCoverage?.[page-1]??[],summaryTree?read.sources:sources,result);
     else if(graph&&read.pageObservations?.[page-1]){
       const observation=structuredClone(read.pageObservations[page-1]);observation.id=`observation:${randomUUID()}`;observation.callId=call.id;

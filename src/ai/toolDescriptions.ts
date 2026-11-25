@@ -29,11 +29,18 @@ export function toolDescription(call:ToolCallRecord,snapshot?:AppSnapshot|null):
   let description=scope;
   if(call.name==='graph_read_directory')description=`${scope||'当前画布'} · ${args.mode==='children'?'直属子图目录':'子图目录树'}`;
   else if(call.name==='graph_read_subgraph')description=`${scope||'当前画布'} · 直属节点与关系`;
+  else if(call.name==='graph_read_dependencies'){
+    const direction=args.direction==='incoming'?'依赖此节点':args.direction==='both'?'双向依赖':'此节点依赖';
+    const total=result.data?.totalEdges;
+    description=[scope,direction,...(Number.isSafeInteger(total)?[`共 ${total} 条依赖`]:[])].filter(Boolean).join(' · ');
+  }
   else if(call.name==='graph_read_object_field')description=[scope,({name:'名称',path:'路径',design:'设计信息'} as Record<string,string>)[args.field]??compact(args.field)].filter(Boolean).join(' · ');
   else if(call.name==='graph_read_node_content'||call.name==='graph_read_directory_content')description=`${scope} · ${args.start!==undefined?`字符 ${args.start}–${args.end}`:'正文'}`;
   else if(call.name==='workspace_read_artifact')description=`${file} · ${args.startPage!==undefined||args.endPage!==undefined?`物理页 ${args.startPage??1}–${args.endPage??'后续页'}`:args.startLine!==undefined?`提取文本行 ${args.startLine}–${args.endLine??'后续行'}`:args.chunkIds?`${args.chunkIds.length} 个分片`:'提取文本'}`;
   else if(call.name==='workspace_view_artifact')description=`${file} · ${artifact?.mimeType==='application/pdf'?`物理页 ${(args.pages??[1]).join('、')}`:'查看图像'}${args.crop?' · 局部裁剪':''}`;
   else if(call.name==='context_read_task_attachments')description=`${args.taskId?'指定任务':'当前提示词范围'}的附件清单${result.protection?.accepted?' · 已保护至本任务结束':''}`;
+  else if(call.name==='graph_search'&&args.scope==='children')description=`${scope||'当前画布'} · 直属子图和节点`;
+  else if(call.name==='graph_search'&&args.scope==='path')description=[scope,'查找路径',Array.isArray(args.segments)?compact(args.segments.map((s:unknown)=>compact(s)).join(' / ')):''].filter(Boolean).join(' · ');
   else if(call.name.includes('search'))description=[args.query?`“${compact(args.query)}”`:'',scope].filter(Boolean).join(' · ');
   else if(call.name==='web_fetch')description=compact(args.url,150);
   else if(call.name==='context_read_pages')description=`资料 ${compact(args.pointerId)} · 第 ${args.page??1} 页`;

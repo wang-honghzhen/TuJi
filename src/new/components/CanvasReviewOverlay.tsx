@@ -1,3 +1,4 @@
+import { GraphNameLabel } from './GraphPathLabel';
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type { PointerEvent } from 'react';
 import { createPortal } from 'react-dom';
@@ -5,7 +6,7 @@ import { useAiStore } from '@/ai/client';
 import { reviewEntries, expandReviewSelection, reviewDecisionCount, reviewUnitRefs } from '@/ai/changeReview';
 import { reviewUnitsAtRefs, useReviewUi } from '@/ai/reviewUi';
 import type { RenderModel } from '@/v3/layout';
-import type { Point, Rect } from '@/v3/types';
+import type { GraphEdge, Point, Rect } from '@/v3/types';
 import type { CanvasViewport } from '../canvasViewportStore';
 import { useSidebarInsets } from '../newUiStore';
 import { ChangeReviewActions } from '@/ai/ui/ChangeReviewActions';
@@ -13,7 +14,7 @@ import { ChangeReviewActions } from '@/ai/ui/ChangeReviewActions';
 const EMPTY: string[] = [];
 const intersects = (a: Rect, b: Rect) => a.x <= b.x + b.width && a.x + a.width >= b.x && a.y <= b.y + b.height && a.y + a.height >= b.y;
 const contains = (a: Rect, b: Rect) => a.x <= b.x && a.y <= b.y && a.x + a.width >= b.x + b.width && a.y + a.height >= b.y + b.height;
-interface ReviewTarget { id: string; label: string; ids: string[]; refs: string[]; anchor: Point }
+interface ReviewTarget { id: string; label: string; namedBlock?: boolean; ids: string[]; refs: string[]; anchor: Point }
 function LocalReview({ canvasId, target, onClose }: { canvasId: string; target: ReviewTarget; onClose: () => void }) {
   const element = useRef<HTMLElement>(null), insets = useSidebarInsets();
   const [height, setHeight] = useState(88), [, resize] = useState(0);
@@ -30,11 +31,11 @@ function LocalReview({ canvasId, target, onClose }: { canvasId: string; target: 
     style={{ position: 'fixed', left, top, width, zIndex: 170 }} aria-label={`${target.label}的待决策修改`}
     onPointerDown={event => event.stopPropagation()} onPointerUp={event => event.stopPropagation()} onClick={event => event.stopPropagation()}
     onContextMenu={event => { event.preventDefault(); event.stopPropagation(); }}>
-    <div className="canvas-review-local-title" title={target.label}>{target.label}</div>
+    <div className="canvas-review-local-title" title={target.label}>{target.namedBlock ? <GraphNameLabel id={target.id} name={target.label} /> : target.label}</div>
     <ChangeReviewActions canvasId={canvasId} unitIds={target.ids} scopeRefs={target.refs} onClose={onClose} />
   </aside>, document.body);
 }
-export function CanvasReviewOverlay({ canvasId, model, view }: { canvasId: string; model: RenderModel; view: CanvasViewport }) {
+export function CanvasReviewOverlay({ canvasId, model, liveEdges, view }: { canvasId: string; model: RenderModel; liveEdges: readonly GraphEdge[]; view: CanvasViewport }) {
   const snapshot = useAiStore(s => s.snapshot), selected = useReviewUi(s => s.selected[canvasId] ?? EMPTY);
   const linked = useReviewUi(s => s.linked[canvasId] ?? EMPTY), emphasized = snapshot ? expandReviewSelection(snapshot,[...selected, ...linked]) : [...selected, ...linked];
   const boxMode = useReviewUi(s => s.boxCanvasId === canvasId), select = useReviewUi(s => s.select), box = useReviewUi(s => s.box);
@@ -47,7 +48,8 @@ export function CanvasReviewOverlay({ canvasId, model, view }: { canvasId: strin
     && (e.change.review!.canvasId === canvasId || e.change.affectedCanvasIds.includes(canvasId))) : [], [snapshot?.changes, canvasId]);
   if (!snapshot || !entries.length) return null;
   const ghosts = entries.flatMap(e => e.unit.ghosts.filter(g => (g.canvasId ?? e.change.review!.canvasId) === canvasId).map(ghost => ({ unit: e.unit, ghost, change: e.change })))
-    .filter(e => !model.membership.has(e.ghost.id) && !model.edges.some(edge => edge.edge.edgeId === e.ghost.id));
+    .filter(e => !model.membership.has(e.ghost.id) && !liveEdges.some(edge => !edge.removed && edge.edgeId === e.ghost.id &&
+      (model.membership.has(edge.sourceNodeId) || model.membership.has(edge.targetNodeId))));
   const pick = (ids: string[], extend: boolean, refs: string[]) => {
     // A marker/ghost selection also applies while the review sidebar is hidden.
     useReviewUi.getState().panel(canvasId, { canvasSelectionKey: canvasSelection.join('|') });
@@ -61,7 +63,7 @@ export function CanvasReviewOverlay({ canvasId, model, view }: { canvasId: strin
   const targets: ReviewTarget[] = model.blocks.flatMap(block => {
     const ids = block.kind === 'node' ? matching(block.id)
       : reviewUnitsAtRefs(snapshot, canvasId, [block.id]);
-    return ids.length ? [{ id: block.id, label: block.name, ids, refs: [block.id], anchor: screen({ x: block.rect.x, y: block.rect.y + (block.kind === 'node' ? block.rect.height : 36) }) }] : [];
+    return ids.length ? [{ id: block.id, label: block.name, namedBlock: true, ids, refs: [block.id], anchor: screen({ x: block.rect.x, y: block.rect.y + (block.kind === 'node' ? block.rect.height : 36) }) }] : [];
   });
   for (const edge of model.edges) {
     const ids = entries.filter(e => own.has(e.unit.id) && reviewUnitRefs(e.unit).some(ref => [edge.edge.edgeId, ...(edge.aggregateEdgeIds ?? [])].includes(ref))).map(e => e.unit.id);

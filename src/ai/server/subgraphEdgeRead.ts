@@ -6,7 +6,7 @@ import { graphTables } from './graphReadTables';
 import { graphPaginator } from './graphPagination';
 import { graphQueryKey, graphQueryVersion, subgraphEdges } from './graphQueries';
 import { directReadBudgets, readCapacityReceipt } from './directReadBudget';
-import { readCoverage, readKind, pageCoverage, READ_FORMAT_VERSION } from './readCoverage';
+import { FROZEN_GRAPH_PAGE_STATUS, readCoverage, readKind, pageCoverage, READ_FORMAT_VERSION } from './readCoverage';
 import { GRAPH_READ_LIMITS, checkFrozenStorage, checkGraphReadSource } from './graphReadLimits';
 import { estimateTokens } from '../tokens';
 import { captureGraphReadHashes, GRAPH_READ_DEPENDENCIES_VERSION, rememberGraphReadHashes } from './graphReadDependencies';
@@ -27,7 +27,7 @@ export function readSubgraphEdges(state: AppSnapshot, task: Task, call: ToolCall
     return source ? [{ ...source, ...(typeof e.start === 'number' && typeof e.end === 'number' ? { start: e.start, end: e.end } : {}) }] : [];
   });
   const frame = (data: Row): Row => ({ status: 'ok', pointerId, page: 99999999, totalPages: 99999999, hasMorePages: true, isLastPage: false,
-    data: { ...data, kind: readKind(call.name) }, sources: sourcesFor(data), coverage: pageCoverage(coverage, 2), freshness: 'current', stale: false,
+    data: { ...data, kind: readKind(call.name) }, sources: sourcesFor(data), coverage: pageCoverage(coverage, 2), ...FROZEN_GRAPH_PAGE_STATUS,
     nextCursor: { pointerId, page: 99999999 } });
   const size = (data: Row) => estimateTokens(JSON.stringify(frame(data)));
   const fits = (data: Row) => size(data) <= limits.pageBudget;

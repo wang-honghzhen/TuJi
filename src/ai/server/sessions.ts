@@ -69,7 +69,7 @@ export interface InheritanceOutcome {
 }
 export interface InheritancePreview extends InheritanceMaterial, InheritanceOutcome {}
 export interface CreateSessionResult extends Session { inheritance: InheritanceOutcome }
-export interface CreateSessionInput { canvasId: string; mode?: SessionMode; title?: string; orderedTasks?: OrderedTaskSelection[]; expectedPreviewHash?: string; sourceSessionId?: string; temporaryMode?: TemporaryMode; expectedForkFingerprint?: string }
+export interface CreateSessionInput { canvasId: string; mode?: SessionMode; title?: string; parentSessionId?: string; orderedTasks?: OrderedTaskSelection[]; expectedPreviewHash?: string; sourceSessionId?: string; temporaryMode?: TemporaryMode; expectedForkFingerprint?: string }
 export interface UpdateSessionInput { sessionId: string; title?: string; lifecycle?: Session['lifecycle'] }
 export interface SaveNoteInput { sessionId: string; kind: 'pinned' | 'work'; text: string; sourceRefs?: SourceRef[];
   noteId?: string; expectedVersion?: number; type?: Note['type']; lifecycle?: Note['lifecycle']; taskId?: string; clientRequestId?: string }
@@ -329,6 +329,12 @@ export class SessionService {
     const mode = payload.mode ?? modeOf(canvas);
     requireValue(mode === 'temporary' || mode === modeOf(canvas), '普通会话必须沿用所属画布的模式', 'UNSUPPORTED_MODE');
     const canvasId = text(payload.canvasId, '画布 ID', 1000);
+    let parent: Session | undefined;
+    if (payload.parentSessionId !== undefined) {
+      parent = sessionOf(state, text(payload.parentSessionId, '父会话 ID', 1000));
+      requireValue(mode !== 'temporary' && parent.mode !== 'temporary', '临时会话不能参与普通会话的父子关系', 'TEMPORARY_PARENT');
+      requireValue(parent.canvasId === canvasId, '父子会话必须属于同一画布', 'CROSS_CANVAS_INHERITANCE');
+    }
     const title = text(payload.title ?? '', '会话标题', 1000).trim();
     requireValue(Array.from(title).length <= SESSION_TITLE_LIMIT, `会话名称最多 ${SESSION_TITLE_LIMIT} 个字符`);
     let orderedTasks = payload.orderedTasks ?? [];
@@ -354,7 +360,7 @@ export class SessionService {
     }
     const preview = buildPreview(state, canvasId, orderedTasks);
     // Capture all assembly inputs before reserving new identities or installing projections.
-    const dependencyFingerprint = hash([preview.contentHash, mode, temporaryMode, payload.sourceSessionId,
+    const dependencyFingerprint = hash([preview.contentHash, mode, temporaryMode, payload.sourceSessionId, ...(parent ? [parent.id] : []),
       state.provider, state.graph, state.directoryVersions, state.canvasGraphReferences, state.sessionReferences,
       state.changes, state.reviewChanges,
       temporaryMode && temporaryMode !== 'minimal' ? state.workspaces.find(w => w.sessionId === payload.sourceSessionId) : undefined]);
@@ -375,11 +381,14 @@ export class SessionService {
       if (session.mode !== 'temporary') state.inheritanceEdges.push({ id: id('inheritance:'), canvasId, parentSessionId: material.sourceSessionId, childSessionId: session.id,
         snapshotIds: [snapshot.id], createdAt: now() });
     }
-    if (!preview.parents.length && session.mode !== 'temporary') {
+    if (!parent && !preview.parents.length && session.mode !== 'temporary') {
       const existing = state.sessions.filter(candidate => candidate.canvasId === canvasId && candidate.lifecycle !== 'deleted');
       const children = new Set(state.inheritanceEdges.filter(edge => edge.canvasId === canvasId && existing.some(candidate => candidate.id === edge.parentSessionId)).map(edge => edge.childSessionId));
-      const root = existing.find(candidate => candidate.mode === modeOf(canvas) && !children.has(candidate.id));
-      if (root) state.inheritanceEdges.push({ id: id('inheritance:'), canvasId, parentSessionId: root.id, childSessionId: session.id, snapshotIds: [], createdAt: now(), structuralOnly: true });
+      parent = existing.find(candidate => candidate.mode === modeOf(canvas) && !children.has(candidate.id));
+    }
+    // A parent determines the position in the session graph. Only selected tasks grant history access.
+    if (parent && !preview.parents.some(material => material.sourceSessionId === parent.id)) {
+      state.inheritanceEdges.push({ id: id('inheritance:'), canvasId, parentSessionId: parent.id, childSessionId: session.id, snapshotIds: [], createdAt: now(), structuralOnly: true });
     }
     state.sessions.push(session); state.workspaces.push(workspace);
     initializeInheritance(state, session, orderedTasks);

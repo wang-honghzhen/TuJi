@@ -1,0 +1,131 @@
+.directory-tree {
+  --directory-control: 24px;
+  overscroll-behavior: contain;
+}
+
+.directory-tree [role='treeitem'] {
+  border-radius: 6px;
+}
+
+.directory-tree [aria-expanded] {
+  padding-inline-end: 6px;
+}
+
+.directory-tree [role='treeitem'][aria-level='1'] {
+  min-height: 36px;
+  margin-bottom: 6px;
+  border: 1px solid var(--space-border);
+  border-radius: 9px;
+  background-color: var(--space-panel);
+  background-image: linear-gradient(105deg, #7497cc12, transparent);
+}
+
+.directory-tree [aria-expanded] > .graph-name-label {
+  font-size: 13px;
+  line-height: 18px;
+  font-weight: 600;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  margin-block: 3px;
+}
+
+.directory-tree [data-directory-icon] {
+  flex-shrink: 0;
+}
+
+.directory-tree .directory-disclosure,
+.directory-tree .directory-leaf-guide {
+  display: grid;
+  place-items: center;
+  flex: 0 0 var(--directory-control);
+  height: var(--directory-control);
+}
+
+.directory-child-count {
+  flex: none;
+  margin-inline-start: auto;
+  padding-inline-start: 8px;
+  color: var(--space-muted);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+.directory-disclosure {
+  border-radius: 5px;
+  color: var(--space-muted);
+}
+
+.directory-disclosure:hover {
+  color: var(--space-text);
+  background: var(--space-border);
+}
+
+.directory-tree [aria-expanded='true'] > .directory-disclosure svg {
+  transform: rotate(90deg);
+}
+
+.directory-leaf-guide::after {
+  content: '';
+  width: 7px;
+  height: 9px;
+  margin-block-start: -6px;
+  border-inline-start: 1px solid var(--space-border);
+  border-block-end: 1px solid var(--space-border);
+}
+
+.directory-tree [role='treeitem'][aria-selected='true'] {
+  background-image: linear-gradient(var(--space-accent), var(--space-accent));
+  background-position: left center;
+  background-repeat: no-repeat;
+  background-size: 2px 58%;
+}
+
+.directory-tree [role='treeitem']:focus-visible,
+.directory-tree .directory-disclosure:focus-visible,
+.directory-empty button:focus-visible {
+  outline: 2px solid var(--space-accent);
+  outline-offset: -2px;
+}
+
+.directory-empty {
+  margin: 0 8px;
+  padding: 18px 8px;
+  border: 1px dashed var(--space-border);
+  border-radius: 9px;
+  color: var(--space-muted);
+  text-align: center;
+  font-size: 12px;
+}
+
+.directory-empty > div {
+  display: flex;
+  justify-content: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 12px;
+}
+
+.directory-empty button {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-height: 30px;
+  padding: 0 8px;
+  border: 1px solid var(--space-border);
+  border-radius: 6px;
+  color: var(--space-text);
+  background: var(--space-panel);
+}
+
+.directory-empty button:hover {
+  border-color: var(--space-accent);
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .directory-disclosure svg {
+    transition: transform 120ms ease-out;
+  }
+}

@@ -33,10 +33,12 @@ const MemoTurnState = memo(function MemoTurnState({ task }: { task: Task }) {
 });
 
 export interface ChatSelection { taskIds: string[]; onChange: (ids: string[]) => void; maxRounds?: number; allowAdd?: boolean }
-export function AiChatPage({ canvasId, onNavigate, sessionId, selection, headingExtra, headingActions, headingSubtitle, onHeadingPointerDown, hideHeading = false }: {
+const drawerPositions = new Map<string, { top: number; following: boolean }>();
+export function AiChatPage({ canvasId, onNavigate, sessionId, selection, headingExtra, headingActions, headingSubtitle, onHeadingPointerDown, hideHeading = false, canvasDrawer }: {
   canvasId: string; onNavigate?: (refs: string[]) => void; sessionId?: string; selection?: ChatSelection;
   headingExtra?: ReactNode; headingActions?: ReactNode; headingSubtitle?: ReactNode; onHeadingPointerDown?: (event: PointerEvent<HTMLElement>) => void;
   hideHeading?: boolean;
+  canvasDrawer?: { onRestore: () => void; onReadLatest: () => void };
 }) {
   const snapshot = useAiStore((state) => state.snapshot);
   const activeId = useAiStore((state) => state.activeSessionByCanvas[canvasId]);
@@ -49,7 +51,8 @@ export function AiChatPage({ canvasId, onNavigate, sessionId, selection, heading
   const selectionAction = useAction(), bookmarkAction = useAction();
   const picking: ChatSelection | undefined = selection ?? (multiSelecting ? { taskIds: selectedIds, onChange: setSelectedIds } : undefined);
   const selectedTasks = new Set(picking?.taskIds ?? []);
-  const [following, setFollowing] = useState(() => (session?.mode === 'temporary' ? usePanelState.getState().reading[session.id]?.following : undefined) ?? !selection);
+  const [following, setFollowing] = useState(() => (session?.mode === 'temporary' ? usePanelState.getState().reading[session.id]?.following :
+    canvasDrawer && session ? drawerPositions.get(session.id)?.following : undefined) ?? !selection);
   const history = useRef<HTMLDivElement>(null);
   const jumping = useRef(false), jumpTimer = useRef<ReturnType<typeof setTimeout>>();
   // A streamed answer re-renders this page with a new snapshot many times per second. The live
@@ -77,12 +80,17 @@ export function AiChatPage({ canvasId, onNavigate, sessionId, selection, heading
   };
   useEffect(() => () => clearTimeout(jumpTimer.current), []);
   useLayoutEffect(() => {
-    const saved = session?.mode === 'temporary' ? usePanelState.getState().reading[session.id] : undefined;
+    const saved = session?.mode === 'temporary' ? usePanelState.getState().reading[session.id] : canvasDrawer && session ? drawerPositions.get(session.id) : undefined;
     if (saved && history.current) history.current.scrollTop = saved.top;
     setFollowing(saved ? saved.following : !selection && !multiSelecting);
   }, [session?.id, !!selection, multiSelecting]);
   useEffect(() => { setMultiSelecting(false); setSelectedIds([]); setProgressSelecting(false); setProgressRecords([]); setMenuPosition(undefined); finishJump(); bookmarkAction.setError(''); }, [session?.id, canvasId]);
   useEffect(() => { if (following && !menuPosition && history.current) history.current.scrollTop = history.current.scrollHeight; }, [snapshot?.lastSeq, following, session?.id, !!menuPosition]);
+  const onReadLatest = canvasDrawer?.onReadLatest;
+  useEffect(() => {
+    const el = history.current;
+    if (onReadLatest && following && readingPosition.atLatest && !menuPosition && el && el.scrollHeight - el.clientHeight - el.scrollTop <= 8) onReadLatest();
+  }, [onReadLatest, following, readingPosition.atLatest, !!menuPosition, snapshot?.lastSeq]);
   const pick = (taskId: string, messages: ChatMessage[]) => {
     if (!picking) return null;
     const complete = messages.filter(m => m.status === 'complete'), ids = complete.map(m => m.id);
@@ -106,6 +114,8 @@ export function AiChatPage({ canvasId, onNavigate, sessionId, selection, heading
   return <section className="ai-chat-page" data-ai-chat-page data-ai-selection-mode={!!picking}
     onContextMenu={event => {
       if ((event.target as Element).closest('input,textarea,select,[contenteditable=true],a,[data-graph-menu]')) return;
+      const selectedText = window.getSelection();
+      if (selectedText && !selectedText.isCollapsed && selectedText.containsNode(event.target as Node, true)) return;
       const dialog = (event.target as Element).closest('[role=dialog]');
       if (dialog && event.currentTarget.contains(dialog)) return;
       const target = (event.target as Element).closest<HTMLElement>('[data-ai-turn-id],[data-ai-turn-tick]');
@@ -119,14 +129,15 @@ export function AiChatPage({ canvasId, onNavigate, sessionId, selection, heading
       <div className="ai-chat-tools">
       {!selection && session?.mode !== 'temporary' && <><button className="ai-icon-button" title="固定要求与工作笔记" aria-label="工作笔记" disabled={!session} onClick={() => setWorkspaceOpen(true)}><BookOpen size={16} /></button></>}
       {headingActions}</div>{headingSubtitle&&<div className="ai-chat-heading-subtitle">{headingSubtitle}</div>}</header>}
-    {!selection && !multiSelecting && session?.mode !== 'temporary' && <ReviewAllActions canvasId={canvasId} surface="chat" />}
-    <div className="ai-chat-body" data-has-turns={session?.mode!=='temporary'&&!!turnLabels.length} data-composer={hasComposer}>
-    {session?.mode!=='temporary'&&<AiTurnNavigation key={session?.id} turns={turnLabels} active={readingPosition.taskId} onJump={jumpToTurn} />}
+    {!canvasDrawer && !selection && !multiSelecting && session?.mode !== 'temporary' && <ReviewAllActions canvasId={canvasId} surface="chat" />}
+    <div className="ai-chat-body" data-has-turns={!canvasDrawer&&session?.mode!=='temporary'&&!!turnLabels.length} data-composer={hasComposer}>
+    {!canvasDrawer&&session?.mode!=='temporary'&&<AiTurnNavigation key={session?.id} turns={turnLabels} active={readingPosition.taskId} onJump={jumpToTurn} />}
     <div ref={history} className="ai-chat-history new-scroll" onWheel={finishJump} onTouchStart={finishJump} onScroll={() => {
       setMenuPosition(undefined); const element = history.current;
       if (jumping.current) { clearTimeout(jumpTimer.current); jumpTimer.current = setTimeout(finishJump, 180); }
       else if (element) setFollowing(element.scrollHeight - element.scrollTop - element.clientHeight <= 8);
       if (element && session?.mode === 'temporary') setPanelReading(session.id, { top: element.scrollTop, following: element.scrollHeight - element.scrollTop - element.clientHeight <= 8 });
+      else if (element && canvasDrawer && session) drawerPositions.set(session.id, { top: element.scrollTop, following: element.scrollHeight - element.scrollTop - element.clientHeight <= 8 });
     }}>
       <div className="ai-conversation" data-ai-conversation>
       <AiError text={error} />
@@ -186,10 +197,11 @@ export function AiChatPage({ canvasId, onNavigate, sessionId, selection, heading
       }}>随下一条消息携带</button>
       <button className="ai-button" onClick={()=>{setProgressSelecting(false);setProgressRecords([]);}}>取消</button>
     </div>}
-    {hasComposer && <div className="ai-chat-composer"><NewChatInput canvasId={canvasId} sessionId={sessionId} /></div>}
+    {hasComposer && <div className="ai-chat-composer"><NewChatInput canvasId={canvasId} sessionId={sessionId} surface="chat" /></div>}
     {session && workspaceOpen && <AiWorkspacePanel session={session} onClose={() => setWorkspaceOpen(false)} />}
     {menuPosition && <GraphContextMenu position={menuPosition} onClose={() => setMenuPosition(undefined)}
       items={[
+        ...(canvasDrawer ? [{key:'restoreCanvasChat',label:'还原聊天视图',run:canvasDrawer.onRestore}] : []),
         ...(!selection && session?.temporaryContext?.mode!=='minimal' ? [{key:'selectProgress',label:progressSelecting?'取消选择任务片段':'选择任务片段随消息携带',disabled:!session,
           run:()=>{setProgressSelecting(value=>!value);setProgressRecords([]);setMultiSelecting(false);setSelectedIds([]);}}]:[]),
         ...(menuPosition.taskId ? [{ key: 'bookmarkChatTurn', label: turnLabels.find(turn => turn.taskId === menuPosition.taskId)?.starred ? '取消标注' : '标注', disabled: !session || bookmarkAction.busy,

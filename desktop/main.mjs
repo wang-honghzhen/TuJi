@@ -54,7 +54,9 @@ else {
   void app.whenReady().then(async () => { try {
     const runtimeRoot = app.isPackaged ? path.join(process.resourcesPath, 'app.asar.unpacked') : projectRoot;
     if (app.isPackaged && !process.env.QIXUE_OCR_DATA_DIR) process.env.QIXUE_OCR_DATA_DIR = path.join(process.resourcesPath, 'ocr');
-    const runtimeModule = await import(pathToFileURL(path.join(runtimeRoot, 'dist-ai', 'server.cjs')).href);
+    const runtimeDirectory = !app.isPackaged && process.env.TUJI_WORKSPACE_RUNTIME
+      ? process.env.TUJI_WORKSPACE_RUNTIME : path.join(runtimeRoot, 'dist-ai');
+    const runtimeModule = await import(pathToFileURL(path.join(runtimeDirectory, 'server.cjs')).href);
     const runtime = runtimeModule.default ?? runtimeModule;
     host = await runtime.startApplicationServer({ databasePath: path.join(directory, 'qixue.sqlite'),
       artifactDirectory: path.join(directory, 'artifacts'), credentialStorage, port: Number(process.env.QIXUE_PORT ?? 0),
@@ -62,7 +64,8 @@ else {
     if (!app.isPackaged && process.env.QIXUE_USE_VITE) {
       const { createServer } = await import('vite');
       vite = await createServer({ root: projectRoot, configFile: path.join(projectRoot, 'vite.config.ts'),
-        server: { middlewareMode: true, host: '127.0.0.1', hmr: { server: host.server } }, appType: 'spa' });
+        server: { middlewareMode: true, host: '127.0.0.1', hmr: { server: host.server },
+          ...(process.env.TUJI_WORKSPACE_RUNTIME ? {watch:{ignored:['**/docs/**','**/scripts/**','**/release/**']}} : {}) }, appType: 'spa' });
       host.setMiddleware(vite.middlewares);
     }
     window = new BrowserWindow({ width: 1450, height: 920, minWidth: 960, minHeight: 620, frame: false,

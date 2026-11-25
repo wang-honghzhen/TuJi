@@ -1,3 +1,4 @@
+import { GraphReferenceLabel } from '../../new/components/GraphPathLabel';
 import { useEffect, useRef, useState } from 'react';
 import { Check, RotateCcw, X } from 'lucide-react';
 import { useAiStore } from '../client';
@@ -72,7 +73,7 @@ export function ChangeReviewActions({ canvasId, unitIds, scopeRefs = EMPTY, all 
   const name = snapshot ? reviewObjectName(snapshot, canvasId) : () => '对象';
   const rounds = new Set(snapshot ? reviewEntries(snapshot).filter(e => (decision?.preview.unitIds ?? [...(approve?.unitIds ?? []), ...(revert?.unitIds ?? [])]).includes(e.unit.id)).map(e => e.change.taskId) : []);
   const canvasNames = (p: ReviewPreview) => otherCanvases(p).map(id => snapshot?.graph?.canvases.find(c => c.canvasId === id)?.canvasName ?? '已移除画布').join('、');
-  const scopeList = (p: ReviewPreview) => <ul>{refs(p).map(ref => <li key={ref}>{name(ref)}{outside(p).includes(ref) && <span> · 所选区域外</span>}</li>)}</ul>;
+  const scopeList = (p: ReviewPreview) => <ul>{refs(p).map(ref => <li key={ref}><GraphReferenceLabel id={ref} name={name(ref)} graph={snapshot?.graph} canvasId={canvasId} />{outside(p).includes(ref) && <span> · 所选区域外</span>}</li>)}</ul>;
   const refreshPreview = () => { refreshDecision.current = decision?.preview.action; setRefresh(n => n + 1); };
   return <div className="change-review-actions" data-review-quick-actions onPointerDown={event => event.stopPropagation()} onPointerUp={event => event.stopPropagation()}
     onClick={event => event.stopPropagation()} onDoubleClick={event => event.stopPropagation()} onContextMenu={event => event.stopPropagation()} onWheel={event => event.stopPropagation()}>

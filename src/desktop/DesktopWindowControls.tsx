@@ -33,7 +33,11 @@ export function DesktopWindowControls() {
   };
   return <div ref={group} className="desktop-window-controls" role="group" aria-label="窗口操作" tabIndex={0}
     data-visible={visible || dragging} data-maximized={maximized}
-    onPointerLeave={() => { if (dragPointer.current === null && !group.current?.matches(':focus-visible, :has(:focus-visible)')) setVisible(false); }}
+    onPointerLeave={event => {
+      // The native resize border can take the pointer away from the renderer
+      // while it is still over the buttons. Native tracking covers that edge.
+      if (event.relatedTarget instanceof Element && dragPointer.current === null && !group.current?.matches(':focus-visible, :has(:focus-visible)')) setVisible(false);
+    }}
     onBlur={event => { if (!event.currentTarget.contains(event.relatedTarget) && !event.currentTarget.matches(':hover')) setVisible(false); }}
     onKeyDown={event => {
       if (event.key === 'Escape') {

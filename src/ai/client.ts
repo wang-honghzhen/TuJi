@@ -9,6 +9,7 @@ export interface InputDraft {
   targetGroups?: CanvasTargetGroup[];
   progressSelection?: import('./domain').ProgressSelection[];
   pendingMessageId?: string;
+  interactionAnswer?: { id: string; version: number; text: string };
   modelSelection?: ModelSelection;
 }
 
@@ -26,7 +27,7 @@ interface AiStore {
   enteredSessionByCanvas: Record<string, string>;
   draftsBySession: Record<string, InputDraft>;
   selectedRefsByCanvas: Record<string, string[]>;
-  canvasSelectionRequest: { canvasId: string; refs: string[]; sequence: number } | null;
+  canvasSelectionRequest: { canvasId: string; sessionId?: string; refs: string[]; source: 'user' | 'ai'; partId?: string; sequence: number } | null;
   replyTargetRefsByCanvas: Record<string, string[]>;
   settingsOpen: boolean;
   setView: (view: 'canvas' | 'chat') => void;
@@ -37,7 +38,7 @@ interface AiStore {
   setSelectedRefs: (canvasId: string, refs: string[]) => void;
   addInputGroup: (sessionId: string, refs: string[]) => string;
   removeInputGroup: (sessionId: string, groupId: string) => void;
-  requestCanvasSelection: (canvasId: string, refs: string[]) => void;
+  requestCanvasSelection: (canvasId: string, refs: string[], source?: 'user' | 'ai', partId?: string) => void;
   setReplyTargetRefs: (canvasId: string, refs: string[]) => void;
   setSettingsOpen: (open: boolean) => void;
   clearError: () => void;
@@ -266,8 +267,8 @@ export const useAiStore = create<AiStore>((set, get) => ({
   removeInputGroup: (sessionId, groupId) => set(state => { const draft = state.draftsBySession[sessionId] ?? emptyDraft();
     return { draftsBySession: { ...state.draftsBySession, [sessionId]: { ...draft, pendingMessageId: undefined,
       targetGroups: (draft.targetGroups ?? []).filter(group => group.groupId !== groupId) } } }; }),
-  requestCanvasSelection: (canvasId, refs) => set({ canvasSelectionRequest: {
-    canvasId, refs: [...new Set(refs)], sequence: ++canvasSelectionSequence } }),
+  requestCanvasSelection: (canvasId, refs, source = 'user', partId) => set(state => ({ canvasSelectionRequest: {
+    canvasId, sessionId: state.activeSessionByCanvas[canvasId], refs: [...new Set(refs)], source, partId, sequence: ++canvasSelectionSequence } })),
   setReplyTargetRefs: (canvasId, refs) => set((state) => ({ replyTargetRefsByCanvas: { ...state.replyTargetRefsByCanvas, [canvasId]: [...refs] } })),
   setSettingsOpen: (settingsOpen) => set({ settingsOpen }),
   clearError: () => set({ error: null }),

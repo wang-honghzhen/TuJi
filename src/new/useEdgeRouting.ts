@@ -2,43 +2,68 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import type { RenderModel, RenderEdge } from '@/v3/layout';
 import { EdgeRoutingCache, type RoutingOptions, type RoutingStats } from '@/v3/edgeRouting';
 import { previewCachedRoutes } from './routePreview';
-import { RoutingDeltaEncoder, RoutingDeltaReceiver } from './edgeRoutingProtocol';
+import { RoutingDeltaEncoder, RoutingDeltaReceiver, RoutingFrameReceiver, type RoutingFrame } from './edgeRoutingProtocol';
 
-interface Input { model: RenderModel; options: RoutingOptions; interactive: boolean; canvasId: string; version: number }
-interface Result { model: RenderModel; edges: RenderEdge[]; stats: RoutingStats; canvasId: string; sequence: number }
+interface Input { model: RenderModel; options: RoutingOptions; interactive: boolean; canvasId: string; version: number; expandedKey: string }
+interface Result { model: RenderModel; edges: RenderEdge[]; stats: RoutingStats; canvasId: string; sequence: number; expandedKey: string }
 
-export function useEdgeRouting(model: RenderModel, options: RoutingOptions, interactive: boolean, canvasId: string) {
+function displayedRoutes(model: RenderModel, expandedIds: string[] | undefined, expandedKey: string, previous?: Omit<Result, 'stats'>) {
+  if (previous?.model === model && previous.expandedKey === expandedKey) return previous.edges;
+  return previewCachedRoutes(previous?.model ?? model, previous?.edges ?? [], model, expandedIds);
+}
+
+function onlyViewportMoved(previous: Input | undefined, next: Input) {
+  if (!previous || previous.version === next.version || previous.model !== next.model || previous.interactive !== next.interactive) return false;
+  const a = previous.options, b = next.options, from = a.viewport, to = b.viewport;
+  if (!from || !to || from.width !== to.width || from.height !== to.height || (from.x === to.x && from.y === to.y)) return false;
+  const before = a.expandedEdgeIds ?? [], after = b.expandedEdgeIds ?? [];
+  return a.labels === b.labels && before.length === after.length && before.every((id, i) => id === after[i]);
+}
+
+export function useEdgeRouting(model: RenderModel, options: RoutingOptions, interactive: boolean, canvasId: string, enabled = true) {
   const latest = useRef<Input>(), sequence = useRef(0), schedule = useRef<() => void>(() => {});
-  const presentation = useRef<{ model: RenderModel; edges: RenderEdge[]; canvasId: string; sequence: number }>();
+  const presentation = useRef<Omit<Result, 'stats'>>();
   const [result, setResult] = useState<Result>();
+  const expandedKey = JSON.stringify(options.expandedEdgeIds ?? []);
   const preview = useMemo(() => {
+    if (!enabled) return model.edges;
     const old = presentation.current;
     const accepted = result?.canvasId === canvasId && result.sequence !== old?.sequence ? result : undefined;
     const base = accepted ?? (old?.canvasId === canvasId ? old : undefined);
-    const edges = base ? base.model === model ? base.edges : previewCachedRoutes(base.model, base.edges, model, options.expandedEdgeIds) : model.edges;
-    presentation.current = { model, edges, canvasId, sequence: accepted?.sequence ?? old?.sequence ?? 0 };
+    const edges = displayedRoutes(model, options.expandedEdgeIds, expandedKey, base);
+    presentation.current = { model, edges, canvasId, expandedKey, sequence: accepted?.sequence ?? old?.sequence ?? 0 };
     return edges;
-  }, [result, model, canvasId, options.expandedEdgeIds]);
+  }, [enabled, result, model, canvasId, expandedKey]);
 
   useEffect(() => {
     let alive = true, worker: Worker | undefined, active: Input | undefined, timer: number | undefined;
-    let sentAt = -Infinity, lastVersion = -1, refinements = 0, requestId = 0;
+    let sentAt = -Infinity, scheduledAt = 0, lastVersion = -1, refinements = 0, requestId = 0;
+    let lastSent: Input | undefined;
     const encoder = new RoutingDeltaEncoder(), receiver = new RoutingDeltaReceiver(), fallback = new EdgeRoutingCache();
+    const frames = new RoutingFrameReceiver();
     try { worker = new Worker(new URL('./edgeRoutingWorker.ts', import.meta.url), { type: 'module' }); } catch { /* Bounded same-router fallback. */ }
     const enqueue = () => {
-      if (!alive || active || timer !== undefined || latest.current?.canvasId !== canvasId) return;
-      const interval = latest.current.interactive ? 48 : 24;
-      timer = window.setTimeout(run, Math.max(0, interval - (performance.now() - sentAt)));
+      const job = latest.current;
+      if (!alive || active || job?.canvasId !== canvasId) return;
+      // Paths move immediately with the world transform. Only labels near the
+      // viewport boundary need a worker update during a continuous pan.
+      const interval = onlyViewportMoved(lastSent, job) ? 160 : job.interactive ? 48 : 24;
+      const due = sentAt + interval;
+      if (timer !== undefined && scheduledAt <= due) return;
+      window.clearTimeout(timer);
+      scheduledAt = due;
+      timer = window.setTimeout(run, Math.max(0, due - performance.now()));
     };
-    const complete = (job: Input, edges?: RenderEdge[], stats?: RoutingStats) => {
+    const complete = (job: Input, frame?: RoutingFrame, stats?: RoutingStats) => {
       if (!alive) return;
       active = undefined;
       const current = latest.current;
+      // Consume every reply in sequence, including superseded drag previews.
+      const edges = frame === undefined ? undefined : frames.apply(frame, job.model);
       // A drag may advance while a worker is busy. Only its path is reused; previewCachedRoutes
       // projects it onto the newest endpoints. Once released, discard late geometry entirely.
       if (current?.canvasId === canvasId && (current.model === job.model || current.interactive) && edges && stats) {
-        const originals = new Map(job.model.edges.map(e => [e.edge.edgeId, e.edge]));
-        setResult({ model: job.model, edges: edges.map(e => ({ ...e, edge: originals.get(e.edge.edgeId)! })), stats, canvasId, sequence: ++sequence.current });
+        setResult({ model: job.model, expandedKey: job.expandedKey, edges, stats, canvasId, sequence: ++sequence.current });
       }
       if (current?.version !== job.version) { refinements = 0; enqueue(); }
       else if (stats?.pending && refinements++ < (current?.interactive ? 2 : 12)) enqueue();
@@ -48,12 +73,12 @@ export function useEdgeRouting(model: RenderModel, options: RoutingOptions, inte
       const job = latest.current; if (!alive || !job || job.canvasId !== canvasId || active) return;
       if (lastVersion !== job.version) { refinements = 0; lastVersion = job.version; }
       const shown = presentation.current;
-      const displayed = shown?.canvasId === canvasId ? shown.model === job.model ? shown.edges : previewCachedRoutes(shown.model, shown.edges, job.model, job.options.expandedEdgeIds) : job.model.edges;
+      const displayed = displayedRoutes(job.model, job.options.expandedEdgeIds, job.expandedKey, shown?.canvasId === canvasId ? shown : undefined);
       const delta = encoder.encode(job.model, displayed);
       // Also retain the tiny wire state locally so a worker crash can fall back without requesting a full snapshot.
       const wire = receiver.apply(delta);
       const routingOptions = { ...job.options, interactive: job.interactive, budgetMs: worker ? job.interactive ? 12 : 120 : 5 };
-      active = job; sentAt = performance.now();
+      active = job; lastSent = job; sentAt = performance.now();
       if (worker) worker.postMessage({ requestId: ++requestId, delta, options: routingOptions });
       else {
         const routed = fallback.route(wire, routingOptions); complete(job, routed.edges, routed.stats);
@@ -61,10 +86,10 @@ export function useEdgeRouting(model: RenderModel, options: RoutingOptions, inte
     };
     if (worker) {
       worker.onmessage = event => {
-        const reply = event.data as { requestId: number; edges?: RenderEdge[]; stats?: RoutingStats; error?: string };
+        const reply = event.data as { requestId: number; frame?: RoutingFrame; stats?: RoutingStats; error?: string };
         if (!alive || !active || reply.requestId !== requestId) return;
         if (reply.error) { worker?.terminate(); worker = undefined; const job = active; complete(job); enqueue(); }
-        else complete(active, reply.edges, reply.stats);
+        else complete(active, reply.frame, reply.stats);
       };
       worker.onerror = () => { worker?.terminate(); worker = undefined; active = undefined; enqueue(); };
     }
@@ -73,10 +98,11 @@ export function useEdgeRouting(model: RenderModel, options: RoutingOptions, inte
   }, [canvasId]);
 
   useEffect(() => {
-    latest.current = { model, options, interactive, canvasId, version: (latest.current?.version ?? 0) + 1 };
+    if (!enabled) return;
+    latest.current = { model, options, interactive, canvasId, expandedKey, version: (latest.current?.version ?? 0) + 1 };
     // The timer is not canceled by every pointer event: continuous movement must not starve the worker.
     schedule.current();
-  }, [model, options, interactive, canvasId]);
+  }, [enabled, model, options, interactive, canvasId]);
   return { edges: preview, sequence: result?.canvasId === canvasId ? result.sequence : 0,
-    stats: result?.canvasId === canvasId && result.model === model ? result.stats : undefined };
+    stats: result?.canvasId === canvasId && result.model === model && result.expandedKey === expandedKey ? result.stats : undefined };
 }

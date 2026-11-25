@@ -1,9 +1,10 @@
 import type { AppSnapshot, ToolCallRecord } from '../domain';
 import type { FrozenRead, Observation } from '../contextState';
-import type { CanvasIndex } from './canvasView';
+import { hasDirectNodes, type CanvasIndex } from './canvasView';
 import { digest, membershipStamp } from './directGraph';
 import { graphTables } from './graphReadTables';
-import { subgraphKey, subgraphVersion, subgraphDependency } from './subgraphVersions';
+import { bodyRangeQuery, dependencyEndpoints, graphQueryKey, graphQueryVersion, nodeDependencies } from './graphQueries';
+import { subgraphDependency, subgraphKey, subgraphVersion } from './subgraphVersions';
 import { translateGraphPayload } from './graphReferences';
 import { rememberPageOrigin } from './readPageEvidence';
 
@@ -11,23 +12,26 @@ export type Row=Record<string,unknown>;
 export interface CanvasReadRequest { version:1; tool:string; arguments:Row }
 export function canvasRefreshRequest(request:CanvasReadRequest):CanvasReadRequest {
   const result=structuredClone(request),args=result.arguments;
-  delete args.expectedVersion;delete args.expectedRelationVersion;
-  if(request.tool==='graph_read_node_content'){delete args.start;delete args.end;}
+  delete args.expectedVersion;delete args.expectedRelationVersion;delete args.current;
+  if(request.tool==='graph_read_node_content'&&args.start!==undefined)args.current=true;
   if(Array.isArray(args.requests))for(const part of args.requests)if(row(part))delete part.expectedRelationVersion;
   return result;
 }
-export interface CanvasFact { refId:string; field:string; version:string; start?:number;end?:number;total?:number;pointerId?:string }
+export interface CanvasFact { refId:string; field:string; version:string; start?:number;end?:number;total?:number;pointerId?:string;sliceVersion?:string }
 export interface CanvasReadDelivery { pointerId:string;page:number;request:CanvasReadRequest;observation:Observation;payloadHash:string }
 export const canvasReadTools=new Set(['graph_read','graph_read_subgraph','graph_read_node_content','graph_read_directory_content',
-  'graph_read_subgraph_edges','graph_read_between_subgraphs','graph_read_object_field','graph_neighbors','graph_read_node_edges','graph_search','graph_search_node_content','graph_read_design_references','graph_read_directory']);
+  'graph_read_dependencies','graph_read_subgraph_edges','graph_read_between_subgraphs','graph_read_object_field','graph_neighbors','graph_read_node_edges','graph_search','graph_search_node_content','graph_read_design_references','graph_read_directory']);
 export const row=(v:unknown):v is Row=>!!v&&typeof v==='object'&&!Array.isArray(v);
 export function canonical(v:unknown):unknown {return Array.isArray(v)?v.map(canonical):row(v)?Object.fromEntries(Object.keys(v).sort().filter(k=>v[k]!==undefined).map(k=>[k,canonical(v[k])])):v;}
 export const canvasKey=(v:unknown)=>digest(canonical(v));
 export const canvasEvidenceFence=(state:AppSnapshot)=>canvasKey([state.graphRevision,state.graph,state.provider]);
+const zeroLayer = { layer: 0, offset: 0 };
 export function canvasField(index:CanvasIndex,refId:string,field:string):unknown {
   const tables=graphTables(index),item=index.rows.get(refId),edge=tables.edges.get(refId);
   if(field==='existence')return !!(item||edge);
   if(!item&&!edge)return undefined;
+  if(field==='spatial')return item?.readable && item.kind !== 'node' ? item.spatial ?? zeroLayer : undefined;
+  if(field==='hasDirectNodes')return item && item.kind !== 'node' ? hasDirectNodes(index,refId) : undefined;
   if(field==='members')return item?.children.slice().sort().map(id=>({refId:id,kind:index.rows.get(id)?.kind}));
   if(field==='node_members'||field==='directory_members')return item?.children.filter(id=>(index.rows.get(id)?.kind==='node')===(field==='node_members')).sort();
   if(field==='owner')return item?.parentId??null;
@@ -35,11 +39,57 @@ export function canvasField(index:CanvasIndex,refId:string,field:string):unknown
   if(field==='name')return item?.segments.at(-1)?.name;
   if(field==='path')return item?tables.path(refId):undefined;
   if(field==='design')return index.graph.nodes[refId]?.design??null;
+  if(field==='designType')return index.graph.nodes[refId]?.design?.type??null;
   if(field==='pros'||field==='cons')return index.graph.nodes[refId]?.design?.[field]??'';
   if(field==='edge')return edge?tables.edge(refId):undefined;
+  if(field==='dependencyEdge')return dependencyEndpoints(index,refId);
+  if((field.startsWith('dependencies_')||field.startsWith('dependencyCount_'))&&item?.kind==='node'&&item.readable){
+    const direction=field.split('_')[1];
+    if(!['outgoing','incoming','both'].includes(direction))return;
+    const rows=nodeDependencies(index,refId,direction);
+    return field.startsWith('dependencyCount_')?rows.length:rows;
+  }
   return undefined;
 }
 export const factKey=(f:CanvasFact)=>canvasKey([f.refId,f.field]);
+/** Only whole text fields actually visible to this request authorize replacement.
+ * A stale sibling in the same observation does not erase an unchanged field. */
+export function submittedTextFieldBindings(index:CanvasIndex,observations:Observation[]):Record<string,string>{
+  const fields=new Map<string,CanvasFact[]>(),bindings:Record<string,string>={};
+  for(const o of observations){
+    if(o.evidenceUnknown||o.historical||o.canvasId!==index.canvasId)continue;
+    for(const fact of o.canvasFacts??[]){
+      if(fact.field!=='name'&&fact.field!=='content')continue;
+      const scope=subgraphVersion(index,fact.refId,'editScope');
+      if(!scope||o.textScopes?.[fact.refId]&&o.textScopes[fact.refId]!==scope)continue;
+      const key=subgraphKey(index.canvasId,fact.refId,fact.field==='name'?'name':'body');
+      const list=fields.get(key)??[];list.push({...fact,pointerId:fact.pointerId??o.canvasPage?.pointerId});fields.set(key,list);
+    }
+  }
+  for(const [key,facts] of fields){
+    const {refId,field}=facts[0],version=canvasKey(canvasField(index,refId,field));
+    if(canvasFactCovered({refId,field,version},facts.filter(f=>f.version===version))){
+      bindings[key]=version;
+      bindings[subgraphKey(index.canvasId,refId,'editScope')]=subgraphVersion(index,refId,'editScope')!;
+    }
+  }
+  return bindings;
+}
+/** Subsequent edits to hidden text of the same length do not change a delivered slice. */
+export function stampBodyRanges(index:CanvasIndex,o:Observation) {
+  for(const fact of o.canvasFacts??[]){
+    if(fact.start===undefined||fact.end===undefined||!['content','pros','cons'].includes(fact.field))continue;
+    const query=bodyRangeQuery(fact.refId,fact.field,fact.start,fact.end,index.rows.get(fact.refId)?.kind!=='node');
+    fact.sliceVersion=graphQueryVersion(index,query);
+    (o.readHashes??={})[graphQueryKey(index.canvasId,query)]=fact.sliceVersion;
+  }
+}
+export function currentCanvasFact(index:CanvasIndex,fact:CanvasFact):boolean {
+  const value=canvasField(index,fact.refId,fact.field);
+  if(fact.sliceVersion&&fact.start!==undefined&&fact.end!==undefined)
+    return typeof value==='string'&&canvasKey([value.length,value.slice(fact.start,fact.end)])===fact.sliceVersion;
+  return canvasKey(value)===fact.version;
+}
 /** Capture why a composite stamp had its value. A delivered field can then
  * resolve just that component, without certifying any unseen sibling body. */
 export function stampCanvasVersionDependencies(index:CanvasIndex,o:Observation){
@@ -49,7 +99,8 @@ export function stampCanvasVersionDependencies(index:CanvasIndex,o:Observation){
     return [fact(refId,directories?'directory_members':'node_members'),...(names?ids.map(id=>fact(id,'name')):[])];
   };
   const parts=(refId:string,part:string):CanvasFact[]=>{
-    if(part==='directory')return [fact(refId,'name'),fact(refId,'owner'),...members(refId,true,true)];
+    if(part==='body')return [fact(refId,'content')];
+    if(part==='directory')return [fact(refId,'name'),fact(refId,'owner'),fact(refId,'hasDirectNodes'),fact(refId,'spatial'),...members(refId,true,true)];
     if(part==='members')return members(refId,false);
     if(part==='content')return [fact(refId,'name'),fact(refId,'content')];
     if(part==='direct')return [fact(refId,'name'),fact(refId,'content'),...members(refId,true),...members(refId,false),
@@ -58,10 +109,10 @@ export function stampCanvasVersionDependencies(index:CanvasIndex,o:Observation){
   };
   o.canvasVersionDependencies=Object.fromEntries([
     ...Object.keys(o.readHashes??{}).flatMap(key=>{const d=subgraphDependency(key);return d?[[key,parts(d.refId,d.part)]]:[];}),
-    ...Object.keys(o.directoryMembers??{}).map(id=>[`directoryMembers:${id}`,members(id,!!o.structureOnly,true)]),
+    ...Object.entries(o.directoryMembers??{}).map(([id,stamp])=>[`directoryMembers:${id}`,members(id,!!o.structureOnly,!stamp.startsWith('members:2:'))]),
     ...Object.keys(o.paths).map(id=>[`paths:${id}`,[fact(id,'path')]]),
     // Modern observations use explicit members/read hashes above. The legacy
-    // fallback alone subscribes to whole files; duplicating it per node/page
+    // fallback alone subscribes to entire directory bundles; duplicating it per node/page
     // would accidentally capture every sibling and grow snapshots quadratically.
     ...(!o.objects?Object.keys(o.directories).map(id=>[`directories:${id}`,parts(id,o.structureOnly?'directory':'direct')]):[]),
   ]);
@@ -74,9 +125,17 @@ export function deliveredCanvasFacts(index:CanvasIndex,observations:Observation[
     .flatMap(o=>(o.canvasFacts??[]).map(f=>({...f,pointerId:f.pointerId??o.canvasPage?.pointerId})));
   const pages=new Map<string,Set<number>>();
   for(const o of observations)if(o.canvasPage){const set=pages.get(o.canvasPage.pointerId)??new Set<number>();set.add(o.canvasPage.page);pages.set(o.canvasPage.pointerId,set);}
+  for(const o of observations){
+    const query=o.graphQuery,page=o.canvasPage;
+    if(query?.tool!=='graph_search'||query.arguments.scope!=='children'||page?.page!==1||pages.get(page.pointerId)?.size!==page.totalPages)continue;
+    const refId=String(query.arguments.refId??index.rootId),directory=index.rows.get(refId);
+    if(!directory?.readable||directory.kind==='node'||directory.children.some(id=>!index.rows.get(id)?.readable))continue;
+    if(o.readHashes?.[graphQueryKey(index.canvasId,query)]===graphQueryVersion(index,query))
+      facts.push({refId,field:'members',version:canvasKey(canvasField(index,refId,'members')),pointerId:undefined});
+  }
   for(const o of observations)for(const [refId,stamp] of Object.entries(o.directoryMembers??{})){
     const complete=o.completeDirectories.includes(refId)||o.canvasPage&&pages.get(o.canvasPage.pointerId)?.size===o.canvasPage.totalPages;
-    if(complete&&stamp===membershipStamp(index,refId,!!o.structureOnly)){
+    if(complete&&stamp===membershipStamp(index,refId,!!o.structureOnly,stamp)){
       const field=o.structureOnly?'directory_members':'node_members';
       facts.push({refId,field,version:canvasKey(canvasField(index,refId,field)),pointerId:undefined});
     }
@@ -94,8 +153,9 @@ export function deliveredCanvasFacts(index:CanvasIndex,observations:Observation[
   }
   return facts;
 }
-export function stampCanvasObservation(index:CanvasIndex,observation:Observation,data:unknown){
+export function stampDisplayedCanvasFields(index:CanvasIndex,observation:Observation,data:unknown){
   const facts=new Map<string,CanvasFact>();
+  const paths=new Map<string,Array<{refId:string;name:string}>>();
   const add=(id:string,field:string,range?:Row)=>{
     const value=canvasField(index,id,field);if(value===undefined)return;
     const f:CanvasFact={refId:id,field,version:canvasKey(value)};
@@ -105,29 +165,61 @@ export function stampCanvasObservation(index:CanvasIndex,observation:Observation
   };
   const visit=(v:unknown)=>{
     if(Array.isArray(v)){v.forEach(visit);return;}if(!row(v))return;
+    if(observation.structureOnly && typeof v.hasDirectNodes==='boolean'){
+      const directory=v.listOnly===true?v.scope:v.refId;
+      if(typeof directory==='string'){
+        if(v.hasDirectNodes===canvasField(index,directory,'hasDirectNodes'))add(directory,'hasDirectNodes');
+        const item=index.rows.get(directory), shown=v.spatial ?? zeroLayer, current=item?.spatial ?? zeroLayer;
+        if(item?.readable && row(shown) && shown.layer===current.layer && shown.offset===current.offset)add(directory,'spatial');
+      }
+    }
     if(typeof v.edgeId==='string'&&typeof v.content==='string'){add(v.edgeId,'edge',v);add(v.edgeId,'existence');}
     if(typeof v.refId==='string'){
       const id=v.refId;
+      if(typeof v.designType==='string')add(id,'designType');
       if(typeof v.name==='string'||typeof v.content==='string'){
         add(id,'existence');
         if(index.rows.get(id)?.kind==='node')add(id,'members');
       }
-      if(typeof v.field==='string'&&typeof v.content==='string')add(id,v.field,v);
+      if(typeof v.field==='string'&&typeof v.content==='string'){
+        add(id,v.field,v);
+        // The object-field reader can translate IDs before slicing its JSON.
+        // Only a complete delivery gives us the old human-readable path.
+        if(v.field==='path'&&v.start===0&&v.end===v.contentLength&&v.content.length===v.end)
+          paths.set(id,graphTables(index).path(id));
+      }
       else {
         if(typeof v.content==='string')add(id,'content',v);
         if(typeof v.name==='string')add(id,'name');
-        if(Array.isArray(v.path))add(id,'path');
+        if(Array.isArray(v.path)){
+          const path=graphTables(index).path(id);
+          if(canvasKey(path)===canvasKey(v.path)){add(id,'path');paths.set(id,path);}
+        }
         // A design type tag is not the complete design field.
         if(v.design!==undefined&&canvasKey(v.design)===canvasKey(canvasField(index,id,'design')))add(id,'design');
       }
     }
     for(const [k,child] of Object.entries(v))if(!['readWith','nameReadWith','pathReadWith','designReadWith','arguments','nextCursor'].includes(k))visit(child);
   };visit(data);observation.canvasFacts=[...facts.values()];
-  const groups=new Set([...Object.keys(observation.directories),...Object.values(observation.objectParents??{}).flat()]);
-  if(observation.query||observation.graphQuery)groups.add(String(observation.graphQuery?.arguments.refId??index.rootId));
-  observation.fileVersions=Object.fromEntries([...groups].flatMap(id=>['directory','direct'].flatMap(part=>{
-    const version=subgraphVersion(index,id,part as 'directory'|'direct');return version?[[subgraphKey(index.canvasId,id,part as 'directory'|'direct'),version]]:[];
-  })));
+  const scopes:Record<string,string>={};
+  for(const f of facts.values())if((f.field==='name'||f.field==='content')&&!scopes[f.refId]){
+    const scope=subgraphVersion(index,f.refId,'editScope');if(scope)scopes[f.refId]=scope;
+  }
+  if(Object.keys(scopes).length)observation.textScopes=scopes;
+  if(paths.size)observation.observedPaths=Object.fromEntries(paths);
+  else delete observation.observedPaths;
+}
+export function stampCanvasObservation(index:CanvasIndex,observation:Observation,data:unknown){
+  stampDisplayedCanvasFields(index,observation,data);
+  if(observation.graphQuery?.tool==='graph_read_dependencies' && row(data) && Array.isArray(data.items)){
+    const facts=observation.canvasFacts??=[];
+    for(const item of data.items)if(row(item) && typeof item.edgeId==='string')
+      facts.push({refId:item.edgeId,field:'dependencyEdge',version:canvasKey([item.sourceNodeId,item.targetNodeId])});
+    if(typeof data.refId==='string'&&Number.isSafeInteger(data.totalEdges))
+      facts.push({refId:data.refId,field:'dependencyCount_'+String(data.direction),version:canvasKey(data.totalEdges)});
+    if(observation.canvasPage?.totalPages===1 && typeof data.refId==='string')
+      facts.push({refId:data.refId,field:'dependencies_'+String(data.direction),version:canvasKey(data.items)});
+  }
   stampCanvasVersionDependencies(index,observation);
 }
 export function rememberCanvasRead(call:ToolCallRecord,read:FrozenRead,page:number){

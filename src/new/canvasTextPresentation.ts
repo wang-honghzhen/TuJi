@@ -23,7 +23,8 @@ export function canvasTextVisibility(role: CanvasTextRole, zoom: number, width: 
   const minZoom = role === 'title' ? (restoring ? .28 : .25) : 0;
   const visible = zoom >= minZoom - .0001 && screenWidth >= minWidth - .1 &&
     screenHeight >= line * zoom - .25 && screenFont >= minFont - .001;
-  const opacity = !visible ? 0 : role === 'body' ? clamp((screenFont - 9) / 1.2) :
+  // A visible summary still needs enough contrast to read near the LOD cutoff.
+  const opacity = !visible ? 0 : role === 'body' ? .85 + .15 * clamp((screenFont - 9) / 1.2) :
     role === 'title' ?
       Math.min(clamp((screenWidth - 48) / 16), clamp((zoom - .22) / .06)) : clamp((screenWidth - 56) / 20);
   return { visible, opacity };

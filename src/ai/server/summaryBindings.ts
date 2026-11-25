@@ -53,7 +53,8 @@ export function bindSummaryReadReferences(text:string,catalog:SummaryObjectBindi
   // marker instead of the catalog key. Repair only exact, unambiguous identities.
   text=text.replace(/\[\[ref:([^\]]*)\]\]/g,(token:string,key:string)=>{
     if(catalog.some(b=>b.key===key))return token;
-    const matches=catalog.filter(b=>b.id===key||b.kind==='read'&&b.id===`read:${key}`);
+    // A bare ID never selects which field of a read supported a claim.
+    const matches=catalog.filter(b=>!b.fieldRead && (b.id===key||b.kind==='read'&&b.id===`read:${key}`));
     return matches.length===1?`[[ref:${matches[0].key}]]`:token;
   });
   const reads=new Map<string,SummaryObjectBinding[]>();
@@ -75,6 +76,23 @@ export function usedSummaryBindings(text:string,catalog:SummaryObjectBinding[]):
   return keys.map(key=>catalog.find(b=>b.key===key)!);
 }
 
+/** Apply the same derived-text checks when creating a summary and when admitting
+ * a saved root. Ordinary text such as "read: chapter" carries no cursor. */
+export function verifiedSummaryText(text:string,catalog:SummaryObjectBinding[]) {
+  const normalized=bindSummaryReadReferences(text,catalog);
+  const bindings=usedSummaryBindings(normalized,catalog);
+  const literals=normalized.replace(marker,'');
+  requireValue(!literals.includes('[[ref:')&&!/(?<![a-zA-Z0-9:_-])read:[a-zA-Z0-9_-]+/.test(literals),
+    '摘要引用了未绑定的分页入口或格式不完整的对象','INVALID_SUMMARY_REFERENCE');
+  return {text:normalized,bindings};
+}
+
+
+export function usableSummaryReferences(summary:SummarySnapshot):boolean {
+  if(summary.semanticType!=='task'||!summary.text.includes('read:')&&!summary.text.includes('[[ref:'))return true;
+  try{verifiedSummaryText(summary.text,summary.objectBindings??[]);return true;}
+  catch{return false;}
+}
 
 /** Binding identifies the historical object; it never grants access or certifies its current body. */
 export function summaryProjection(state:AppSnapshot,task:Task,summary:SummarySnapshot) {

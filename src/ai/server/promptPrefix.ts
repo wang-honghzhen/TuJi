@@ -6,7 +6,7 @@ import { serializeRequest, type ModelRequest, type ProviderConfig } from './prov
 /** Cache-affecting route identity, excluding output budgets and transport timeouts. */
 export function promptRouteSignature(config: ProviderConfig): string {
   return digest([config.baseUrl.replace(/\/+$/, ''), config.protocol, config.apiFamily, config.model,
-    config.thinkingEffort, config.includeEncryptedReasoning, config.supportsVision]);
+    config.thinkingEffort, config.includeEncryptedReasoning]);
 }
 
 export interface WirePrefixSnapshot {

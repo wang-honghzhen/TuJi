@@ -1,9 +1,18 @@
 import type { GraphState } from '@/v3/types';
 import { getCanvasPaths, type GraphPath } from '@/v3/paths';
+import { getSpatialLevels } from '@/v3/spatialLevels';
 import { canvasOf, graphEntityLookup } from './graph';
 import { hash } from './repository';
-type Row = GraphPath & { children: string[]; readable: boolean; version?: string; content: string };
+type Row = GraphPath & { children: string[]; readable: boolean; version?: string; content: string; spatial?: { layer: number; offset: number } };
 export interface CanvasIndex { graph: GraphState; canvasId: string; rootId: string; rows: Map<string, Row>; edges: GraphState['edges']; members: Set<string>; knownRefs: string[]; entity: (ref: string) => unknown }
+
+/** A structural placeholder or a node in another canvas is not a readable child. */
+export function hasDirectNodes(index: CanvasIndex, refId: string): boolean {
+  return index.rows.get(refId)?.children.some(id => {
+    const child = index.rows.get(id);
+    return child?.kind === 'node' && child.readable;
+  }) ?? false;
+}
 
 /** Ancestors of explicitly attached members are structural placeholders, never extra read authority. */
 export function canvasIndex(graph: GraphState, canvasId: string, allowed: Set<string>, entity = graphEntityLookup(graph)): CanvasIndex {
@@ -18,9 +27,12 @@ export function canvasIndex(graph: GraphState, canvasId: string, allowed: Set<st
     pathsById.get(id)?.segments.forEach(segment => included.add(segment.id));
   }
   const rows = new Map<string, Row>();
+  const levels = canvas.spatialLayerOffsets && getSpatialLevels(graph, canvas);
   for (const row of paths) if (included.has(row.id)) {
     const value = entity(row.id) as { content?: string; description?: string; metadata?: { description?: string } };
+    const layer = levels?.get(row.id) ?? 0, offset = canvas.spatialLayerOffsets?.[row.id] ?? 0;
     rows.set(row.id, { ...row, readable: allowed.has(row.id), children: [], version: allowed.has(row.id) ? hash(value) : undefined,
+      ...(allowed.has(row.id) && row.kind !== 'node' && (layer || offset) ? { spatial: { layer, offset } } : {}),
       content: allowed.has(row.id) ? value.content ?? value.metadata?.description ?? value.description ?? '' : '' });
   }
   for (const row of rows.values()) if (row.parentId) rows.get(row.parentId)?.children.push(row.id);

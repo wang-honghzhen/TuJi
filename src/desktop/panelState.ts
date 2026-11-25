@@ -13,6 +13,7 @@ try {
   if (!window.tujiDesktop) {
     const saved = JSON.parse(localStorage.getItem('tuji:notebook-view') ?? '{}');
     if (Array.isArray(saved.noteTabs)) initial.noteTabs = saved.noteTabs;
+    if (Array.isArray(saved.dockedAiCanvases)) initial.dockedAiCanvases = saved.dockedAiCanvases.filter((id: unknown) => typeof id === 'string');
     if (typeof saved.noteDirectoryId === 'string') initial.noteDirectoryId = saved.noteDirectoryId;
     if (typeof saved.notePageId === 'string') initial.notePageId = saved.notePageId;
     if (typeof saved.activeTab === 'string') initial.activeTab = saved.activeTab;
@@ -23,7 +24,7 @@ export const usePanelState = create<PanelState>(() => initial);
 usePanelState.subscribe(state => {
   if (window.tujiDesktop) return;
   try { localStorage.setItem('tuji:notebook-view', JSON.stringify({ noteTabs: state.noteTabs, noteDirectoryId: state.noteDirectoryId,
-    notePageId: state.notePageId, activeTab: state.activeTab, reading: state.reading })); } catch { /* Content is saved independently. */ }
+    notePageId: state.notePageId, activeTab: state.activeTab, reading: state.reading, dockedAiCanvases: state.dockedAiCanvases })); } catch { /* Content is saved independently. */ }
 });
 let applying = false;
 let draftTimer: ReturnType<typeof setTimeout> | undefined;
@@ -40,7 +41,9 @@ export async function preparePanelTransfer() {
 async function publishDrafts() {
   clearTimeout(draftTimer);
   const store = useAiStore.getState();
-  const ids = new Set(store.snapshot?.sessions.filter(s => s.mode === 'temporary' && s.lifecycle === 'active').map(s => s.id));
+  // Startup can request a window transfer before either source of draft state has loaded.
+  if (!usePanelState.getState().ready || !store.snapshot) return;
+  const ids = new Set(store.snapshot.sessions.filter(s => s.mode === 'temporary' && s.lifecycle === 'active').map(s => s.id));
   const drafts = Object.fromEntries(Object.entries(store.draftsBySession).filter(([id]) => ids.has(id)));
   if (window.tujiDesktop) await window.tujiDesktop.command('patch-view', { drafts, reading: usePanelState.getState().reading });
   else usePanelState.setState({ drafts });
@@ -73,7 +76,11 @@ export function initializePanelBridge() {
 export async function panelCommand(action: string, payload: Record<string, unknown> = {}) {
   if (window.tujiDesktop) { await window.tujiDesktop.command(action, payload); return; }
   const state = usePanelState.getState();
-  if (action === 'open-panel') { await preparePanelTransfer(); usePanelState.setState({ host: 'main', used: true, activeTab: String(payload.tab ?? state.activeTab) }); }
+  if (action === 'set-canvas-ai-dock') {
+    const ids = new Set(state.dockedAiCanvases);
+    if (payload.docked) ids.add(String(payload.canvasId)); else ids.delete(String(payload.canvasId));
+    usePanelState.setState({ dockedAiCanvases: [...ids] });
+  } else if (action === 'open-panel') { await preparePanelTransfer(); usePanelState.setState({ host: 'main', used: true, activeTab: String(payload.tab ?? state.activeTab) }); }
   else if (action === 'hide-panel') { await preparePanelTransfer(); usePanelState.setState({ host: 'none' }); }
   else if (action === 'toggle-detach') { await preparePanelTransfer(); usePanelState.setState({ detached: !state.detached }); }
   else if (action === 'patch-view' || action === 'set-context') usePanelState.setState(payload as Partial<PanelState>);

@@ -1,12 +1,15 @@
 import type { AppSnapshot } from '../ai/domain';
 import { reviewEntries, reviewUnitRefs } from '../ai/changeReview';
-import { getCanvasPaths } from '../v3/paths';
+import { getCanvasPaths, type GraphPath } from '../v3/paths';
 import { canvasDirectory } from '../v3/canvas';
+import { duplicatePathIds } from './graphPathIdentity';
 import type { CanvasRecord, GraphState, Rect } from '../v3/types';
 
 export type GraphSearchKind = 'node' | 'subgraph' | 'document' | 'edge';
 export interface GraphSearchResult {
   id: string; kind: GraphSearchKind; name: string; path: string; detail: string;
+  source: GraphPath; sourceSuffix?: string;
+  target?: GraphPath; targetSuffix?: string; separator?: string;
   sourcePath?: string; targetPath?: string;
 }
 export const searchContains = (query: string, ...values: Array<string | undefined>) => {
@@ -32,29 +35,68 @@ export function searchFocusView(rects: Rect[], area: Rect, currentZoom: number) 
   return { anchor, view: { zoom, x: area.x + area.width / 2 - anchor.x * zoom, y: area.y + area.height / 2 - anchor.y * zoom } };
 }
 
-/** Search canonical membership, never just the currently painted/expanded objects. */
-export function searchCanvas(state: GraphState, canvas: CanvasRecord, query: string, edges = true): GraphSearchResult[] {
-  if (!query.trim()) return [];
-  const paths = getCanvasPaths(state, canvas), byId = new Map(paths.map(p => [p.id, p]));
-  const results: GraphSearchResult[] = [];
+interface CanvasSearchEntry {
+  result: Omit<GraphSearchResult, 'detail'>;
+  content: string;
+  searchText: string;
+}
+
+/** Index canonical membership, including objects outside the viewport or in folded groups. */
+export function buildCanvasSearchIndex(state: GraphState, canvas: CanvasRecord, edges = true) {
+  const paths = getCanvasPaths(state, canvas);
+  const byId = new Map(paths.map(row => [row.id, row]));
+  const suffixes = duplicatePathIds(paths.map(row => ({ id: row.id, label: row.path })));
+  const displayPath = (row: GraphPath) => {
+    const suffix = suffixes.get(row.id);
+    return suffix ? `${row.path} · ${suffix}` : row.path;
+  };
+  const entries: CanvasSearchEntry[] = [];
+  const add = (result: CanvasSearchEntry['result'], content: string) => {
+    const searchText = [result.name, content, result.path].join('\n').toLocaleLowerCase();
+    entries.push({ result, content, searchText });
+  };
   for (const row of paths) {
     if (row.kind === 'root') continue;
     const node = state.nodes[row.id], record = state.documents[row.id];
-    const name = row.segments.at(-1)!.name;
     const content = node ? [node.content, node.design?.pros, node.design?.cons].filter(Boolean).join('\n')
       : canvasDirectory(canvas, row.id)?.description ?? record?.metadata.description ?? '';
-    if (searchContains(query, name, content, row.path)) results.push({ id: row.id, kind: row.kind, name, path: row.path, detail: searchExcerpt(content, query) });
+    add({
+      id: row.id, kind: row.kind, source: row, sourceSuffix: suffixes.get(row.id),
+      name: row.segments.at(-1)!.name, path: displayPath(row),
+    }, content);
   }
   if (edges) for (const edge of state.edges) {
     if (edge.removed) continue;
     const source = byId.get(edge.sourceNodeId), target = byId.get(edge.targetNodeId);
     // Outside links are a viewing aid, not members of the current canvas search scope.
     if (!source || !target) continue;
-    const name = `${source.segments.at(-1)!.name} ${edge.directed ? '→' : '—'} ${target.segments.at(-1)!.name}`;
-    if (searchContains(query, name, edge.edgeContent, source.path, target.path)) results.push({ id: edge.edgeId, kind: 'edge', name,
-      path: `${source.path} ${edge.directed ? '→' : '—'} ${target.path}`, sourcePath: source.path, targetPath: target.path, detail: searchExcerpt(edge.edgeContent, query) });
+    const separator = edge.directed ? ' → ' : ' — ';
+    const sourcePath = displayPath(source), targetPath = displayPath(target);
+    add({
+      id: edge.edgeId, kind: 'edge', source, target, separator, sourcePath, targetPath,
+      sourceSuffix: suffixes.get(source.id), targetSuffix: suffixes.get(target.id),
+      name: `${source.segments.at(-1)!.name}${separator}${target.segments.at(-1)!.name}`,
+      path: `${sourcePath}${separator}${targetPath}`,
+    }, edge.edgeContent);
   }
-  return results;
+  return entries;
+}
+
+export function findCanvasMatches(index: CanvasSearchEntry[], query: string) {
+  const normalized = query.trim().toLocaleLowerCase();
+  if (!normalized) return [];
+  const terms = normalized.split(/\s+/);
+  return index.filter(entry => terms.every(term => entry.searchText.includes(term)));
+}
+
+export function canvasSearchResult(entry: CanvasSearchEntry, query: string): GraphSearchResult {
+  return { ...entry.result, detail: searchExcerpt(entry.content, query) };
+}
+
+export function searchCanvas(state: GraphState, canvas: CanvasRecord, query: string, edges = true): GraphSearchResult[] {
+  if (!query.trim()) return [];
+  return findCanvasMatches(buildCanvasSearchIndex(state, canvas, edges), query)
+    .map(entry => canvasSearchResult(entry, query));
 }
 
 export interface PendingReviewResult { id: string; taskId: string; unitIds: string[]; label: string; paths: string[]; detail: string; createdAt: string }

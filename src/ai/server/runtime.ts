@@ -1,7 +1,7 @@
 import { renderArtifactImages, imageAssetData } from './artifactImages';
 import { resolveAttachment, authorizedAttachments } from './attachmentCatalog';
 import { ATTACHMENT_TOOLS, attachmentRead } from './attachmentReads';
-import { attachmentLimits, attachmentBatchError, attachmentVision } from '../attachments';
+import { attachmentLimits, attachmentBatchError } from '../attachments';
 import { canvasDirectory } from '@/v3/canvas';
 import { graphTargetName } from '../toolDescriptions';
 import { normalizeInputTargets } from './inputTargetGroups';
@@ -25,32 +25,33 @@ import { AI_STRUCTURE_BOUNDARY_MESSAGE } from './aiStructurePolicy';
 import { prepareAutomaticContext,prepareInitialContext } from './automaticCompaction';
 import { buildAutomaticContext } from './automaticContext';
 import { canvasIndex } from './canvasView';
-import { captureReviewUnits,decideReview,planReview,protectReviewWrites,registerReview,reviewAffectedWorkspaces,settleReviewLayout } from './changeReview';
-import { canvasObservationChanges } from './contextFreshness';
+import { captureReviewUnits,decideReview,planReview,protectReviewWrites,registerReview,reviewAffectedWorkspaces,reviewPatchDeltas,settleReviewLayout } from './changeReview';
 import { compactConversationHistory } from './conversationHistory';
 import { directContextRead } from './directContextReads';
 import { directGraphRead } from './directGraph';
 import { graphWriteUsage } from './directoryEvidence';
 import { retainedDirectoryObservations } from './directoryObservations';
 import { directReadBudgets,readCapacityReceipt } from './directReadBudget';
-import { DomainError,requireValue,strings,text } from './errors';
+import { CanvasObjectsUnavailable,DomainError,requireValue,strings,text } from './errors';
+import { unavailableReadReceipt } from './unavailableCanvasReads';
 import { planFrozenReads } from './frozenReadCommit';
-import { applyPatches,assertAiCommandRefs,assertAiObjectRefs,canvasOf,checkAiEffects,entity,graphDiff,memberIds,patchCanUndo,patchValue,planMutation,readableIds,resourcesFor,semanticHashes } from './graph';
+import { applyPatches,assertAiCommandRefs,assertAiEdgeCommand,assertAiObjectRefs,canvasOf,checkAiEffects,entity,graphDiff,memberIds,patchCanUndo,patchValue,planMutation,readableIds,resourcesFor,semanticHashes } from './graph';
 import { assertDesignQuery } from './graphQueries';
 import { graphQueryRead } from './graphQueryRead';
 import { changedPlacementRefs, graphLayoutVersion, layoutDependencyKey } from './graphLayoutDependencies';
 import { assertMutationReadEvidence } from './graphMutationEvidence';
-import { acknowledgeDeletedGraphReads,advanceResponseReadHashes,assertGraphReadHashes,rememberGraphReadHashes,scopedGraphReadHashes,type GraphReadHashes } from './graphReadDependencies';
+import { acknowledgeDeletedGraphReads,advanceResponseReadHashes,assertGraphReadHashes,textFieldsOnly,rememberGraphReadHashes,scopedGraphReadHashes,type GraphReadHashes } from './graphReadDependencies';
 import { canvasGraphReferences,emptyGraphReferences,graphReferenceCodec,rebindCanvasReferences,seedAddressableReferences,seedPayloadReferences,sessionGraphReferences,translateGraphPayload } from './graphReferences';
 import { summaryArchive } from './historyRepresentations';
 import { InputTokenEstimator,inputTokenSample,observedInputUpperBound,type InputTokenSample } from './inputTokenEstimator';
 import { planRelationshipLayout } from './layoutService';
+import { changedInternalEdgeIds } from '@/v3/relationProjection';
+import { getCanvasMembership } from '@/v3/hierarchyIndex';
 import { generationLayoutIds } from './generationLayout';
-import { activePlacementProtection, manualMoveBasis } from './manualLayout';
+import { activePlacementProtection, manualMoveBasis, visibleDragDistance } from './manualLayout';
 import { minimalPreview,runMinimalChat } from './minimalChat';
 import { assertCompleteNodeRead,completeNodeEvidence,prepareNodeReadAdvances } from './nodeReadEvidence';
 import { deleteNotebookEntry,mutateNotebook,writableNotebook,writeAiNote } from './notebooks';
-import { notebookCheckChanges } from './notebookChecks';
 import { buildPartIndex } from './partIndex';
 import { prefixMetrics,promptRouteSignature,wirePrefixSnapshot,type WirePrefixSnapshot } from './promptPrefix';
 import { callModel,ProviderError,type ModelResponse } from './providers';
@@ -59,12 +60,12 @@ import { markPresented } from './readPresentation';
 import { hash,id,now,Repository,storableManifest } from './repository';
 import { commitRetention,synchronizeRetentionStage } from './retentionCommit';
 import { reconcileSessionRoots } from './sessions';
-import { sourceChanges } from './sourceFreshness';
-import { assertProposalSourceBasis,captureProposalSourceBasis,requestSourceEvidence,type ProposalSourceBasis } from './requestSourceEvidence';
-import { bindSubgraphVersions } from './subgraphVersions';
+import { assertProposalSourceBasis,captureProposalSourceBasis,type ProposalSourceBasis } from './requestSourceEvidence';
+import { bindSubgraphVersions,subgraphKey } from './subgraphVersions';
+import { submittedTextFieldBindings } from './canvasReadEvidence';
 import { claimTaskNotices, commitTaskNoticeBatch, migratePendingTaskNotices, queueNotebookNotices } from './taskNotices';
 import { isDataRead } from './toolContextKinds';
-import { toolDefinitions,validateToolArguments,validateToolCallArguments } from './tools';
+import { taskFinishTool,toolDefinitions,validateToolArguments,validateToolCallArguments } from './tools';
 import { withoutToolVersions } from './toolVersionProtocol';
 import { bindToolVersions,captureToolVersions } from './toolVersions';
 import { migrateRetiredCanvasNotices } from './retiredCanvasNotices';
@@ -78,12 +79,17 @@ interface ProposalPlan { before: GraphState; planned: GraphState; commands: Reco
 const isTerminal = (task: Task) => TERMINAL_TASK_STATUSES.includes(task.status);
 const owner = (state: AppSnapshot, task: Task) => state.workspaces.find(w => w.id === task.workspaceId)!;
 const bounded = (value: unknown, fallback: number, max: number) => typeof value === 'number' && Number.isInteger(value) && value >= 0 ? Math.min(max, value) : fallback;
+function finishText(args: Record<string,unknown>) {
+  validateToolCallArguments(taskFinishTool.name,args,taskFinishTool.parameters);
+  return text(args.text,'结束回复',50000);
+}
+const scopeConflict = (e: unknown) => e instanceof DomainError && ['RESOURCE_CHANGED','SCOPE_CHANGED'].includes(e.code);
 /** Streaming text is committed in batches: one commit costs a full state clone plus an SSE push. */
 const DELTA_COMMIT_MS = 60, DELTA_COMMIT_BYTES = 2048;
 /** Every unfinished state keeps its task and session identity. */
-const BLOCKING_TASK_STATUSES: Task['status'][] = ['queued', 'running', 'waiting_resource', 'waiting_user', 'waiting_retry', 'waiting_reconcile', 'waiting_presentation', 'paused'];
+const BLOCKING_TASK_STATUSES: Task['status'][] = ['queued', 'running', 'waiting_resource', 'waiting_user', 'waiting_retry', 'waiting_reconcile', 'paused'];
 const commandTypes = new Set(['patchNodeContent','createNode', 'createSubgraph', 'move', 'moveCanvasItems', 'reparentContent', 'deleteNode', 'deleteEdge',
-  'deleteSubgraph', 'createEdge', 'updateNodeText', 'updateSubgraphText', 'updateDesignNode', 'updateEdge', 'reconnectEdge', 'moveBlock']);
+  'deleteSubgraph', 'createEdge', 'updateNodeText', 'updateSubgraphText', 'updateDesignNode', 'updateEdge', 'reconnectEdge', 'moveBlock', 'setSubgraphLayer']);
 
 /** Owns generation independently of React and serializes only short local commits. */
 export class Runtime {
@@ -149,11 +155,15 @@ export class Runtime {
   getTask(taskId: string): Task { const task = this.repo.state.tasks.find(t => t.id === taskId); requireValue(task, '任务不存在', 'NOT_FOUND'); return task; }
   getSession(sessionId: string) { const session = this.repo.state.sessions.find(s => s.id === sessionId); requireValue(session && session.lifecycle === 'active', '会话已归档、删除或不存在', 'NOT_FOUND'); return session; }
   private graph(): GraphState { requireValue(this.repo.state.graph, '画布尚未迁移', 'NOT_READY'); bindSubgraphVersions(this.repo.state.graph,this.repo.state.directoryVersions); return this.repo.state.graph; }
-  isSessionBusy(sessionId:string) {return this.repo.state.tasks.some(t=>t.sessionId===sessionId&&(this.active.has(t.id)||['queued','running','waiting_resource','waiting_retry','waiting_reconcile','waiting_presentation'].includes(t.status)));}
+  isSessionBusy(sessionId:string) {return this.repo.state.tasks.some(t=>t.sessionId===sessionId&&(this.active.has(t.id)||['queued','running','waiting_resource','waiting_retry','waiting_reconcile'].includes(t.status)));}
   private message(task: Task, role: ChatMessage['role'], value: string, phase: ChatMessage['phase'], targets: string[] = [], operations: string[] = []): ChatMessage {
     const message: ChatMessage = { id: id('msg:'), workspaceId: task.workspaceId, taskId: task.id, role, text: value, phase,
       version: 1, status: 'complete', createdAt: now(), relatedOperationIds: operations, targetRefs: targets, sourceRefs: [], instructionRevision: task.instructionRevision };
     this.repo.state.messages.push(message); message.sequence = this.repo.event(task.workspaceId, 'message.completed', { messageId: message.id, phase }, task.id).globalSeq; return message;
+  }
+  private requireSessionTools(session: Session) {
+    requireValue(this.repo.state.provider.supportsTools || isMinimalSession(session),
+      '此会话需要支持工具调用的模型。请调整模型配置，或使用极简会话进行普通问答。', 'MODEL_TOOLS_REQUIRED');
   }
   send(input: SendInput): Task {
     const session = this.getSession(text(input.sessionId, '会话'));
@@ -166,6 +176,7 @@ export class Runtime {
       && ['none', 'low', 'high', 'max'].includes(input.modelSelection.thinkingEffort), '模型或思考强度不在可选范围');
     const duplicate = this.repo.state.messages.find(m => m.id === `user:${session.id}:${requestId}`);
     if (duplicate) return this.getTask(duplicate.taskId);
+    this.requireSessionTools(session);
     const members = isMinimalSession(session) ? new Set<string>() : memberIds(this.graph(), session.canvasId);
     const { targetIds: targets, targetGroups } = normalizeInputTargets(isMinimalSession(session) ? { targetIds: [] } : input, members);
     const attached = strings(input.artifactIds ?? [], '附件');
@@ -186,7 +197,7 @@ export class Runtime {
         task = current; amended = true;
         task.instructionRevision++; task.updatedAt = now();
         this.endIdle(task); task.pauseRequested = false; task.error = undefined; task.retryCount = 0; task.noProgressCount=0;
-        if(task.presentation){task.presentation.playbackPaused=false;delete task.presentation.visiblePart;delete task.presentation.ack;}
+        if(task.presentation)task.presentation.playbackPaused=false;
         for(const pending of state.toolCalls.filter(c=>c.taskId===task.id&&c.status==='waiting'&&c.name==='interaction_ask')){
           pending.status='completed';pending.result=JSON.stringify({status:'answered'});
         }
@@ -250,12 +261,15 @@ export class Runtime {
       state.messages.find(message => message.id === `user:${session.id}:${requestId}`)!.sequence = this.repo.event(workspace.id, 'message.completed', { messageId: `user:${session.id}:${requestId}` }, task.id).globalSeq;
       if(!amended){
         const root=state.messages.find(m=>m.id===task.rootUserMessageId)!;
-        const isolatedTask={...task,inputBindings:{...task.inputBindings,artifactIds:[],artifactVersions:{}}};
-        const minimal:AppSnapshot={...state,tasks:[isolatedTask],messages:[{...root,sourceRefs:[],attachments:[]}],
-          toolCalls:[],steps:[],changes:[],snapshots:[],inheritanceEdges:[],artifacts:[],contextManifests:[],presentationParts:[],events:[],
-          workspaces:[{id:workspace.id,sessionId:session.id,pinnedNotes:workspace.pinnedNotes,workNotes:[],snapshotIds:[],artifactIds:[]}]};
+        const images=state.artifacts.filter(file=>file.workspaceId===workspace.id && attached.includes(file.id) && file.status==='ready' && file.mimeType.startsWith('image/'));
+        const imageIds=images.map(file=>file.id);
+        const imageRefs=root.attachments!.filter(ref=>imageIds.includes(ref.id));
+        const isolatedTask={...task,inputBindings:{...task.inputBindings,artifactIds:imageIds,artifactVersions:Object.fromEntries(images.map(file=>[file.id,file.version]))}};
+        const minimal:AppSnapshot={...state,tasks:[isolatedTask],messages:[{...root,sourceRefs:imageRefs,attachments:imageRefs}],
+          toolCalls:[],steps:[],changes:[],snapshots:[],inheritanceEdges:[],artifacts:images,contextManifests:[],presentationParts:[],events:[],
+          workspaces:[{id:workspace.id,sessionId:session.id,pinnedNotes:workspace.pinnedNotes,workNotes:[],snapshotIds:[],artifactIds:imageIds}]};
         const admission=this.previewState(minimal,isolatedTask);
-        requireValue(admission.requestTokens<=inputCapacity(state),'起始输入和必需提示词无法完整装入模型，请缩短正文或转为附件。','CONTEXT_CAPACITY');
+        requireValue(admission.requestTokens<=inputCapacity(state),images.length?'本次文字和图片超过了模型的输入容量，请减少图片数量或缩短正文。':'起始输入和必需提示词无法完整装入模型，请缩短正文或转为附件。','CONTEXT_CAPACITY');
       }
       if (input.presentationOwner) {
         const previous = task.presentation;
@@ -288,52 +302,28 @@ export class Runtime {
       this.repo.event(task.workspaceId,'task.pause_requested',{},task.id);
     });return task;
   }
-  presentationControl(input:{taskId:string;owner:string;action:'attach'|'takeover'|'follow'|'review'|'background'|'show'|'ack';epoch?:number;seq?:number;stepId?:string;revision?:number}){
+  presentationControl(input:{taskId:string;owner:string;action:'attach'|'takeover'|'follow'|'review'|'background'|'show';epoch?:number;seq?:number}){
     const task=this.getTask(text(input.taskId,'任务')),ownerId=text(input.owner,'控制窗口',200);
-    const action=input.action;requireValue(['attach','takeover','follow','review','background','show','ack'].includes(action),'展示操作无效');
+    const action=input.action;requireValue(['attach','takeover','follow','review','background','show'].includes(action),'展示操作无效');
     this.repo.transaction(()=>{
       if(!task.presentation){task.presentation={owner:ownerId,mode:'follow',epoch:1,cursor:0};this.repo.event(task.workspaceId,'presentation.attached',{},task.id);}const p=task.presentation;
       if(action==='takeover'){
         requireValue(input.epoch===p.epoch,'展示控制已变更，请重试');
-        p.owner=ownerId;p.epoch++;delete p.visiblePart;
+        p.owner=ownerId;p.epoch++;
         this.repo.event(task.workspaceId,'presentation.control',{action},task.id);return;
       }
       if(p.owner!==ownerId)return;
       if(action==='attach')return;
       if(['follow','review','background'].includes(action)){
-        p.mode=action as typeof p.mode;p.epoch++;delete p.visiblePart;
+        p.mode=action as typeof p.mode;p.epoch++;
         if(input.seq!==undefined)p.cursor=input.seq;
-        if(p.mode!=='follow'&&task.status==='waiting_presentation'&&!task.pauseRequested){this.endIdle(task);task.status='queued';}
       }else if(action==='show'){
         const part=this.repo.state.presentationParts?.find(part=>part.taskId===task.id&&part.seq===input.seq);
         requireValue(part,'展示记录不存在');
         if(input.epoch!==p.epoch)return;p.cursor=part.seq;
-        if(part.sealed&&!p.playbackPaused&&!task.pauseRequested)p.visiblePart={seq:part.seq,since:Date.now(),epoch:p.epoch};
-      }else{
-        const round=p.round,part=this.repo.state.presentationParts?.find(part=>part.taskId===task.id&&part.seq===input.seq);
-        if(p.mode!=='follow'||p.playbackPaused||task.pauseRequested||input.epoch!==p.epoch||!round
-          ||input.stepId!==round.stepId||input.revision!==round.revision||input.seq!==round.lastSeq||!part?.sealed
-          ||p.visiblePart?.seq!==input.seq||p.visiblePart.epoch!==p.epoch||Date.now()-p.visiblePart.since<part.dwellMs)return;
-        p.ack={stepId:round.stepId,epoch:p.epoch,lastSeq:round.lastSeq};
-        if(task.status==='waiting_presentation'){this.endIdle(task);task.status='queued';}
       }
       this.repo.event(task.workspaceId,'presentation.control',{action},task.id);
-    });this.kick();return task.presentation;
-  }
-  private presentationGate(task:Task):boolean{
-    const step=[...this.repo.state.steps].reverse().find(s=>s.taskId===task.id&&s.purpose==='agent'&&s.status==='completed'&&s.inputInstructionRevision===task.instructionRevision);
-    if(!step)return false;
-    const parts=this.repo.state.presentationParts?.filter(p=>p.taskId===task.id&&p.stepId===step.id)??[];
-    const last=parts.at(-1);if(!last)return false;
-    let waiting=false;
-    this.repo.transaction(()=>{
-      const p=task.presentation;if(!p)return;
-      p.round={stepId:step.id,revision:task.instructionRevision,lastSeq:last.seq};
-      if(p.mode==='follow'&&!(p.ack?.stepId===step.id&&p.ack.epoch===p.epoch&&p.ack.lastSeq===last.seq)){
-        task.status='waiting_presentation';task.waitingSince??=Date.now();waiting=true;
-        this.repo.event(task.workspaceId,'task.waiting_presentation',{},task.id,step.id);
-      }
-    });return waiting;
+    });return task.presentation;
   }
   private parkFailure(task: Task, reason: string) {
     if (isTerminal(task)) return;
@@ -344,9 +334,10 @@ export class Runtime {
   resume(taskId: string) {
     requireValue(this.repo.state.canvasVersionProtocol?.version===1,'旧会话需要先执行画布版本迁移。','CONTEXT_MIGRATION_REQUIRED');
     const task=this.getTask(taskId);requireValue(!isTerminal(task),'任务已完成，请发送新消息。');
+    this.requireSessionTools(this.getSession(task.sessionId));
     this.repo.transaction(()=>{
       this.endIdle(task);delete task.pauseRequested;delete task.pauseReturnStatus;task.error=undefined;task.retryCount=0;task.noProgressCount=0;
-      if(task.presentation){task.presentation.playbackPaused=false;delete task.presentation.visiblePart;}
+      if(task.presentation)task.presentation.playbackPaused=false;
       this.continueBudget(task);
       if(task.interaction?.kind==='budget'){task.interaction=undefined;if(task.contextCapacity)task.contextCapacity.blockedPlan=undefined;}
       task.status=task.interaction?'waiting_user':'queued';
@@ -408,7 +399,7 @@ export class Runtime {
           || this.repo.state.tasks.some(t => t.id !== task.id && t.sessionId === task.sessionId && this.active.has(t.id))) continue;
         let claimed: string[] = [];
         try {
-          this.getSession(task.sessionId);
+          this.requireSessionTools(this.getSession(task.sessionId));
           if (!this.repo.state.provider.model || !this.repo.credential) {
             this.repo.transaction(() => this.waitBudget(task, 'configuration', '请先配置模型提供方、模型名称与 API 密钥，再继续任务。', ['配置完成后继续'])); continue;
           }
@@ -452,12 +443,16 @@ export class Runtime {
       }
     });
   }
-  private guard(task: Task, revision?: number) {
+  private guardRun(task: Task, revision?: number) {
     const active = this.active.get(task.id);
     requireValue(this.repo.state.tasks.some(t => t.id === task.id && t.fencingToken === task.fencingToken)
       && this.repo.state.sessions.some(s => s.id === task.sessionId && s.lifecycle === 'active'), '会话运行已失效', 'RUN_INVALID');
     requireValue(active && active.fence === task.fencingToken && task.status === 'running', '该运行实例已停止或失效', 'RUN_INVALID');
     if (revision !== undefined) requireValue(task.instructionRevision === revision, '任务要求已更新，需要按最新要求重新规划', 'INSTRUCTION_CHANGED');
+  }
+  private guard(task: Task, revision?: number) {
+    this.guardRun(task,revision);
+    const active = this.active.get(task.id)!;
     if (this.canWrite(task)) {
       const resources = this.taskResources(task);
       requireValue(resources.every(resource => active.resources.includes(resource) && this.claims.get(resource) === task.id), '共享资源归属或编辑资格已变化', 'RESOURCE_CHANGED');
@@ -691,15 +686,23 @@ export class Runtime {
     const requested = new Set(protocol.flatMap(message => message.toolCalls?.map(call => call.id) ?? []));
     const pending = this.repo.state.toolCalls.filter(call => call.taskId === task.id && requested.has(call.providerCallId)
       && !protocol.some(m => m.role === 'tool' && m.toolCallId === call.providerCallId));
+    const closingSteps = new Set<string>();
+    if (pending.length > 1) for (const call of pending) {
+      if (call.name !== taskFinishTool.name || call.status !== 'prepared') continue;
+      try { finishText(JSON.parse(call.arguments)); closingSteps.add(call.stepId); }
+      catch { /* An invalid finish cannot supersede a question or any other action. */ }
+    }
     for (let index = 0; index < pending.length; index++) {
       if(this.parkPause(task))return true;
       const call = pending[index];
+      if (call.name === 'interaction_ask' && closingSteps.has(call.stepId) && call.status === 'prepared') {
+        this.repo.transaction(() => this.rejectQueuedTool(call,'TASK_FINISH_PENDING','同一回复已选择结束任务，无需等待回答。'));
+      }
       if (call.status === 'waiting') return true;
       if (call.status === 'prepared') {
         await new Promise<void>(resolve=>setImmediate(resolve));
         if(this.parkPause(task))return true;
-        this.guard(task);
-        const result = await this.executeTool(task, call);
+        const result = await this.executeTool(task, call, closingSteps.has(call.stepId));
         if ('waiting' in result && result.waiting) return true;
       }
       if (call.result !== undefined) this.repo.transaction(() => {
@@ -725,22 +728,23 @@ export class Runtime {
         return;
       }
       while (true) {
-        const task = this.getTask(taskId); this.guard(task);
+        const task = this.getTask(taskId); this.guardRun(task);
         if(this.parkPause(task))return;
         if (await this.appendReadyTools(task)) return;
         if(isTerminal(task)){
           this.repo.transaction(state=>{
             // Include the sealed final response without submitting a new request, confirming
             // delivery, or committing maintenance just to update the navigation snapshot.
-            const completed = this.previewState(state,task,undefined,{phase:'task_end'});
-            settleSessionContext(state,task.sessionId,completed.stageDraft);
+            const completed = state.graph?.canvases.some(c=>c.canvasId===task.canvasId)?this.previewState(state,task,undefined,{phase:'task_end'}):undefined;
+            settleSessionContext(state,task.sessionId,completed?.stageDraft);
             this.repo.event(task.workspaceId,'context.prompt_refreshed',{
               sessionId:task.sessionId,revision:owner(state,task).sessionContext?.settled?.revision,phase:'task_end',
             },task.id);
           });
           return;
         }
-        if(this.parkPause(task)||this.presentationGate(task))return;
+        if(this.parkPause(task))return;
+        this.guard(task);
         const recentSteps = this.repo.state.steps.filter(step => step.taskId === task.id && step.purpose === 'agent'
           && step.status === 'completed' && step.inputInstructionRevision === task.instructionRevision).slice(-2);
         const blockedPlan = (stepId: string) => {
@@ -769,9 +773,11 @@ export class Runtime {
         }
         let manifest:ContextManifest;
         {
+          this.requireSessionTools(this.getSession(task.sessionId));
           manifest=await prepareAutomaticContext({repo:this.repo,task,caller:this.modelCaller,signal:this.active.get(taskId)!.controller.signal,
             guard:()=>this.guard(task,revision),build:(options={})=>this.previewState(this.repo.state,task,undefined,options)});
         }
+        this.requireSessionTools(this.getSession(task.sessionId));
         if(manifest.stageDraft&&!synchronizeRetentionStage(this.repo.state,task,manifest.stageDraft))continue;
         if (manifest.error) {
           this.repo.transaction(state => { state.contextManifests.push(storableManifest(manifest)); this.message(task, 'system', manifest.error!, 'status'); this.waitBudget(task, 'context_capacity', manifest.error!, ['调整上下文设置后继续']); }); return;
@@ -783,7 +789,7 @@ export class Runtime {
           this.repo.transaction(() => this.waitBudget(task, 'tokens', '本次请求将超过剩余任务用量预算，请检查上下文或增加任务预算。', ['继续'], { requiredTokens: manifest.requestTokens + this.repo.state.provider.maxOutputTokens, remainingTokens: task.maxTokens - task.usedTokens })); return;
         }
         const stepId = id('step:'), messageId = id('msg:');
-        const tools = this.repo.state.provider.supportsTools ? toolDefinitions({ write: this.canWrite(task), graph: this.allowedRead(task).size > 0, ...this.toolMode(task) }) : [];
+        const tools = toolDefinitions({ write: this.canWrite(task), graph: this.allowedRead(task).size > 0, ...this.toolMode(task) });
         const baseProtocol:ProtocolMessage[] = protocol.length ? protocol : this.repo.state.messages.filter(m => m.taskId === task.id && m.role === 'user').map(m => ({ role: 'user' as const, content: m.text }));
         if(manifest.stageDraft&&manifest.stageDraft.generation!==owner(this.repo.state,task).contextStage?.generation){for(const m of baseProtocol){delete m.responseItems;delete m.reasoningContent;}}
         const submittedPrefix=manifest.stageDraft?wirePrefixSnapshot({...this.repo.state.provider,...task.modelSelection},
@@ -843,7 +849,7 @@ export class Runtime {
           // The graph can change after request construction. Bind exactly what this request contains.
           rememberGraphReadHashes(task,this.manifestReadDependencies.get(manifest)??{});
           task.responseReadHashes={stepId,hashes:{...this.manifestReadDependencies.get(manifest)},observations:structuredClone(manifest.canvasChecks??[]),
-            summaryObservations:structuredClone(manifest.summaryChecks??[]),mutationLayoutVersion:manifest.mutationLayoutVersion};
+            mutationLayoutVersion:manifest.mutationLayoutVersion,textFieldBindings:manifest.textFieldBindings&&{...manifest.textFieldBindings}};
           task.checkpoint = { stepId, operationIds: task.checkpoint?.operationIds ?? [], protocol: baseProtocol, instructionRevision: revision, lastSeq: state.lastSeq };
           this.repo.event(task.workspaceId, 'task.input_applied', { instructionRevision: revision }, task.id);
           if(maintenance)this.repo.event(task.workspaceId,'context.maintenance',maintenance,task.id,stepId);
@@ -877,7 +883,7 @@ export class Runtime {
             state.lastSeq++; }); };
         try {
           const remainingTime = Math.max(1, (task.maxDurationMs ?? 1800000) - (Date.now() - Date.parse(task.startedAt!)));
-          result = await this.modelCaller({ ...this.repo.state.provider, ...task.modelSelection, supportsVision:attachmentVision(this.repo.state.provider,task.modelSelection?.model), timeoutMs: Math.min(this.repo.state.provider.timeoutMs, remainingTime) }, this.repo.credential, { messages: manifest.messages as Parameters<ModelCaller>[2]['messages'], tools }, {            signal: active.controller.signal, resolveImage:image=>imageAssetData(this.repo.artifactDirectory!,image),
+          result = await this.modelCaller({ ...this.repo.state.provider, ...task.modelSelection, timeoutMs: Math.min(this.repo.state.provider.timeoutMs, remainingTime) }, this.repo.credential, { messages: manifest.messages as Parameters<ModelCaller>[2]['messages'], tools }, {            signal: active.controller.signal, resolveImage:image=>imageAssetData(this.repo.artifactDirectory!,image),
             onDelta: delta => {
               const current = this.repo.state.tasks.find(t => t.id === taskId); if (!current || current.instructionRevision !== revision || current.fencingToken !== active.fence) return;
               if (!delta) return;
@@ -887,7 +893,7 @@ export class Runtime {
               else if (!flushTimer) flushTimer = setTimeout(flushDeltas, DELTA_COMMIT_MS);
             },
           });
-          this.guard(this.getTask(taskId), revision);
+          this.guardRun(this.getTask(taskId), revision);
           flushDeltas();
         } catch (cause) {
           flushDeltas();
@@ -945,12 +951,12 @@ export class Runtime {
             this.repo.event(task.workspaceId,'step.aborted',{reason:'用户补充后旧响应已失效'},task.id,stepId);
           });continue;
         }
-        this.guard(current,revision);
+        this.guardRun(current,revision);
         const measuredSample=this.inputTokenSamples.get(manifest);
         const calibrationAccepted=!!measuredSample&&this.inputEstimator(current.sessionId).accepts(measuredSample,result.inputTokens);
         this.repo.transaction(state => {
           const step = state.steps.find(s => s.id === stepId)!; step.status = 'completed';
-          acknowledgeDeletedGraphReads(this.graph(),current,state.toolCalls,manifest.messages);
+          if(state.graph)acknowledgeDeletedGraphReads(state.graph,current,state.toolCalls,manifest.messages);
           {
             markPresented(state,current,manifest.messages,[],manifest.readBodyResultIds??[]);
             const stage=owner(state,current).contextStage;if(stage){
@@ -1017,15 +1023,70 @@ export class Runtime {
     }
   }
 
-  // Tool arguments must be complete; all local effects and tool receipts share a transaction.
-  private async executeTool(task: Task, call: ToolCallRecord): Promise<Record<string, unknown> | Waiting> {
-    if (isWebTool(call.name)) return this.executeWebTool(task, call);
+  /** A final message closes only this run. Reading or changing workspace data is a separate operation. */
+  private finishTask(task: Task, call: ToolCallRecord, args: Record<string, unknown>) {
+    const body = finishText(args);
+    const operations = this.repo.state.changes.filter(c => c.taskId === task.id && c.status === 'committed').map(c => c.operationId);
+    const message = this.message(task, 'assistant', body, 'final', [], operations);
+    message.stepId = call.stepId;
+    message.presentationCallId = call.id;
+    // Complete the protocol even if the model emitted more calls after its final answer.
+    // A restart must never execute tools that were queued behind a successful finish.
+    for (const other of this.repo.state.toolCalls) {
+      if (other.taskId !== task.id || other.id === call.id || !['prepared','waiting'].includes(other.status)) continue;
+      this.rejectQueuedTool(other,'TASK_FINISHED','任务已结束，后续调用未执行。');
+    }
+    delete task.interaction;
+    delete task.waitReason;
+    task.status = 'completed';
+    task.outcome = (args.outcome ?? 'success') as Task['outcome'];
+    task.updatedAt = now();
+    task.finishedAt = task.updatedAt;
+    task.finishedSequence = this.repo.event(task.workspaceId,'task.completed',{outcome:task.outcome},task.id).globalSeq;
+    return {status:'ok',messageId:message.id,outcome:task.outcome};
+  }
+
+  private rejectQueuedTool(call: ToolCallRecord, code: string, reason: string) {
+    call.status='rejected';
+    call.result=JSON.stringify({status:'rejected',code,executed:false,reason});
+    this.repo.event(this.getTask(call.taskId).workspaceId,'tool.failed',{toolCallId:call.id,name:call.name},call.taskId,call.stepId);
+  }
+
+  private scopedToolResult(state: AppSnapshot, task: Task, call: ToolCallRecord, rawArgs: Record<string,unknown>,
+    preparedImages?: import('../attachments').ImageAssetRef[]): Record<string,unknown> | Waiting {
+    const references = canvasGraphReferences(state, task.canvasId, true)!;
+    const sessionReferences = sessionGraphReferences(state, task.sessionId, true)!;
+    const codec = graphReferenceCodec(this.graph(), references, sessionReferences);
+    const args = translateGraphPayload(rawArgs, ref => codec.decode(ref)) as Record<string, unknown>;
+    // Storage keeps real ids, exactly like a result does: the model may have written short
+    // references, and every reader of a saved call — the UI, previews, later requests — needs
+    // the record identity. The prompt re-encodes them when it renders the call again.
+    call.arguments = JSON.stringify(args);
+    const result = this.tool(task, call, args, preparedImages);
+    if ('waiting' in result && result.waiting) return result;
+    const updated = graphReferenceCodec(this.graph(), references, sessionReferences);
+    return translateGraphPayload(result, (ref, hint) => {
+      // Stored results keep real ids. Attachment, note, handle, message and tool-call ids are
+      // addressed by a short reference only in prompts, so they never enter saved receipts.
+      if (updated.isAddressable(ref)) return ref;
+      const patches = state.changes.filter(change => change.taskId === task.id).flatMap(change => change.patches);
+      const patch = patches.find(patch => patch.id === ref);
+      const directory = patches.some(patch => patch.collection === 'canvases' && (patch.after as { directories?: Record<string, unknown> } | null)?.directories?.[ref]);
+      const derived = patch?.collection === 'nodes' ? 'node' : patch?.collection === 'edges' ? 'edge' : patch?.collection === 'documents' || directory ? 'document' : undefined;
+      // Only canvas identities are aliased in stored results; other ids stay raw in
+      // storage and are given short references only when the prompt is built.
+      const kind = hint && ['node', 'document', 'edge'].includes(hint) ? hint : derived;
+      return kind ? updated.encode(ref, kind, true) : ref;
+    }) as Record<string, unknown>;
+  }
+
+  private async executeTool(task: Task, call: ToolCallRecord, closing: boolean): Promise<Record<string, unknown> | Waiting> {
+    if (isWebTool(call.name)) return this.executeWebTool(task, call, closing);
+    const finishing = call.name === taskFinishTool.name;
     const rawArgs = JSON.parse(call.arguments) as Record<string, unknown>;
     let result: Record<string, unknown> | Waiting = {};
     // A tool call is one savepoint. Its preconditions are checked before anything runs, so a
     // failure in a later step of the same call cannot leave a half-applied effect behind.
-    requireValue(this.repo.state.sessions.some(session => session.id === task.sessionId && session.lifecycle === 'active') && this.repo.state.graph,
-      '会话已归档或画布不可用，本次调用未执行', 'NOT_FOUND');
     let preparationError: unknown;
     let preparedImages:import('../attachments').ImageAssetRef[]|undefined;
     if(call.name==='workspace_view_artifact')try{
@@ -1034,7 +1095,6 @@ export class Runtime {
       const raw=translateGraphPayload(rawArgs,ref=>codec.decode(ref)) as Record<string,unknown>;
       const args=bindToolVersions(this.repo.state,task,call,raw);
       const definition=toolDefinitions({write:false,graph:true}).find(t=>t.name===call.name)!;validateToolCallArguments(call.name,withoutToolVersions(call.name,args),definition.parameters);
-      requireValue(attachmentVision(this.repo.state.provider,task.modelSelection?.model),'当前执行模型未配置视觉能力','VISION_UNSUPPORTED');
       requireValue(this.repo.artifactDirectory,'附件目录未配置','IMAGE_UNAVAILABLE');
       preparedImages=await renderArtifactImages(resolveAttachment(this.repo.state,task,args.artifactId,args.version),this.repo.artifactDirectory,attachmentLimits(this.repo.state),{...args,signal:this.active.get(task.id)?.controller.signal});
     }catch(error){preparationError=error;}
@@ -1051,52 +1111,36 @@ export class Runtime {
       } catch (error) { preparationError = error; }
     }
     try { this.repo.transaction(state => {
-      this.guard(task, state.steps.find(step => step.id === call.stepId)?.inputInstructionRevision);
+      const revision = state.steps.find(step => step.id === call.stepId)?.inputInstructionRevision;
+      this.guardRun(task, revision);
       if (call.sequence === undefined) {
         call.startedAt = now(); call.sequence = this.repo.event(task.workspaceId, 'tool.started', { toolCallId: call.id, name: call.name }, task.id, call.stepId).globalSeq;
       }
       try {
+        if (!finishing) {
+          this.guard(task, revision);
+          requireValue(state.graph, '画布不可用，本次调用未执行', 'NOT_FOUND');
+        }
         if (preparationError) throw preparationError;
-        const references = canvasGraphReferences(state, task.canvasId, true)!;
-        const sessionReferences = sessionGraphReferences(state, task.sessionId, true)!;
-        const codec = graphReferenceCodec(this.graph(), references, sessionReferences);
-        const args = translateGraphPayload(rawArgs, ref => codec.decode(ref)) as Record<string, unknown>;
-        // Storage keeps real ids, exactly like a result does: the model may have written short
-        // references, and every reader of a saved call — the UI, previews, later requests — needs
-        // the record identity. The prompt re-encodes them when it renders the call again.
-        call.arguments = JSON.stringify(args);
-        result = this.tool(task, call, args, preparedImages);
+        result = finishing ? this.finishTask(task, call, rawArgs) : this.scopedToolResult(state, task, call, rawArgs, preparedImages);
         if ('waiting' in result && result.waiting) { call.status = 'waiting'; return; }
-        const updated = graphReferenceCodec(this.graph(), references, sessionReferences);
-        result = translateGraphPayload(result, (ref, hint) => {
-          // Stored results keep real ids. Attachment, note, handle, message and tool-call ids are
-          // addressed by a short reference only in prompts, so they never enter saved receipts.
-          if (updated.isAddressable(ref)) return ref;
-          const patches = state.changes.filter(change => change.taskId === task.id).flatMap(change => change.patches);
-          const patch = patches.find(patch => patch.id === ref);
-          const directory = patches.some(patch => patch.collection === 'canvases' && (patch.after as { directories?: Record<string, unknown> } | null)?.directories?.[ref]);
-          const derived = patch?.collection === 'nodes' ? 'node' : patch?.collection === 'edges' ? 'edge' : patch?.collection === 'documents' || directory ? 'document' : undefined;
-          // Only canvas identities are aliased in stored results; other ids stay raw in
-          // storage and are given short references only when the prompt is built.
-          const kind = hint && ['node', 'document', 'edge'].includes(hint) ? hint : derived;
-          return kind ? updated.encode(ref, kind, true) : ref;
-        }) as Record<string, unknown>;
-        
+
         if(isDataRead(call.name)&&result&&typeof result==='object')Object.assign(result,{originResultId:call.id});
         call.originResultId??=call.id;
-        call.status = 'completed'; call.result = JSON.stringify(result);
+        call.status = 'completed';
         call.result=JSON.stringify({...result,blockId:call.id});
         this.repo.event(task.workspaceId, 'tool.completed', { toolCallId: call.id, name: call.name }, task.id, call.stepId);
       } catch (cause) {
-        if (cause instanceof DomainError && ['RUN_INVALID', 'INSTRUCTION_CHANGED', 'RESOURCE_CHANGED', 'SCOPE_CHANGED'].includes(cause.code)) throw cause;
+        if (cause instanceof DomainError && ['RUN_INVALID','INSTRUCTION_CHANGED'].includes(cause.code) || !closing && scopeConflict(cause)) throw cause;
         call.status = 'rejected'; call.result = JSON.stringify({ status: 'error', code: cause instanceof DomainError ? cause.code : 'TOOL_ERROR', message: cause instanceof Error ? cause.message : '工具执行失败',
           ...(cause instanceof DomainError && cause.details !== undefined ? {details:cause.details} : {}) });
+        if(cause instanceof CanvasObjectsUnavailable)call.unavailableRead=unavailableReadReceipt(call,task.canvasId);
         result = JSON.parse(call.result); this.repo.event(task.workspaceId, 'tool.failed', { toolCallId: call.id, name: call.name }, task.id, call.stepId);
       }
     }); } finally { this.proposalPlans.delete(call.id); } return result;
   }
   /** Network I/O never holds the repository transaction. Every receipt keeps the original call id. */
-  private async executeWebTool(task: Task, call: ToolCallRecord): Promise<Record<string, unknown>> {
+  private async executeWebTool(task: Task, call: ToolCallRecord, closing: boolean): Promise<Record<string, unknown>> {
     if (call.status !== 'prepared') return JSON.parse(call.result ?? '{}');
     const revision = this.repo.state.steps.find(step => step.id === call.stepId)?.inputInstructionRevision ?? task.instructionRevision;
     let unsubscribe: (() => void) | undefined;
@@ -1154,7 +1198,7 @@ export class Runtime {
         : cause instanceof DomainError ? cause : new DomainError('联网工具执行失败', 'WEB_TOOL_ERROR');
       const result = { status: 'error', code: error.code, message: error.message };
       if (this.repo.state.toolCalls.some(c => c === call && c.status === 'prepared')) finish(result, true);
-      if (invalid) throw invalid;
+      if (invalid && !(closing && scopeConflict(invalid))) throw invalid;
       return result;
     } finally { unsubscribe?.(); }
   }
@@ -1168,7 +1212,7 @@ export class Runtime {
     if (call.name === 'br') return { status: 'ok' };
     {
       if(call.name==='graph_read_design_references'){assertDesignQuery(this.repo.state,task);return graphQueryRead(this.repo.state,task,call,args);}
-      if(call.name==='graph_search_node_content'||call.name==='graph_search'&&args.output==='cards')return graphQueryRead(this.repo.state,task,call,args);
+      if(call.name==='graph_search_node_content'||call.name==='graph_read_dependencies')return graphQueryRead(this.repo.state,task,call,args);
       if(['context_view','context_read_children','context_read_summary_tree','context_read_pages','context_read_task','context_read_steps','context_restore_records'].includes(call.name))return directContextRead(this.repo.state,task,call,args);
       if(['graph_read_directory','graph_read_subgraph','graph_read','graph_neighbors','graph_search','graph_read_node_content','graph_read_directory_content','graph_read_node_edges','graph_read_object_field','graph_read_subgraph_edges','graph_read_between_subgraphs'].includes(call.name)){
         if(call.name==='graph_read_object_field'){
@@ -1229,41 +1273,6 @@ export class Runtime {
       (owner(this.repo.state,task).progressEvents??=[]).push({id:`progress:${call.operationId}`,taskId:task.id,text:body,
         version:task.handoff.version,sequence:call.sequence??this.repo.state.lastSeq,createdAt:now(),sourceRefs});
       return { status: 'ok', version: task.handoff.version };
-    }
-    if (call.name === 'task_finish') {
-      const group=this.repo.state.toolCalls.filter(c=>c.taskId===task.id&&c.stepId===call.stepId);
-      requireValue(group.at(-1)?.id===call.id && group.filter(c=>c.id!==call.id).every(c=>['completed','rejected'].includes(c.status)), '结束回复必须是调用组最后一项，且前序调用已结算。','TASK_PENDING');
-      requireValue(!task.interaction && task.instructionRevision===this.repo.state.steps.find(s=>s.id===call.stepId)?.inputInstructionRevision,'还有未处理的用户补充或问题。','INSTRUCTION_CHANGED');
-      requireValue(args.basis!=='historical'||!this.repo.state.changes.some(c=>c.taskId===task.id&&c.status==='committed')
-        &&!this.repo.state.toolCalls.some(c=>c.taskId===task.id&&c.status==='completed'&&['workspace_update_work_notes','workspace_delete_work_notes'].includes(c.name)),
-        '本任务已写入当前画布或笔记，请使用 current 核对结果；historical 仅适用于纯历史读取','HISTORICAL_BASIS_NOT_ALLOWED',
-        {executed:false,nextAction:'finish_with_current_basis'});
-      if(args.basis!=='historical'){
-        const input=this.repo.state.contextManifests.find(m=>m.taskId===task.id&&m.stepId===call.stepId);
-        requireValue(input,'缺少本次请求的依据，请重新读取后结束','VERSION_BINDING_REQUIRED',{executed:false,nextAction:'review_latest_sources'});
-        requireValue(!input.canvasPendingChanges?.length,'画布仍有未核对的变化或缺失依据，请按通知补读后结束','VERSION_CONFLICT',
-          {executed:false,changes:input.canvasPendingChanges,nextAction:'review_changed_scope'});
-        const expected=task.responseReadHashes?.stepId===call.stepId?task.responseReadHashes.hashes:input?.canvasReadHashes??{};
-        assertGraphReadHashes(graph,expected,'最终回复依据在生成期间已变化，请核对最新内容后再结束',task.canvasId);
-        const observations=task.responseReadHashes?.stepId===call.stepId?task.responseReadHashes.observations:input?.canvasChecks;
-        const summaryObservations=task.responseReadHashes?.stepId===call.stepId?task.responseReadHashes.summaryObservations:input.summaryChecks;
-        const graphChanges=[...observations??[],...summaryObservations??[]].flatMap(o=>canvasObservationChanges(this.repo.state,o));
-        requireValue(!graphChanges.length,'最终回复所用的目录、路径或查询范围已变化，请核对后再结束','VERSION_CONFLICT',
-          {executed:false,changes:graphChanges,nextAction:'review_changed_scope'});
-        const sources=requestSourceEvidence(this.repo.state,task,input,group);
-        const notebookChanges=notebookCheckChanges(this.repo.state,task,input.notebookCheck,group);
-        requireValue(!notebookChanges.length,'笔记有未核对的增删改，请阅读更新后结束','SOURCE_CHANGED',
-          {executed:false,changes:notebookChanges,nextAction:'review_latest_sources'});
-        const changes=sourceChanges(this.repo.state,task,sources,false);
-        requireValue(!changes.length,'笔记正文或依据已变化，请核对所列来源后结束','SOURCE_CHANGED',
-          {executed:false,sources:changes,nextAction:'review_latest_sources'});
-      }
-      const body=text(args.text,'结束回复',50000);
-      const operations=this.repo.state.changes.filter(c=>c.taskId===task.id&&c.status==='committed').map(c=>c.operationId);
-      const message=this.message(task,'assistant',body,'final',[],operations);message.stepId=call.stepId;message.presentationCallId=call.id;
-      task.status='completed';task.outcome=(args.outcome??'success') as Task['outcome'];task.updatedAt=now();task.finishedAt=task.updatedAt;
-      task.finishedSequence=this.repo.event(task.workspaceId,'task.completed',{outcome:task.outcome},task.id).globalSeq;
-      return {status:'ok',messageId:message.id,outcome:task.outcome};
     }
     if (call.name === 'ui_present' || call.name === 'ui_focus') {
       const targets = args.targetRefs ? graphRefs(args.targetRefs) : [];
@@ -1399,15 +1408,15 @@ export class Runtime {
       const command = structuredClone(raw);
       const resolve = (ref: unknown) => typeof ref === 'string' ? temporary[ref] ?? ref : ref;
       for (const key of ['id', 'parentId', 'nodeId']) if (key in command) command[key] = resolve(command[key]);
-      if(command.type==='moveBlock'&&entity(before,String(command.id))){
+      if((command.type==='moveBlock'||command.type==='setSubgraphLayer')&&entity(before,String(command.id))){
         const binding=(task.responseReadHashes?.stepId===stepId?task.responseReadHashes.mutationLayoutVersion:undefined)
           ??this.repo.state.contextManifests.find(m=>m.taskId===task.id&&m.stepId===stepId)?.mutationLayoutVersion;
-        requireValue(binding,'此请求缺少布局版本依据，请在下一次请求重新规划坐标修改','VERSION_BINDING_REQUIRED',
+        requireValue(binding,'此请求缺少布局版本依据，请在下一次请求重新规划布局修改','VERSION_BINDING_REQUIRED',
           {executed:false,nextAction:'retry_in_next_request'});
-        requireValue(binding===graphLayoutVersion(before,task.canvasId),'生成期间布局或共享范围已变化，坐标修改未执行，请重新规划','VERSION_CONFLICT',
+        requireValue(binding===graphLayoutVersion(before,task.canvasId),'生成期间布局或共享范围已变化，布局修改未执行，请重新规划','VERSION_CONFLICT',
           {executed:false,failedRefs:[String(command.id)],dependency:'layout',nextAction:'retry_in_next_request'});
       }
-      if(before.nodes[String(command.id)]&&['patchNodeContent','updateNodeText','updateDesignNode'].includes(String(command.type))){
+      if(before.nodes[String(command.id)]&&['patchNodeContent','updateDesignNode'].includes(String(command.type))){
         assertCompleteNodeRead(task,before,String(command.id));
         readHashes[`nodes:${String(command.id)}`]=hash(before.nodes[String(command.id)]);
       }
@@ -1454,7 +1463,7 @@ export class Runtime {
     checkAiEffects(before, planned, task.canvasId, memberIds(before, task.canvasId));
     // A child the plan newly put on the canvas has no user-authored position:
     // the AI writes a path, so the region has to place it on insertion.
-    const plannedMembers = memberIds(planned, task.canvasId);
+    const plannedMembers = getCanvasMembership(planned, canvasOf(planned, task.canvasId)).members;
     const insertedIds = [...plannedMembers].filter(ref => !entity(before, ref));
     const provisionalIds = generationLayoutIds(planned, task.canvasId, plannedMembers, task.id, this.repo.state.changes, insertedIds);
     const movableIds = [...new Set([
@@ -1462,20 +1471,15 @@ export class Runtime {
       ...commands.filter(command => ['move', 'moveCanvasItems', 'reparentContent', 'createSubgraph'].includes(String(command.type)))
         .flatMap(command => Array.isArray(command.ids) ? command.ids as string[] : []),
     ])];
-    const previousEdges = new Map(before.edges.map(edge => [edge.edgeId, edge]));
-    const changedEdgeIds = planned.edges.filter(edge => {
-      const old = previousEdges.get(edge.edgeId);
-      return !old || old.sourceNodeId !== edge.sourceNodeId || old.targetNodeId !== edge.targetNodeId ||
-        old.directed !== edge.directed || Boolean(old.removed) !== Boolean(edge.removed);
-    }).map(edge => edge.edgeId);
-    const nextEdgeIds = new Set(planned.edges.map(edge => edge.edgeId));
-    changedEdgeIds.push(...before.edges.filter(edge => !nextEdgeIds.has(edge.edgeId)).map(edge => edge.edgeId));
+    const changedEdgeIds = changedInternalEdgeIds(before, planned, task.canvasId);
     const protectedIds = [...this.editOccupancies].filter(([, value]) => value.expiresAt > Date.now()).map(([ref]) => ref)
       .concat([...this.placementOccupancies].filter(([, time]) => time > Date.now()).map(([ref]) => ref));
     if (movableIds.length || changedEdgeIds.length) planned = (await this.layoutPlanner(planned, { canvasId: task.canvasId,
       mode: 'auto', movableIds, insertedIds, provisionalIds, changedEdgeIds, permittedIds: [...allowed], protectedIds, solveTime: Date.now() }, this.active.get(task.id)?.controller.signal)).state;
     this.guard(task);
-    requireValue(graphLayoutVersion(before,task.canvasId)===graphLayoutVersion(this.graph(),task.canvasId),
+    if(textFieldsOnly(commands))
+      assertGraphReadHashes(this.graph(),readHashes,'规划所依赖的字段或共享范围已变化，请重新读取',task.canvasId);
+    else requireValue(graphLayoutVersion(before,task.canvasId)===graphLayoutVersion(this.graph(),task.canvasId),
       '规划所依赖的画布或共享文档已变化，请重新读取', 'VERSION_CONFLICT');
     settleReviewLayout(reviewUnits, planned);
     return { before, planned, commands, temporary, readHashes, reviewUnits, sourceBasis };
@@ -1484,27 +1488,31 @@ export class Runtime {
     const plan = this.proposalPlans.get(call.id); requireValue(plan, '图规划尚未完成', 'STALE_CHANGE');
     const { before, planned, commands, temporary } = plan;
     assertProposalSourceBasis(this.repo.state,task,plan.sourceBasis);
-    requireValue(graphLayoutVersion(before,task.canvasId)===graphLayoutVersion(this.graph(),task.canvasId),
+    const patches = graphDiff(before, planned), placementRefs = changedPlacementRefs(patches);
+    const fieldOnly=textFieldsOnly(commands);
+    if(fieldOnly)assertGraphReadHashes(this.graph(),plan.readHashes,'规划所依赖的字段或共享范围已变化，请重新读取',task.canvasId);
+    else requireValue(graphLayoutVersion(before,task.canvasId)===graphLayoutVersion(this.graph(),task.canvasId),
       '规划所依赖的画布或共享文档已变化，请重新读取', 'VERSION_CONFLICT');
     checkAiEffects(before, planned, task.canvasId, memberIds(this.graph(), task.canvasId));
-    const patches = graphDiff(before, planned), beforeHashes = semanticHashes(before), expected = { ...plan.readHashes };
+    const expected = { ...plan.readHashes }, beforeHashes=fieldOnly?{}:semanticHashes(before);
     for (const patch of patches) {
       for (const [key, value] of Object.entries(beforeHashes)) if (key === `${patch.collection}:${patch.id}` || key.startsWith(`${patch.collection}:${patch.id}:`)) {
         // A text change does not depend on pure layout. Layout/structure writes do.
         const old = patch.before as Record<string, unknown> | null, next = patch.after as Record<string, unknown> | null;
-        if (key.endsWith(':view') && old && next && hash([old.placements, old.collapsed, old.presentationPlacements]) === hash([next.placements, next.collapsed, next.presentationPlacements])) continue;
+        if (key.endsWith(':view') && old && next && hash([old.placements, old.collapsed, old.presentationPlacements, old.spatialLayerOffsets]) === hash([next.placements, next.collapsed, next.presentationPlacements, next.spatialLayerOffsets])) continue;
         expected[key] ??= value;
       }
     }
-    const placementRefs = changedPlacementRefs(patches);
-    const affectedRefs = [...new Set([...patches.filter(p => p.collection !== 'canvases').map(p => p.id), ...placementRefs])];
-    const affectedCanvasIds = before.canvases.filter(canvas => {
+    const directoryRefs=commands.filter(c=>c.type==='updateSubgraphText').map(c=>String(c.id))
+      .filter(ref=>hash(entity(before,ref))!==hash(entity(planned,ref)));
+    const affectedRefs = [...new Set([...patches.filter(p => p.collection !== 'canvases').map(p => p.id), ...directoryRefs, ...placementRefs])];
+    const affectedCanvasIds = commands.every(command => command.type === 'setSubgraphLayer') ? [task.canvasId] : before.canvases.filter(canvas => {
       const members = memberIds(before, canvas.canvasId); return affectedRefs.some(ref => members.has(ref)) || canvas.canvasId === task.canvasId;
     }).map(canvas => canvas.canvasId);
     const existing = this.repo.state.changes.find(c => c.operationId === call.operationId);
     if (existing) return { status: 'proposed', applied:false,nextAction:{tool:'graph_apply_changes',arguments:{changeSetId:existing.id}},changeSetId: existing.id, temporaryRefs: existing.temporaryRefs??{}, affectedRefs: existing.affectedRefs };
-    if (hash(before.canvases.map(c => [c.placements, c.presentationPlacements])) !== hash(planned.canvases.map(c => [c.placements, c.presentationPlacements])) ||
-      hash(Object.values(before.documents).map(d => d.placements)) !== hash(Object.values(planned.documents).map(d => d.placements)))
+    if (!fieldOnly && (hash(before.canvases.map(c => [c.placements, c.presentationPlacements, c.spatialLayerOffsets])) !== hash(planned.canvases.map(c => [c.placements, c.presentationPlacements, c.spatialLayerOffsets])) ||
+      hash(Object.values(before.documents).map(d => d.placements)) !== hash(Object.values(planned.documents).map(d => d.placements))))
       expected[layoutDependencyKey(task.canvasId)]=graphLayoutVersion(before,task.canvasId)!;
     const change: ChangeSet = { id: id('change:'), operationId: call.operationId, workspaceId: task.workspaceId, taskId: task.id, stepId: call.stepId,
       sourceBasis:structuredClone(plan.sourceBasis),
@@ -1526,17 +1534,36 @@ export class Runtime {
     assertGraphReadHashes(graph,change.expectedHashes,'图内容或读取依赖已变化，请查看冲突详情后重新提出补丁',task.canvasId);
     requireValue(change.layoutGraphRevision === undefined || change.layoutGraphRevision === this.repo.state.graphRevision,
       '布局所依赖的画布已更新，请重新规划', 'VERSION_CONFLICT');
-    change.commands.forEach(command => assertAiCommandRefs(graph, command));
+    for (const command of change.commands) {
+      assertAiCommandRefs(graph, command);
+      assertAiEdgeCommand(graph, task.canvasId, command, true);
+    }
+    // Legacy proposals retain their original patch and version protections.
+    const fieldOnly=textFieldsOnly(change.commands)&&change.commands.every(c=>
+      Object.hasOwn(change.expectedHashes,subgraphKey(task.canvasId,String(c.id),'editScope')));
     for (const ref of change.affectedRefs) {
-      const editing = this.editOccupancies.get(ref); requireValue(!editing || editing.expiresAt <= Date.now(), '用户正在编辑此字段，请等待其保存后重新读取', 'USER_EDITING');
-      requireValue((this.placementOccupancies.get(ref) ?? 0) <= Date.now(), '用户正在拖动此对象，请等待其定位后重新规划', 'USER_POSITIONING');
+      const editing = this.editOccupancies.get(ref);
+      requireValue(!editing || editing.expiresAt <= Date.now() || fieldOnly && !change.commands.some(c=>c.id===ref&&c.field===editing.field),
+        '用户正在编辑此字段，请等待其保存后重新读取', 'USER_EDITING');
+      if(!fieldOnly)requireValue((this.placementOccupancies.get(ref) ?? 0) <= Date.now(), '用户正在拖动此对象，请等待其定位后重新规划', 'USER_POSITIONING');
     }
     const activePositions = activePlacementProtection(graph, task.canvasId,
       [...this.editOccupancies].filter(([, value]) => value.expiresAt > Date.now()).map(([ref]) => ref)
         .concat([...this.placementOccupancies].filter(([, time]) => time > Date.now()).map(([ref]) => ref)));
     requireValue(changedPlacementRefs(change.patches).every(ref => !activePositions.has(ref)),
       '用户正在编辑或拖动受影响对象，请等待后重新规划', 'USER_EDITING');
-    const next = applyPatches(graph, change.patches); checkAiEffects(graph, next, task.canvasId, memberIds(this.graph(), task.canvasId));
+    const layerOnly = change.commands.length > 0 && change.commands.every(command => command.type === 'setSubgraphLayer');
+    const next = fieldOnly || layerOnly ? change.commands.reduce((live,command)=>planMutation(live,task.canvasId,command,'ai').state,graph)
+      : applyPatches(graph, change.patches);
+    checkAiEffects(graph, next, task.canvasId, memberIds(graph, task.canvasId));
+    if(fieldOnly || layerOnly){
+      const currentPatches=graphDiff(graph,next);
+      // The saved preview also owns any derived geometry. Replay against the latest graph,
+      // then require exactly the approved field and placement deltas before publishing.
+      const effects=(patches:typeof currentPatches)=>reviewPatchDeltas(patches).map(delta=>hash(delta)).sort();
+      requireValue(hash(effects(currentPatches))===hash(effects(change.patches)),'此修改的字段或布局影响已变化，请重新规划','VERSION_CONFLICT');
+      change.patches=currentPatches;
+    }
     // Graph + change receipt + checkpoint + events are inside executeTool's one SQLite transaction.
     this.repo.state.graph = next; this.repo.state.graphRevision++; change.status = 'committed'; change.committedAt = now();
     registerReview(this.repo.state, task, change, call);
@@ -1546,9 +1573,11 @@ export class Runtime {
       (task.nodeReadEvidence??={})[ref]=completeNodeEvidence(next.nodes[ref]);
     call.graphUsage = graphWriteUsage(graph,next,task.canvasId,change.affectedRefs,call.id);
     call.graphWriteAcknowledgement = graphWriteAcknowledgement(this.repo.state, task, call, change, graph);
-    advanceResponseReadHashes(task,graph,next);
+    advanceResponseReadHashes(task,graph,next,fieldOnly ? call.graphWriteAcknowledgement.observations[0]?.readHashes ?? {} : undefined);
     const response=task.responseReadHashes;
     if(response?.stepId===call.stepId){
+      if(response.textFieldBindings)Object.assign(response.textFieldBindings,
+        submittedTextFieldBindings(canvasIndex(next,task.canvasId,memberIds(next,task.canvasId)),call.graphWriteAcknowledgement.observations));
       const binding=response.mutationLayoutVersion
         ??this.repo.state.contextManifests.find(m=>m.taskId===task.id&&m.stepId===call.stepId)?.mutationLayoutVersion;
       // Only this exact acknowledged transition advances layout authority.
@@ -1558,8 +1587,6 @@ export class Runtime {
     }
     if(task.responseReadHashes?.observations)
       task.responseReadHashes.observations=acknowledgedObservations(task.responseReadHashes.observations,[{...call,status:'completed'}]);
-    if(task.responseReadHashes?.summaryObservations)
-      task.responseReadHashes.summaryObservations=acknowledgedObservations(task.responseReadHashes.summaryObservations,[{...call,status:'completed'}]);
     task.checkpoint!.operationIds = [...new Set([...task.checkpoint!.operationIds, change.operationId])];
     this.repo.event(task.workspaceId, 'changes.committed', { changeSetId: change.id, operationId: change.operationId, affectedRefs: change.affectedRefs, graphRevision: this.repo.state.graphRevision }, task.id, change.stepId);
     return { status: 'committed', operationId: change.operationId, changeSetId: change.id, affectedRefs: change.affectedRefs, temporaryRefs: change.temporaryRefs??{}, affectedCanvasIds: change.affectedCanvasIds };
@@ -1601,11 +1628,7 @@ export class Runtime {
     const releaseIntent = () => {
       if (intentKey && this.pendingLayoutIntents.get(intentKey)?.operationId === operationId) this.pendingLayoutIntents.delete(intentKey);
     };
-    const previousEdges = new Map(current.edges.map(edge => [edge.edgeId, edge]));
-    const changedEdgeIds = result.state.edges.filter(edge => {
-      const old = previousEdges.get(edge.edgeId);
-      return !old || old.sourceNodeId !== edge.sourceNodeId || old.targetNodeId !== edge.targetNodeId || old.directed !== edge.directed;
-    }).map(edge => edge.edgeId);
+    const changedEdgeIds = changedInternalEdgeIds(current, result.state, payload.canvasId);
     if ((changedEdgeIds.length || changedObject && result.state.edges.some(edge => !edge.removed)) && !result.identityMap) {
       const finish = (layout?: RelationshipLayoutResult) => {
         const old = this.repo.state.events.find(e => e.type === 'graph.user_committed' && e.payload.operationId === operationId);
@@ -1641,6 +1664,7 @@ export class Runtime {
       };
       return this.layoutPlanner(result.state, { canvasId: payload.canvasId, mode: 'auto', changedEdgeIds,
         ...(changedObject ? { changedObjectIds: [changedObject], viewOnly: true } : {}), solveTime: Date.now(),
+        ...(movedId ? { dragDistance: visibleDragDistance(current, result.state, payload.canvasId, String(payload.command.parentId), movedId) } : {}),
         protectedIds: [...activePositions(result.state), ...(movedId ? [movedId] : [])],
         permittedIds: [...memberIds(result.state, payload.canvasId)], budgetMs: changedObject ? 80 : 12 })
         .then(finish, error => { if (!changedObject) throw error; return finish(); }).finally(releaseIntent);
@@ -1649,7 +1673,8 @@ export class Runtime {
     const afterCanvas = result.state.canvases.find(canvas => canvas.canvasId === payload.canvasId);
     const expansionLayout = payload.command.type === 'toggleCollapse' &&
       hash([beforeCanvas?.placements, beforeCanvas?.presentationPlacements]) !== hash([afterCanvas?.placements, afterCanvas?.presentationPlacements]);
-    try { return this.commitUserMutation(payload, operationId, requestHash, current, result, Boolean(movedId) || expansionLayout); }
+    const layerChanged = payload.command.type === 'setSubgraphLayer' && result.state !== current;
+    try { return this.commitUserMutation(payload, operationId, requestHash, current, result, Boolean(movedId) || expansionLayout || layerChanged); }
     finally { releaseIntent(); }
   }
   private commitUserMutation(payload: { canvasId: string; command: Record<string, unknown> }, operationId: string, requestHash: string,
@@ -1657,8 +1682,11 @@ export class Runtime {
     const changeSetId = hasLayout ? id('change:') : undefined;
     const replacedSessions: string[] = [], interruptedTasks: string[] = [];
     this.repo.transaction(state => {
-      protectReviewWrites(state, before, result.state);
-      state.graph = result.state; state.graphRevision++;
+      if (result.state !== before) {
+        protectReviewWrites(state, before, result.state);
+        state.graph = result.state;
+        state.graphRevision++;
+      }
       if (result.identityMap) {
         const preservedReferences = rebindCanvasReferences(state, payload.canvasId, result.identityMap);
         const sessions = state.sessions.filter(session => session.canvasId === payload.canvasId);
@@ -1820,11 +1848,22 @@ export class Runtime {
     const change = allReviewChanges(this.repo.state).find(c => c.id === changeSetId); requireValue(change && change.status === 'committed', '该批修改不可撤销');
     requireValue(!change.review?.callId, '请在画布决策面板选择仍待决策的修改；已批准内容不能撤销', 'REVIEW_REQUIRED');
     const current = this.graph();
-    for (const patch of change.patches) {
-      const value = entity(current, patch.id);
-      requireValue(patchCanUndo(value, patchValue(patch.collection, patch.before), patchValue(patch.collection, patch.after)), '这批修改的字段已有后续编辑，不能覆盖当前内容；请检查差异后局部调整', 'UNDO_CONFLICT');
+    const isolatedLayer = change.commands.length === 1 && change.commands[0].type === 'setSubgraphLayer' &&
+      change.patches.length === 1 && change.patches[0].collection === 'canvases' ? change.commands[0] : undefined;
+    let next: GraphState;
+    if (isolatedLayer) {
+      const patch = change.patches[0], ref = String(isolatedLayer.id);
+      requireValue((canvasOf(current, patch.id).spatialLayerOffsets?.[ref] ?? 0) === isolatedLayer.offset,
+        '子图层差已有后续修改，请核对后再操作', 'UNDO_CONFLICT');
+      const original = (patch.before as GraphState['canvases'][number]).spatialLayerOffsets?.[ref] ?? 0;
+      next = planMutation(current, patch.id, { type: 'setSubgraphLayer', id: ref, offset: original }).state;
+    } else {
+      for (const patch of change.patches) {
+        const value = entity(current, patch.id);
+        requireValue(patchCanUndo(value, patchValue(patch.collection, patch.before), patchValue(patch.collection, patch.after)), '这批修改的字段已有后续编辑，不能覆盖当前内容；请检查差异后局部调整', 'UNDO_CONFLICT');
+      }
+      next = applyPatches(current, change.patches, true);
     }
-    const next = applyPatches(current, change.patches, true);
     for (const edge of next.edges.filter(e => !e.removed)) requireValue(Boolean(entity(next, edge.sourceNodeId)) && Boolean(entity(next, edge.targetNodeId)), '新增内容已有后续关系依赖，不能直接撤销', 'UNDO_CONFLICT');
     for (const patch of change.patches.filter(p => p.collection === 'documents')) {
       const record = next.documents[patch.id];

@@ -4,8 +4,10 @@ export type DesktopRole = 'main' | 'orb' | 'panel';
 export interface NotebookTab { id: string; directoryId: string; kind: 'directory' | 'pages'; pageId?: string }
 export interface PanelState {
   ready: boolean; host: 'main' | 'panel' | 'none'; background: boolean; detached: boolean; used: boolean;
+  panelExitId?: number;
   activeTab: string; canvasId: string; width: number; notePageId: string;
   noteTabs?: NotebookTab[]; noteDirectoryId?: string;
+  dockedAiCanvases?: string[];
   drafts: Record<string, InputDraft>; reading: Record<string, { top: number; following: boolean }>;
   enteredSessionByCanvas: Record<string, string>;
   orb: { flipX: boolean; flipY: boolean; dock: string };

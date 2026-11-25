@@ -23,7 +23,8 @@ function key(value: unknown): string | undefined {
 }
 /** Section proportions and warning lines are application policy, not API settings. */
 export function managedProvider(value: ProviderConfig): ProviderConfig {
-  const { workNotesPercent: _notes, contextPresetTokens: _preset, ...provider } = value;
+  const { workNotesPercent: _notes, contextPresetTokens: _preset, supportsVision: _legacyVision,
+    visionModels: _legacyModels, ...provider } = value;
   return provider;
 }
 function connection(value: unknown): Connection {

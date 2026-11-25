@@ -10,10 +10,10 @@ export class RectangleIndex {
   private cells = new Map<string, Rect[]>();
   private large: Rect[] = [];
   private range(rect: Rect, gap = 0) {
-    return [Math.floor((rect.x - gap) / 256), Math.floor((rect.y - gap) / 256),
-      Math.floor((rect.x + rect.width + gap) / 256), Math.floor((rect.y + rect.height + gap) / 256)];
+    return [Math.floor((rect.x - gap) / this.cellSize), Math.floor((rect.y - gap) / this.cellSize),
+      Math.floor((rect.x + rect.width + gap) / this.cellSize), Math.floor((rect.y + rect.height + gap) / this.cellSize)];
   }
-  constructor(rects: Rect[] = []) { rects.forEach(rect => this.add(rect)); }
+  constructor(rects: Rect[] = [], private readonly cellSize = 256) { rects.forEach(rect => this.add(rect)); }
   add(rect: Rect): void {
     this.rects.push(rect);
     const [x0, y0, x1, y1] = this.range(rect);

@@ -72,8 +72,10 @@ function edge(value: unknown): GraphEdge {
   const data = row(value, '关系边'); requireValue(typeof data.directed === 'boolean', '关系方向无效');
   requireValue(data.routeStyle === undefined || data.routeStyle === 'curve' || data.routeStyle === 'orthogonal', '关系路径类型无效');
   requireValue(data.removed === undefined || data.removed === false, '不能导入已删除的关系边');
+  requireValue(data.relationKind === undefined || (data.relationKind === 'dependency' && data.directed && data.membershipFor === undefined), '依赖边的类型或方向无效');
   return { edgeId: identity(data.edgeId), sourceNodeId: identity(data.sourceNodeId), targetNodeId: identity(data.targetNodeId),
     edgeContent: string(data.edgeContent, '关系正文'), directed: data.directed,
+    ...(data.relationKind === 'dependency' ? { relationKind: data.relationKind } : {}),
     ...(data.routeStyle === undefined ? {} : { routeStyle: data.routeStyle }), ...(data.membershipFor === undefined ? {} : { membershipFor: identity(data.membershipFor) }) };
 }
 function packageGraph(value: unknown): { bundle: DocumentPackage; graph: GraphState } {
@@ -100,6 +102,7 @@ function packageGraph(value: unknown): { bundle: DocumentPackage; graph: GraphSt
   }
   requireValue(members.size === bundle.documents.length + bundle.nodes.length, '文件包含所选图文档之外的内容');
   requireValue(graph.edges.every(e => members.has(e.sourceNodeId) && members.has(e.targetNodeId)), '关系边的两端必须都在图文档中');
+  requireValue(graph.edges.every(e => !e.relationKind || (e.sourceNodeId !== e.targetNodeId && graph.nodes[e.sourceNodeId] && graph.nodes[e.targetNodeId])), '依赖边必须连接两个不同节点');
   const keep = Object.fromEntries(Object.keys(graph.nodes).map(id => [id, id]));
   for (const n of bundle.nodes) if (n.design) n.design = remapDesign(n.design, keep);
   for (const doc of bundle.documents) for (const p of Object.values(doc.placements)) if (p.overlapAllowances)

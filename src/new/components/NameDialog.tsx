@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { AiError, AiModal, useAction } from '@/ai/ui/common';
 
 /** Native prompt is unavailable in Electron; keep naming and errors in the app. */
@@ -7,12 +7,14 @@ export function NameDialog({ title, label, initialName = '', submitLabel, onSubm
   onSubmit: (name: string) => Promise<void>; onClose: () => void;
 }) {
   const [name, setName] = useState(initialName);
+  const input = useRef<HTMLInputElement>(null);
+  useEffect(() => { input.current?.focus(); input.current?.select(); }, []);
   const action = useAction();
   return <AiModal title={title} onClose={() => { if (!action.busy) onClose(); }}>
     <form className="ai-column" data-name-dialog onSubmit={event => {
       event.preventDefault(); if (name.trim()) void action.run(() => onSubmit(name.trim()));
     }}>
-      <label className="ai-label">{label}<input className="ai-input" data-name-input autoFocus required maxLength={1000}
+      <label className="ai-label">{label}<input ref={input} className="ai-input" data-name-input required maxLength={1000}
         value={name} disabled={action.busy} onChange={event => setName(event.target.value)} /></label>
       <AiError text={action.error} />
       <div className="ai-row" style={{ justifyContent: 'flex-end' }}>

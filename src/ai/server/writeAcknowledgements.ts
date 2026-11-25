@@ -5,8 +5,9 @@ import { digest, graphIndex, observe } from './directGraph';
 import { graphTables } from './graphReadTables';
 import { entity, semanticHashes } from './graph';
 import { currentRelationHashes } from './graphRelationDependencies';
-import { canvasField, canvasKey, stampCanvasObservation } from './canvasReadEvidence';
-import { subgraphKey, subgraphVersion } from './subgraphVersions';
+import { canvasField, canvasKey, stampCanvasObservation, stampCanvasVersionDependencies } from './canvasReadEvidence';
+import { captureSubgraphHashes, subgraphVersion } from './subgraphVersions';
+import { textFieldsOnly } from './graphReadDependencies';
 
 /** A receipt acknowledges a write only while its native call/result pair is in this prompt. */
 export function visibleNativeCalls(stage: ContextStage, calls: ToolCallRecord[]): ToolCallRecord[] {
@@ -54,7 +55,7 @@ export function graphWriteAcknowledgement(state: AppSnapshot, task: Task, call: 
   const priorCalls = state.toolCalls.filter(c => c.taskId === task.id && c.status === 'completed')
     .sort((a,b) => (a.sequence ?? 0) - (b.sequence ?? 0));
   const observations = acknowledgedObservations([...(workspace.observations ?? []), ...(workspace.contextStage?.baselineObservations ?? []),
-    ...(task.responseReadHashes?.observations??[]),...(task.responseReadHashes?.summaryObservations??[])], priorCalls)
+    ...(task.responseReadHashes?.observations??[])], priorCalls)
     .filter(o => o.taskId === task.id && !o.historical && o.canvasId === task.canvasId);
   const oldState = { ...state, graph: before }, oldIndex = graphIndex(oldState, task.canvasId), index = graphIndex(state, task.canvasId);
   const oldTables = graphTables(oldIndex), tables = graphTables(index);
@@ -69,8 +70,9 @@ export function graphWriteAcknowledgement(state: AppSnapshot, task: Task, call: 
   const advances: GraphWriteAcknowledgement['advances'] = [];
   for (const previous of observations) {
     if (!previous.objects) continue; // Legacy observations must be reread.
-    const old = observe(oldState, task, oldIndex, previous.refs, Object.keys(previous.directoryMembers ?? {}), previous.structureOnly, previous.query, previous.queryScope, previous.graphQuery);
-    const next = observe(state, task, index, previous.refs, Object.keys(previous.directoryMembers ?? {}), previous.structureOnly, previous.query, previous.queryScope, previous.graphQuery);
+    // oldHashes/hashes resolve scoped queries separately, including a scope removed by this write.
+    const old = observe(oldState, task, oldIndex, previous.refs, Object.keys(previous.directoryMembers ?? {}), previous.structureOnly, previous.query, previous.queryScope);
+    const next = observe(state, task, index, previous.refs, Object.keys(previous.directoryMembers ?? {}), previous.structureOnly, previous.query, previous.queryScope);
     const updated = structuredClone(previous);
     for(const facts of Object.values(updated.canvasVersionDependencies??{}))for(const fact of facts){
       if(fact.version===canvasKey(canvasField(oldIndex,fact.refId,fact.field)))fact.version=canvasKey(canvasField(index,fact.refId,fact.field));
@@ -113,16 +115,26 @@ export function graphWriteAcknowledgement(state: AppSnapshot, task: Task, call: 
       &&(Object.keys(previous.objects??{}).length||previous.canvasFacts?.length))updated.provenEmpty=true;
     if (digest(previous) !== digest(updated)) advances.push({ observationId: previous.id, expected: digest(previous), observation: updated });
   }
-  const written = observe(state, task, index, changedRefs);
+  const fieldOnly=textFieldsOnly(change.commands);
+  const written = observe(state, task, index, fieldOnly ? [] : changedRefs);
   written.id = `write:${call.id}`; written.callId = call.id;
-  written.sources = written.sources.filter(source => bodies.has(source.id));
-  stampCanvasObservation(index,written,[...bodies].map(refId=>tables.edges.has(refId)?tables.edge(refId):{refId,content:canvasField(index,refId,'content')}));
+  if(fieldOnly){
+    written.refs=changedRefs;
+    const facts=new Map<string,NonNullable<Observation['canvasFacts']>[number]>();
+    for(const command of change.commands){
+      const refId=String(command.id),field=String(command.field),value=canvasField(index,refId,field);
+      if(!changedRefs.includes(refId)||value!==command.value)continue;
+      facts.set(JSON.stringify([refId,field]),{refId,field,version:canvasKey(value)});
+      (written.textScopes??={})[refId]=subgraphVersion(index,refId,'editScope')!;
+      Object.assign(written.readHashes!,captureSubgraphHashes(index,[refId],field==='name'?'name':'body'));
+    }
+    written.canvasFacts=[...facts.values()];
+    stampCanvasVersionDependencies(index,written);
+  }else{
+    written.sources = written.sources.filter(source => bodies.has(source.id));
+    stampCanvasObservation(index,written,[...bodies].map(refId=>tables.edges.has(refId)?tables.edge(refId):{refId,content:canvasField(index,refId,'content')}));
+  }
   const commandCallIds=priorCalls.filter(c=>c.name==='graph_propose_changes'&&c.stepId===change.stepId
     && c.operationId===change.operationId).map(c=>c.id);
-  const groups=new Set([...oldIndex.rows.values(),...index.rows.values()].filter(r=>r.kind!=='node').map(r=>r.id));
-  const fileTransitions=[...groups].flatMap(id=>(['directory','direct'] as const).flatMap(part=>{
-    const previous=subgraphVersion(oldIndex,id,part),next=subgraphVersion(index,id,part);
-    return previous===next?[]:[{key:subgraphKey(index.canvasId,id,part),before:previous,after:next}];
-  }));
-  return { commandCallIds, advances, observations: changedRefs.length ? [written] : [],fileTransitions };
+  return { commandCallIds, advances, observations: changedRefs.length ? [written] : [] };
 }

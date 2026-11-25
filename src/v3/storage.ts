@@ -5,12 +5,13 @@ import type { DocumentMeta } from '@/types/document';
 import { findFreeDocumentPlacement, getCanvasDocumentIds } from './layout';
 import type { CanvasRecord, EdgeRouteStyle, GraphEdge, GraphRecord, GraphState, Point } from './types';
 import { inheritRegionGeometry, invalidateRegionGeometry, isRegionPreview, normalizeRegionLayout, previewBlockMove,
-  REGION_LAYOUT_VERSION, retainRegionGeometry, validateRegionLayout } from './regionLayout';
+  REGION_LAYOUT_VERSION, retainRegionGeometry, validateRegionLayout, type PlacementFrame } from './regionLayout';
 import { planDocumentImport } from './canvasProjection';
 import { invalidateHierarchyIndex, retainHierarchyIndex } from './hierarchyIndex';
 import { migrateProposalEvaluations, modeOf, reconcileDesign, remapDesign, validateDesign } from './design';
 import type { CanvasMode } from './types';
 import { avoidExpandedRegion, prunePresentationPlacements } from './presentationLayout';
+import { pruneSpatialLayers } from './spatialLevels';
 
 const NODES_KEY = 'qixue_nodes';
 const CANVASES_KEY = 'qixue_canvases';
@@ -69,7 +70,7 @@ export function finishStructureWrite(): boolean {
   throw new Error('结构恢复记录损坏');
 }
 
-export function commitStructure(next: GraphState, previous?: GraphState, protectedIds?: ReadonlySet<string>): GraphState {
+export function commitStructure(next: GraphState, previous?: GraphState, protectedIds?: ReadonlySet<string>, frame?: PlacementFrame): GraphState {
   next = reconcileDesign(next, previous);
   if (!planningDepth && localStorage.getItem(STRUCTURE_WRITE_KEY)) throw new Error('请先恢复上一次结构变更');
   const drag = previous && isRegionPreview(next, previous);
@@ -78,8 +79,8 @@ export function commitStructure(next: GraphState, previous?: GraphState, protect
     // A caller may hand us a mutable draft (including one reused by an importer).
     invalidateHierarchyIndex(next); if (!drag) invalidateRegionGeometry(next); published.delete(next);
     validateStructure(next);
-    next = normalizeRegionLayout(next, previous, protectedIds);
-    next = prunePresentationPlacements(next);
+    next = normalizeRegionLayout(next, previous, protectedIds, frame);
+    next = pruneSpatialLayers(prunePresentationPlacements(next));
     validateRegionLayout(next, protectedIds);
   }
   const baseline = previous && published.has(previous) ? previous : undefined;
@@ -137,6 +138,10 @@ function readState(): GraphState {
 /** Parent lists are the authority. Report corrupt multiple parents instead of picking one. */
 export function validateStructure(state: GraphState): void {
   validateGraphIdentities(state);
+  for (const edge of state.edges) if (!edge.removed && edge.relationKind !== undefined) {
+    assertEdgeKind(state,edge.relationKind,edge.directed,edge.sourceNodeId,edge.targetNodeId);
+    if (edge.membershipFor || edge.sourceNodeId === edge.targetNodeId) throw new Error('依赖边必须连接两个不同节点');
+  }
   const owner = new Map<string, string>();
   const canvasNodeOwner = new Map<string, string>();
   const claim = (id: string, parent: string) => {
@@ -229,7 +234,7 @@ export function bootstrap(): GraphState {
 }
 
 function upgradeRegionLayout(state: GraphState): GraphState {
-  const next = normalizeRegionLayout(state);
+  const next = pruneSpatialLayers(normalizeRegionLayout(state));
   if (next === state) return publish(state);
   if (state.layoutVersion !== REGION_LAYOUT_VERSION && !localStorage.getItem(LAYOUT_BACKUP_KEY)) write(LAYOUT_BACKUP_KEY, state);
   return commitStructure(next);
@@ -265,8 +270,10 @@ export function cloneCanvas(state: GraphState, id: string, name: string): GraphS
   const collapsed = Object.fromEntries(Object.keys(source.collapsed).map((key) => [renamed[key] ?? key, true])) as Record<string, true>;
   const presentationPlacements = source.presentationPlacements && Object.fromEntries(Object.entries(source.presentationPlacements)
     .map(([key, value]) => [renamed[key] ?? key, { ...value, parentId: renamed[value.parentId] ?? value.parentId }]));
+  const spatialLayerOffsets = source.spatialLayerOffsets && Object.fromEntries(Object.entries(source.spatialLayerOffsets)
+    .map(([key, offset]) => [renamed[key] ?? key, offset]));
   const canvas: CanvasRecord = { ...source, canvasId: copyId, canvasName: name, childIds: source.childIds.map(id => renamed[id] ?? id), directories, placements, collapsed,
-    ...(presentationPlacements ? { presentationPlacements } : {}), isDraft: false, updatedAt: new Date().toISOString() };
+    ...(presentationPlacements ? { presentationPlacements } : {}), ...(spatialLayerOffsets ? { spatialLayerOffsets } : {}), isDraft: false, updatedAt: new Date().toISOString() };
   const canvases = [...state.canvases, canvas];
   const nodes = { ...state.nodes, ...Object.fromEntries(localNodes.map((nodeId) => [renamed[nodeId], { ...state.nodes[nodeId], nodeId: renamed[nodeId], design: remapDesign(state.nodes[nodeId].design, renamed, true) }])) };
   const copiedEdges = state.edges.filter((edge) => !edge.removed && !edge.membershipFor && (renamed[edge.sourceNodeId] || renamed[edge.targetNodeId])).map((edge) => ({
@@ -328,6 +335,7 @@ export function toggleCollapse(state: GraphState, canvasId: string, id: string, 
 }
 
 export interface CreateEdgeInput {
+  relationKind?: 'relation' | 'dependency';
   sourceNodeId: string;
   targetNodeId: string;
   edgeContent?: string;
@@ -336,12 +344,16 @@ export interface CreateEdgeInput {
 }
 
 function assertEndpoint(state: GraphState, id: string): void {
-  if (!state.nodes[id] && !state.documents[id] && !state.canvases.some((canvas) => canvasDirectory(canvas, id))) {
-    throw new Error('连接的节点或记录不存在');
-  }
+  if (!Object.hasOwn(state.nodes,id)) throw new Error('请选择节点作为新关系的端点');
 }
 function assertRouteStyle(style?: EdgeRouteStyle): void {
   if (style !== undefined && !['curve', 'orthogonal'].includes(style)) throw new Error('连线样式必须是曲线或正交');
+}
+
+function assertEdgeKind(state: GraphState, kind: CreateEdgeInput['relationKind'], directed: boolean, source: string, target: string) {
+  if (kind !== undefined && kind !== 'relation' && kind !== 'dependency') throw new Error('关系类型无效');
+  if (kind === 'dependency' && (!directed || !state.nodes[source] || !state.nodes[target]))
+    throw new Error('依赖必须是两个节点之间的有向边，起点依赖终点');
 }
 
 /** Which side an edge leaves is decided by the renderer from current positions;
@@ -350,13 +362,24 @@ export function createEdge(state: GraphState, input: CreateEdgeInput): GraphStat
   assertEndpoint(state, input.sourceNodeId);
   assertEndpoint(state, input.targetNodeId);
   assertRouteStyle(input.routeStyle);
+  assertEdgeKind(state, input.relationKind, input.directed ?? true, input.sourceNodeId, input.targetNodeId);
   if (input.sourceNodeId === input.targetNodeId) throw new Error('请选择另一个节点进行连接');
   const edge: GraphEdge = {
     edgeId: graphIdAllocator(state)(), sourceNodeId: input.sourceNodeId, targetNodeId: input.targetNodeId,
     edgeContent: input.edgeContent ?? '', directed: input.directed ?? true,
+    ...(input.relationKind === 'dependency' ? { relationKind: input.relationKind } : {}),
     ...(input.routeStyle ? { routeStyle: input.routeStyle } : {}),
   };
   const edges = [...state.edges, edge];
+  write(EDGES_KEY, edges);
+  return unchangedGeometry(state, { ...state, edges });
+}
+
+export function deleteEdge(state: GraphState, edgeId: string): GraphState {
+  const edge = state.edges.find(item => item.edgeId === edgeId);
+  if (!edge) return state;
+  if (edge.membershipFor) throw new Error('请在组合详情中移除成员方案');
+  const edges = state.edges.filter(item => item.edgeId !== edgeId);
   write(EDGES_KEY, edges);
   return unchangedGeometry(state, { ...state, edges });
 }
@@ -368,6 +391,7 @@ export function reconnectEdge(state: GraphState, edgeId: string, end: 'source' |
   if (original.membershipFor) throw new Error('请在组合详情中调整成员方案');
   const otherId = end === 'source' ? original.targetNodeId : original.sourceNodeId;
   if (otherId === nodeId) throw new Error('请选择另一个节点进行连接');
+  assertEdgeKind(state, original.relationKind, original.directed, nodeId, otherId);
   const edges = state.edges.map((edge) => edge.edgeId === edgeId ? {
     ...edge, [end === 'source' ? 'sourceNodeId' : 'targetNodeId']: nodeId,
   } : edge);
@@ -376,6 +400,7 @@ export function reconnectEdge(state: GraphState, edgeId: string, end: 'source' |
 }
 
 export interface EdgePatch {
+  relationKind?: 'relation' | 'dependency';
   sourceNodeId?: string;
   targetNodeId?: string;
   /** 'auto' restores the default curve. */
@@ -399,8 +424,8 @@ export function updateEdge(state: GraphState, edgeId: string, patch: EdgePatch):
   if (!original) throw new Error('这条边已经不存在');
   if (original.membershipFor) throw new Error('请在组合详情中调整成员方案');
   const updated = { ...original };
-  if (patch.sourceNodeId !== undefined) { assertEndpoint(state, patch.sourceNodeId); updated.sourceNodeId = patch.sourceNodeId; }
-  if (patch.targetNodeId !== undefined) { assertEndpoint(state, patch.targetNodeId); updated.targetNodeId = patch.targetNodeId; }
+  if (patch.sourceNodeId !== undefined && patch.sourceNodeId !== original.sourceNodeId) { assertEndpoint(state, patch.sourceNodeId); updated.sourceNodeId = patch.sourceNodeId; }
+  if (patch.targetNodeId !== undefined && patch.targetNodeId !== original.targetNodeId) { assertEndpoint(state, patch.targetNodeId); updated.targetNodeId = patch.targetNodeId; }
   if (updated.sourceNodeId === updated.targetNodeId) throw new Error('请选择另一个节点进行连接');
   if (patch.edgeContent !== undefined) updated.edgeContent = patch.edgeContent;
   if (patch.routeStyle === 'auto') delete updated.routeStyle;
@@ -409,6 +434,10 @@ export function updateEdge(state: GraphState, edgeId: string, patch: EdgePatch):
     [updated.sourceNodeId, updated.targetNodeId] = [updated.targetNodeId, updated.sourceNodeId];
     updated.directed = true;
   } else if (patch.direction !== undefined) updated.directed = patch.direction === 'forward';
+  const kind = patch.relationKind ?? updated.relationKind;
+  assertEdgeKind(state, kind, updated.directed, updated.sourceNodeId, updated.targetNodeId);
+  if (kind === 'dependency') updated.relationKind = kind;
+  else delete updated.relationKind;
   const edges = state.edges.map((edge) => edge.edgeId === edgeId ? updated : edge);
   write(EDGES_KEY, edges);
   return unchangedGeometry(state, { ...state, edges });

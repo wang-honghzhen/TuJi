@@ -10,6 +10,8 @@ export interface GraphActionRequest {
   id?: string;
   sourceId?: string;
   point?: Point;
+  /** A planar click may be assigned to a different parent in the create dialog. */
+  pointForParent?: (parentId: string) => Point | undefined;
 }
 export type GraphMutation = StructureCommand | { type: 'createEdge'; input: CreateEdgeInput } | { type: 'updateDesignNode'; id: string; design: DesignNodeData; expectedDesign?: DesignNodeData };
 export interface GraphMutationResult { ok: boolean; id?: string; error?: string; pending?: boolean }

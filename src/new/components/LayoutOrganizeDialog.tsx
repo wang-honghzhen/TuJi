@@ -15,9 +15,10 @@ const area = (value?: number) => value === undefined ? '' : `${Math.round(value 
 function summary(stats?: LayoutStats): string {
   if (!stats) return '等待预览。';
   const parts: string[] = [];
+  if (stats.manualMoved) parts.push(`其中 ${stats.manualMoved} 个曾手动摆放`);
   if (stats.packed) parts.push(`按阅读顺序整理 ${stats.packed} 个对象`);
   if ((stats.crossingsBefore ?? 0) > 0 || (stats.crossingsAfter ?? 0) > 0)
-    parts.push(`交叉 ${stats.crossingsBefore ?? 0} → ${stats.crossingsAfter ?? 0}`);
+    parts.push(`预计交叉 ${stats.crossingsBefore ?? 0} → ${stats.crossingsAfter ?? 0}`);
   const [before, after] = [stats.areaBefore, stats.areaAfter];
   if (before !== undefined && after !== undefined && Math.abs(after - before) > Math.max(before * .05, 1000))
     parts.push(`占用 ${area(before)} → ${area(after)}`);

@@ -2,6 +2,7 @@ import type { AppSnapshot, Task, ToolCallRecord } from '../domain';
 import type { FrozenRead, Observation } from '../contextState';
 import { directGraphRead, graphIndex } from './directGraph';
 import { graphQueryRead } from './graphQueryRead';
+import { isNavigationScope } from './graphQueries';
 import { translateGraphPayload } from './graphReferences';
 import { DomainError } from './errors';
 import { canvasKey, canvasRefreshRequest, row, type CanvasReadRequest, type Row } from './canvasReadEvidence';
@@ -11,6 +12,8 @@ export interface CanvasReadDraft { result?:Row; observations:Observation[];pages
  *  model-call record, delivery, read dependency or page is committed by this function. */
 export function buildCanvasRead(state:AppSnapshot,task:Task,source:ToolCallRecord,request:CanvasReadRequest,identity:string,encode:(id:string)=>string):CanvasReadDraft {
   const index=graphIndex(state,task.canvasId),semantic=canvasRefreshRequest(request),args=semantic.arguments,unavailable:string[]=[];
+  // Pre-card default keyword searches recorded a body/relations result without an output option.
+  if(request.tool==='graph_search'&&!isNavigationScope(args.scope)&&args.output===undefined)args.output='content';
   const valid=(id:string)=>index.rows.get(id)?.readable||index.edges.some(e=>e.edgeId===id);
   if(Array.isArray(args.refs)){args.refs=args.refs.filter(id=>{if(typeof id==='string'&&!valid(id)){unavailable.push(id);return false;}return true;});
     if(!(args.refs as unknown[]).length)return {observations:[],pages:[],reason:'source_unavailable',unavailable};}
@@ -29,10 +32,12 @@ export function buildCanvasRead(state:AppSnapshot,task:Task,source:ToolCallRecor
   let result:Row;
   const references=new Map<string,string>(),project=(id:string)=>{const alias=encode(id);references.set(id,alias);return alias;};
   try {
-    result=request.tool==='graph_read_design_references'||request.tool==='graph_search_node_content'||request.tool==='graph_search'&&args.output==='cards'
+    result=request.tool==='graph_read_dependencies'||request.tool==='graph_read_design_references'||request.tool==='graph_search_node_content'
       ?graphQueryRead(privateState,privateTask,recording,args):directGraphRead(privateState,privateTask,recording,args,v=>translateGraphPayload(v,project));
   }catch(cause){
     if(!(cause instanceof DomainError))throw cause;
+    if(cause.code==='INVALID_ARGUMENT'&&(cause.details as Row)?.reason==='range_out_of_bounds')
+      return {observations:[],pages:[],reason:'range_unavailable',unavailable};
     if(!['OUT_OF_SCOPE','NOT_FOUND','TOOL_NOT_ALLOWED','READ_RESOURCE_LIMIT'].includes(cause.code))throw cause;
     return {observations:[],pages:[],reason:cause.code==='READ_RESOURCE_LIMIT'?`resource:${String((cause.details as Row)?.resource)}`:'source_unavailable',unavailable};
   }

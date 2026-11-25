@@ -12,7 +12,7 @@ export function changedPlacementRefs(patches: readonly GraphPatch[]): string[] {
   return [...new Set(patches.flatMap(patch => {
     const before = patch.before as Record<string, Record<string, unknown>> | null;
     const after = patch.after as Record<string, Record<string, unknown>> | null;
-    return ['placements', 'presentationPlacements'].flatMap(field =>
+    return ['placements', 'presentationPlacements', 'spatialLayerOffsets'].flatMap(field =>
       [...new Set([...Object.keys(before?.[field] ?? {}), ...Object.keys(after?.[field] ?? {})])]
         .filter(ref => hash(before?.[field]?.[ref] ?? null) !== hash(after?.[field]?.[ref] ?? null)));
   }))];

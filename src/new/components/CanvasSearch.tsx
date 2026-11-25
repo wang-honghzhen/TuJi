@@ -1,9 +1,12 @@
+import { GraphSearchResultCopy } from './GraphSearchResultCopy';
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
-import { ArrowUpRight, FileText, Folder, Search, Share2, X } from 'lucide-react';
+import { ArrowUpRight, ChevronLeft, ChevronRight, FileText, Folder, Search, Share2, X } from 'lucide-react';
 import type { CanvasRecord, GraphState } from '@/v3/types';
-import { searchCanvas } from '../graphSearch';
-import { SearchField, SearchHighlight } from './SearchField';
+import { buildCanvasSearchIndex, canvasSearchResult, findCanvasMatches } from '../graphSearch';
+import { SearchField } from './SearchField';
 import { canvasInteractionBlocked } from '../canvasInteractionScope';
+
+const PAGE_SIZE = 24;
 
 export function CanvasSearch({ state, canvas, onLocate }: { state: GraphState; canvas: CanvasRecord; onLocate: (id: string) => void }) {
   const [open, setOpen] = useState(false), [query, setQuery] = useState(''), [active, setActive] = useState(0);
@@ -11,11 +14,28 @@ export function CanvasSearch({ state, canvas, onLocate }: { state: GraphState; c
   const [position, setPosition] = useState<CSSProperties>({});
   const input = useRef<HTMLInputElement>(null), shell = useRef<HTMLDivElement>(null);
   const toggle = useRef<HTMLButtonElement>(null);
-  const results = useMemo(() => searchCanvas(state, canvas, query).filter(r => kind === 'all' || r.kind === kind || kind === 'subgraph' && r.kind === 'document'), [state, canvas, query, kind]);
+  const searching = open && !!query.trim();
+  const index = useMemo(() => searching ? buildCanvasSearchIndex(state, canvas) : [], [searching, state, canvas]);
+  const matches = useMemo(() => findCanvasMatches(index, query), [index, query]);
+  const results = useMemo(() => kind === 'all' ? matches : matches.filter(({ result }) =>
+    result.kind === kind || kind === 'subgraph' && result.kind === 'document'), [matches, kind]);
+  const selectedIndex = Math.min(active, Math.max(0, results.length - 1));
+  const start = Math.floor(selectedIndex / PAGE_SIZE) * PAGE_SIZE;
+  const page = useMemo(() => results.slice(start, start + PAGE_SIZE).map(entry => canvasSearchResult(entry, query)),
+    [results, start, query]);
+  const resultList = useRef<HTMLDivElement>(null);
+  const scrollToActive = useRef(false);
+  const moveTo = (index: number) => {
+    scrollToActive.current = true;
+    setActive(Math.max(0, Math.min(index, results.length - 1)));
+  };
   useEffect(() => { setOpen(false); setQuery(''); }, [canvas.canvasId]);
-  useEffect(() => setActive(0), [query, kind]);
   useEffect(() => { if (open) input.current?.focus(); }, [open]);
-  useEffect(() => { setActive(index => Math.max(0, Math.min(index, results.length - 1))); }, [results.length]);
+  useLayoutEffect(() => { if (resultList.current) resultList.current.scrollTop = 0; }, [query, kind, start]);
+  useLayoutEffect(() => {
+    if (scrollToActive.current) resultList.current?.querySelector('.is-active')?.scrollIntoView({ block: 'nearest' });
+    scrollToActive.current = false;
+  }, [selectedIndex, open]);
   useLayoutEffect(() => {
     if (!open) return;
     const measure = () => {
@@ -45,27 +65,42 @@ export function CanvasSearch({ state, canvas, onLocate }: { state: GraphState; c
   }, [open]);
   const close = () => { setOpen(false); toggle.current?.focus(); };
   const locate = (id: string) => { onLocate(id); close(); };
-  return <div ref={shell} className="canvas-search" onPointerDown={e => e.stopPropagation()} onContextMenu={e => e.stopPropagation()} onKeyDown={event => {
+  return <div ref={shell} className="canvas-search" onBlur={event => {
+    if (event.relatedTarget && !event.currentTarget.contains(event.relatedTarget as Node)) setOpen(false);
+  }} onPointerDown={e => e.stopPropagation()} onContextMenu={e => e.stopPropagation()} onKeyDown={event => {
     if (event.key === 'Escape' && open && !event.nativeEvent.isComposing) { event.preventDefault(); event.stopPropagation(); close(); }
   }}>
-    <button ref={toggle} type="button" data-canvas-search-toggle className={'canvas-search-toggle' + (open ? ' is-active' : '')} aria-label="搜索当前画布" aria-expanded={open} title="搜索当前画布（Ctrl+F）" onClick={() => setOpen(v => !v)}><Search size={15} /><span>搜索</span></button>
+    <button ref={toggle} type="button" data-canvas-search-toggle className={'canvas-search-toggle' + (open ? ' is-active' : '')} aria-label="搜索当前画布" aria-expanded={open} title="搜索当前画布（Ctrl+F）" onClick={() => setOpen(v => !v)}><Search size={16} aria-hidden="true" /></button>
     {open && <div className="canvas-search-popover" style={position} role="dialog" aria-label="搜索当前画布">
-      <header><span>搜索当前画布</span><button type="button" aria-label="关闭画布搜索" onClick={close}><X size={15} /></button></header>
-      <SearchField ref={input} label="搜索节点、子图或关系" value={query} onChange={setQuery} onKeyDown={event => {
-        if (event.nativeEvent.isComposing) return;
-        if (event.key === 'ArrowDown' || event.key === 'ArrowUp') { event.preventDefault(); setActive(a => Math.max(0, Math.min(results.length - 1, a + (event.key === 'ArrowDown' ? 1 : -1)))); }
-        if (event.key === 'Enter' && results[active]) { event.preventDefault(); locate(results[active].id); }
-      }} />
-      <div className="graph-search-filters" aria-label="搜索对象类型">{[['all','全部'],['node','节点'],['subgraph','子图'],['edge','关系']].map(([id,label]) => <button key={id} type="button" aria-pressed={kind === id} onClick={() => setKind(id)}>{label}</button>)}</div>
-      <div className="graph-search-results new-scroll" aria-live="polite">
-        {!query.trim() ? <p className="graph-search-empty">输入名称、正文或关系描述<br /><span>包含折叠与屏幕外的对象</span></p> : !results.length ? <p className="graph-search-empty">当前画布没有匹配结果</p> : results.map((r,i) => {
+      <header>
+        <SearchField ref={input} label="搜索节点、子图或关系" value={query} onChange={value => { setQuery(value); setActive(0); }} onKeyDown={event => {
+          if (event.nativeEvent.isComposing) return;
+          if (event.key === 'ArrowDown' || event.key === 'ArrowUp') { event.preventDefault(); moveTo(selectedIndex + (event.key === 'ArrowDown' ? 1 : -1)); }
+          if (event.key === 'Enter' && results[selectedIndex]) { event.preventDefault(); locate(results[selectedIndex].result.id); }
+        }} />
+        <button type="button" aria-label="关闭画布搜索" onClick={close}><X size={15} /></button>
+      </header>
+      <div className="graph-search-filters" role="group" aria-label="搜索对象类型">{[['all','全部'],['node','节点'],['subgraph','子图'],['edge','关系']].map(([id,label]) => <button key={id} type="button" aria-pressed={kind === id} onClick={() => { setKind(id); setActive(0); }}>{label}</button>)}</div>
+      <div className="graph-search-results new-scroll" ref={resultList}>
+        {!query.trim() ? <p className="graph-search-empty">可搜索名称、正文和关系描述<br /><span>包含折叠与屏幕外的对象</span></p> : !results.length ? <div className="graph-search-empty" role="status">
+          {matches.length ? <>当前类型没有匹配结果<br /><button type="button" className="graph-search-reset" onClick={() => {
+            setKind('all'); setActive(0); input.current?.focus();
+          }}>查看全部 {matches.length} 个结果</button></> : '当前画布没有匹配结果'}
+        </div> : page.map((r,i) => {
           const Icon = r.kind === 'node' ? FileText : r.kind === 'edge' ? Share2 : Folder;
-          return <button key={r.id} type="button" data-canvas-search-result={r.id} className={'graph-search-result' + (i === active ? ' is-active' : '')} onMouseEnter={() => setActive(i)} onClick={() => locate(r.id)} ref={el => { if (el && i === active) el.scrollIntoView({ block: 'nearest' }); }}>
-            <Icon size={15} /><span className="graph-search-result-copy"><strong><SearchHighlight text={r.name} query={query} /></strong><small title={r.path}>{r.path}</small>{r.detail && <span><SearchHighlight text={r.detail} query={query} /></span>}</span><ArrowUpRight size={14} className="graph-search-go" />
+          const index = start + i;
+          return <button key={r.id} type="button" data-canvas-search-result={r.id} className={'graph-search-result' + (index === selectedIndex ? ' is-active' : '')} onMouseEnter={() => setActive(index)} onFocus={() => setActive(index)} onClick={() => locate(r.id)}>
+            <Icon size={15} /><GraphSearchResultCopy result={r} query={query} /><ArrowUpRight size={14} className="graph-search-go" />
           </button>;
         })}
       </div>
-      {query.trim() && <footer>{results.length} 个结果<span>↑ ↓ 选择 · Enter 定位</span></footer>}
+      {!!results.length && <footer>
+        <span role="status">{results.length > PAGE_SIZE ? `${start + 1}–${Math.min(start + PAGE_SIZE, results.length)} / ${results.length}` : `${results.length} 个结果`}</span>
+        {results.length > PAGE_SIZE ? <div role="group" aria-label="搜索结果分页">
+          <button type="button" aria-label="上一页结果" disabled={!start} onClick={() => moveTo(start - PAGE_SIZE)}><ChevronLeft size={14} /></button>
+          <button type="button" aria-label="下一页结果" disabled={start + PAGE_SIZE >= results.length} onClick={() => moveTo(start + PAGE_SIZE)}><ChevronRight size={14} /></button>
+        </div> : <span className="graph-search-shortcuts"><kbd>↑</kbd><kbd>↓</kbd> 选择 <kbd>Enter</kbd> 定位</span>}
+      </footer>}
     </div>}
   </div>;
 }

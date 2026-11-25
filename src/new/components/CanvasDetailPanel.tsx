@@ -6,7 +6,8 @@ import type { CanvasNodeOption } from '@/v3/layout';
 import type { EdgePatch } from '@/v3/storage';
 import { CanvasTextField } from './CanvasTextField';
 import { CanvasEdgePicker, type EdgePickerAnchor, type EdgePickerKind } from './CanvasEdgePicker';
-import { GraphNameLabel } from './GraphPathLabel';
+import type { PathSegment } from '@/v3/paths';
+import { GraphNameLabel, GraphPathLabel } from './GraphPathLabel';
 
 export interface CanvasDetail {
   kind: 'node' | 'edge' | 'record';
@@ -16,6 +17,7 @@ export interface CanvasDetail {
   accent: string;
   targetAccent?: string;
   meta?: string;
+  pathSegments?: PathSegment[];
 }
 interface Props {
   detail: CanvasDetail;
@@ -32,13 +34,14 @@ interface Props {
   onClose: () => void;
   edge?: GraphEdge;
   designDetails?: ReactNode;
+  dependencyLinks?: ReactNode;
   nodeOptions: CanvasNodeOption[];
   endpointName: (id: string) => string;
   onEdgeChange: (patch: EdgePatch) => void;
 }
 
 export function CanvasDetailPanel({ detail, position, size, maxWidth, maxHeight, onResize, onMove, onEnter, onLeave,
-  selected, onActivate, onClose, edge, designDetails, nodeOptions, endpointName, onEdgeChange }: Props) {
+  selected, onActivate, onClose, edge, designDetails, dependencyLinks, nodeOptions, endpointName, onEdgeChange }: Props) {
   const resizing = useRef<{ pointerId: number; start: Point; size: typeof size } | null>(null);
   const moving = useRef<{ pointerId: number; start: Point; position: Point; width: number; height: number } | null>(null);
   const [dragging, setDragging] = useState(false);
@@ -53,7 +56,7 @@ export function CanvasDetailPanel({ detail, position, size, maxWidth, maxHeight,
     onPointerEnter={onEnter} onPointerLeave={onLeave} onPointerDown={(event) => { event.stopPropagation(); onActivate(); }}>
     <div data-detail-drag title="拖动空白处移动详情框" className={`relative shrink-0 px-4 py-3 border-b border-white/10 touch-none select-none ${dragging ? 'cursor-grabbing' : 'cursor-grab'}`}
       onPointerDown={(event) => {
-        if (event.button !== 0 || (event.target instanceof Element && event.target.closest('button, input, textarea, [data-text-key]'))) return;
+        if (event.button !== 0 || (event.target instanceof Element && event.target.closest('button, input, label, textarea, [data-text-key]'))) return;
         event.preventDefault(); event.stopPropagation(); onActivate(); onEnter(); closePicker();
         const rect = event.currentTarget.parentElement!.getBoundingClientRect();
         moving.current = { pointerId: event.pointerId, start: { x: event.clientX, y: event.clientY }, position,
@@ -82,8 +85,14 @@ export function CanvasDetailPanel({ detail, position, size, maxWidth, maxHeight,
         className="canvas-detail-title text-[13px] font-semibold break-words leading-5" multiline={false} placeholder="点击输入节点名" onActivate={onActivate} /> :
         <div className="text-[13px] font-semibold break-words leading-5"><GraphNameLabel id={detail.id} name={detail.title} /></div>}
       {edge ? <div className="mt-1 flex items-center gap-1 text-[11px] text-slate-400 leading-4">
+        {!edge.membershipFor && nodeOptions.some(n=>n.id===edge.sourceNodeId) && nodeOptions.some(n=>n.id===edge.targetNodeId) ?
+          <label className="flex shrink-0 items-center gap-1" title="起点依赖终点">
+            <input type="checkbox" checked={edge.relationKind==='dependency'} onChange={event=>onEdgeChange(event.target.checked
+              ? {relationKind:'dependency', direction:'forward'} : {relationKind:'relation'})} />起点依赖终点
+          </label> : edge.relationKind==='dependency' && <span className="shrink-0">起点依赖终点</span>}
         <span className="min-w-0 truncate">{detail.meta?.split('\n')[0]}</span>
       </div> : detail.meta && <div className="mt-1 text-[11px] text-slate-400 leading-4 whitespace-pre-wrap">{detail.meta}</div>}
+      {!!detail.pathSegments?.length && <div className="mt-1 text-[11px] leading-4"><GraphPathLabel segments={detail.pathSegments} /></div>}
       </div>
     </div>
     <div className="flex-1 min-h-0 overflow-y-auto new-scroll px-4 py-3 text-[14px] leading-6 whitespace-pre-wrap break-words">
@@ -91,6 +100,7 @@ export function CanvasDetailPanel({ detail, position, size, maxWidth, maxHeight,
         target={detail.kind === 'edge' ? { kind: 'edge', id: detail.id, field: 'edgeContent' } : { kind: 'node', id: detail.id, field: 'content' }}
         value={detail.content} surface="detail" className="min-h-24" placeholder={detail.kind === 'edge' ? '点击输入关系描述' : '点击输入节点内容'} onActivate={onActivate} />}
       {designDetails}
+      {dependencyLinks}
     </div>
     <button type="button" data-detail-resize aria-label="调整详情框大小" className="absolute bottom-0 right-0 w-5 h-5 cursor-se-resize touch-none select-none"
       onPointerDown={(event) => {

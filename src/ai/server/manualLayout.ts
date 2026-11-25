@@ -1,10 +1,21 @@
 import { createHash } from 'node:crypto';
 import { getCanvasPaths } from '@/v3/paths';
 import { getHierarchyIndex } from '@/v3/hierarchyIndex';
+import { presentationPlacement } from '@/v3/presentationLayout';
 import type { GraphState, Placement } from '@/v3/types';
 
 const positionStamp = (position?: Placement) => position ? [position.x, position.y, position.source,
   position.lastManualAt ?? null, position.manualAnchor ? [position.manualAnchor.x, position.manualAnchor.y] : null] : null;
+
+export function visibleDragDistance(before: GraphState, after: GraphState, canvasId: string, parentId: string, id: string): number | undefined {
+  const local = (state: GraphState) => {
+    const canvas = state.canvases.find(item => item.canvasId === canvasId);
+    const base = (state.documents[parentId]?.placements ?? canvas?.placements)?.[id];
+    return canvas && base && presentationPlacement(canvas, id, parentId, base);
+  };
+  const start = local(before), end = local(after);
+  return start && end ? Math.hypot(end.x - start.x, end.y - start.y) : undefined;
+}
 
 /** The user's drop is relative to this ancestry, not to the whole graph
  * revision. Unrelated text/edge edits can safely coexist; a new drag, ownership

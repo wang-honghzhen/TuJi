@@ -73,10 +73,10 @@ export function readCapacityReceipt(call:ToolCallRecord,args:Record<string,unkno
       instruction='自设budget不足以容纳完整读取回执；提高或省略budget后重试。调整预算不保证总上下文余量足够。';
     }else if(requiredTokens>limits.contextRemainingTokens){
       blockingReason='context_headroom';nextAction='restore_context_capacity';
-      instruction='计入本组已返回结果后，持续上下文余量不足。系统自动维护上下文，但不保证下一响应腾出足够空间；仍受阻时以partial结束或用interaction_ask请求用户调整容量，勿同参循环重试。';
+      instruction='计入本组已返回结果后，持续上下文余量不足。系统自动维护上下文，但不保证下一响应腾出足够空间；可直接结束或用interaction_ask请求用户调整容量，勿同参循环重试。';
     }else if(diagnostics.usePageBudget&&limits.protectedWindowTokens!==undefined&&requiredTokens>limits.protectedWindowTokens){
       blockingReason='protected_page_window';nextAction='restore_protected_page_capacity';
-      instruction='连续分页所需的近期保护空间不足。系统自动维护上下文；仍受阻时以partial结束或用interaction_ask请求用户调整容量。勿为重试丢弃仍依赖的资料，也勿重复已成功页。';
+      instruction='连续分页所需的近期保护空间不足。系统自动维护上下文；可直接结束或用interaction_ask请求用户调整容量。勿为重试丢弃仍依赖的资料，也勿重复已成功页。';
     }else if(requiredTokens>limits.maximumTokens){
       blockingReason='single_read_limit';nextAction='reduce_scope_or_restore_capacity';
       instruction='结果超过当前单次读取上限；按已有入口缩小读取范围或恢复容量。没有可用小范围入口时报告阻塞，勿同参循环重试。';
@@ -93,8 +93,8 @@ export function readCapacityReceipt(call:ToolCallRecord,args:Record<string,unkno
     // persistent limit without inventing a required size or a retry guarantee.
     const ceiling=diagnostics.usePageBudget?Math.min(limits.pageBudget,availableTokens):availableTokens;
     if(typeof args.budget==='number'&&limits.requestedLimit<=ceiling){blockingReason='requested_budget';nextAction='increase_read_budget';instruction='自设budget下无法装入完整片段；提高或省略budget后重试，仍须满足上下文及保护空间限制。';}
-    else if(limits.contextRemainingTokens<=ceiling){blockingReason='context_headroom';nextAction='restore_context_capacity';instruction='持续上下文余量不足。系统自动维护上下文；仍受阻时以partial结束或请求用户调整容量，勿同参循环重试。';}
-    else if(diagnostics.usePageBudget&&limits.protectedWindowTokens!==undefined&&limits.protectedWindowTokens<=ceiling){blockingReason='protected_page_window';nextAction='restore_protected_page_capacity';instruction='连续分页保护空间不足。系统自动维护上下文；仍受阻时以partial结束或请求用户调整容量，勿循环重开首页。';}
+    else if(limits.contextRemainingTokens<=ceiling){blockingReason='context_headroom';nextAction='restore_context_capacity';instruction='持续上下文余量不足。系统自动维护上下文；可直接结束或请求用户调整容量，勿同参循环重试。';}
+    else if(diagnostics.usePageBudget&&limits.protectedWindowTokens!==undefined&&limits.protectedWindowTokens<=ceiling){blockingReason='protected_page_window';nextAction='restore_protected_page_capacity';instruction='连续分页保护空间不足。系统自动维护上下文；可直接结束或请求用户调整容量，勿循环重开首页。';}
   }
   const result={status:'blocked',code:'READ_GROUP_CAPACITY',executed:false,coverage:readCoverage(readKind(call.name),['capacity'],true),callId:call.id,
     ...(call.name==='graph_read_node_edges'?{requestedRefs:Array.isArray(args.requests)?args.requests.map(r=>(r as {refId:string}).refId):[args.refId]}:{}),
@@ -105,8 +105,8 @@ export function readCapacityReceipt(call:ToolCallRecord,args:Record<string,unkno
     blockingReason,nextAction,instruction:instruction+(hasPointer?' 保留requestedCursor的原pointerId和页码；尚未交付该页。':' 尚未创建新分页快照；requestedRead保留原参数。')};
   const compact:Record<string,string>={
     requested_budget:'提高或省略budget；仍须满足上下文余量。',
-    context_headroom:'系统自动维护；仍不足时partial结束或请用户调整容量，勿循环重试。',
-    protected_page_window:'保护空间不足；系统自动维护，仍不足时partial结束或请用户调整容量。',
+    context_headroom:'系统自动维护；可直接结束或请用户调整容量，勿循环重试。',
+    protected_page_window:'保护空间不足；系统自动维护，可直接结束或请用户调整容量。',
     group_quota:nextAction==='retry_unread_in_next_response'?'本组额度耗尽；下一响应单独重试未读入口，勿重复成功页。':diagnostics?.minimumOnly?'本组额度不足；所需值只是最低门槛，尚不能保证下一响应可读。':'本组额度不足；先检查预算和容量，尚不能保证下一响应可读。',
     single_read_limit:'超过单次上限；缩小范围或恢复容量，勿循环重试。',
     undetermined:'先检查预算和容量；尚不能保证下一响应重试成功。',
@@ -117,8 +117,8 @@ export function readCapacityReceipt(call:ToolCallRecord,args:Record<string,unkno
   if(result.nextAction==='retry_unread_in_next_response'&&limits&&requiredTokens!==undefined
     &&requiredTokens>Math.min(limits.nextResponseTokens,limits.contextRemainingTokens-estimateTokens(JSON.stringify(result)))){
     result.blockingReason='context_headroom';result.nextAction='restore_context_capacity';
-    result.instruction='计入本次失败回执后持续余量不足。系统自动维护上下文；仍受阻时以partial结束或请求用户调整容量，保留原读取入口。';
-    compactCapacityReceipt(result,availableTokens,'系统自动维护；仍不足时partial结束或请用户调整容量，保留原入口。');
+    result.instruction='计入本次失败回执后持续余量不足。系统自动维护上下文；可直接结束或请求用户调整容量，保留原读取入口。';
+    compactCapacityReceipt(result,availableTokens,'系统自动维护；可直接结束或请用户调整容量，保留原入口。');
   }
   return result;
 }

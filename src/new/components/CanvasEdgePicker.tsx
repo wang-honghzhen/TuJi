@@ -1,9 +1,10 @@
-import { useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import type { CanvasNodeOption } from '@/v3/layout';
 import type { GraphEdge } from '@/v3/types';
 import type { EdgePatch } from '@/v3/storage';
 import { GraphPathLabel } from './GraphPathLabel';
+import { duplicatePathIds } from '../graphPathIdentity';
 
 export type EdgePickerKind = 'source' | 'target' | 'direction';
 export interface EdgePickerAnchor { kind: EdgePickerKind; element: HTMLButtonElement }
@@ -31,8 +32,10 @@ export function CanvasEdgePicker({ anchor, edge, nodeOptions, panelX, panelY, pa
   const [bounds, setBounds] = useState<{ left: number; top: number; width: number; maxHeight: number } | null>(null);
   const endpoint = anchor.kind === 'source' || anchor.kind === 'target';
   const title = anchor.kind === 'source' ? '选择起点' : anchor.kind === 'target' ? '选择终点' : '选择方向';
+  const suffixes = useMemo(() => duplicatePathIds(nodeOptions.map(item => ({ id: item.id, label: item.path }))), [nodeOptions]);
+  const query = search.trim().toLocaleLowerCase();
   const options = nodeOptions.filter((item) => item.id !== (anchor.kind === 'source' ? edge.targetNodeId : edge.sourceNodeId) &&
-    item.path.toLocaleLowerCase().includes(search.toLocaleLowerCase()));
+    `${item.path} ${suffixes.get(item.id) ?? ''}`.toLocaleLowerCase().includes(query));
   const placed = Boolean(bounds);
   useEffect(() => { if (placed && endpoint) searchInput.current?.focus({ preventScroll: true }); }, [placed, endpoint]);
 
@@ -92,10 +95,11 @@ export function CanvasEdgePicker({ anchor, edge, nodeOptions, panelX, panelY, pa
       <div className="min-h-0 max-h-52 overflow-y-auto new-scroll">{options.length ? options.map((item) =>
         <button key={item.id} type="button" data-endpoint-option={item.id} aria-pressed={item.id === currentNodeId}
           className={`block w-full text-left px-2 py-1.5 break-words rounded hover:bg-blue-500/20 ${item.id === currentNodeId ? 'bg-blue-500/15 text-blue-200' : ''}`}
-          onClick={() => choose({ [anchor.kind === 'source' ? 'sourceNodeId' : 'targetNodeId']: item.id })}><GraphPathLabel segments={item.segments} /></button>) :
+          onClick={() => choose({ [anchor.kind === 'source' ? 'sourceNodeId' : 'targetNodeId']: item.id })}><GraphPathLabel segments={item.segments} />
+          {suffixes.has(item.id) && <span className="ml-1 text-slate-400">{suffixes.get(item.id)}</span>}</button>) :
         <div className="px-2 py-2 text-slate-500">没有匹配的节点</div>}</div>
     </> : <div className="min-h-0 overflow-y-auto new-scroll">
-      {(['reverse', 'forward', 'none'] as const).map((direction, index) => <button key={direction} type="button" data-direction-option={direction}
+      {(['reverse', 'forward', 'none'] as const).filter(direction => direction !== 'none' || !edge.relationKind).map((direction, index) => <button key={direction} type="button" data-direction-option={direction}
         className="flex w-full items-center gap-3 rounded px-2 py-1.5 text-left hover:bg-blue-500/20" onClick={() => choose({ direction })}>
         <span className="w-5 text-center text-lg text-blue-200">{['←', '→', '—'][index]}</span><span>{['交换起点与终点', '有向边', '无向边'][index]}</span></button>)}</div>}
   </div>, document.body);

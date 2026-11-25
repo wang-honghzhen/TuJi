@@ -5,7 +5,7 @@ export const TOOL_CONTEXT_KINDS: Readonly<Record<string, ToolContextKind>> = Obj
   web_search: 'read_data', web_fetch: 'read_data',
   graph_read: 'read_data', graph_read_directory: 'read_data', graph_read_subgraph: 'read_data',
   graph_read_node_content: 'read_data', graph_read_directory_content: 'read_data',
-  graph_read_design_references: 'read_data', graph_search_node_content: 'read_data',
+  graph_read_dependencies: 'read_data', graph_read_design_references: 'read_data', graph_search_node_content: 'read_data',
   graph_read_object_field: 'read_data', graph_read_node_edges: 'read_data',
   graph_read_external: 'read_data', graph_neighbors: 'read_data', graph_search: 'read_data',
   graph_outline: 'read_data', workspace_search_artifacts: 'read_data', workspace_read_artifact: 'read_data',
@@ -21,7 +21,7 @@ export const DIRECTORY_REPLAY_TOOLS: Readonly<Record<string, 'directory' | 'dire
   graph_read_directory: 'directory', context_read_pages: 'directory_page',
 });
 export const GRAPH_USAGE_TOOLS: Readonly<Record<string, 'read' | 'page' | 'write'>> = Object.freeze({
-  graph_read_design_references: 'read', graph_search_node_content: 'read',
+  graph_read_dependencies: 'read', graph_read_design_references: 'read', graph_search_node_content: 'read',
   graph_read: 'read', graph_read_subgraph: 'read', graph_read_node_content: 'read',
   graph_read_directory_content: 'read', graph_read_object_field: 'read', graph_read_node_edges: 'read',
   graph_read_external: 'read', graph_neighbors: 'read', graph_search: 'read',

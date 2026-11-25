@@ -28,29 +28,47 @@ const bounds = (rects: Rect[], root = false): Rect => {
     ...rects.map(r => r.y + r.height + RECORD_HEADER_HEIGHT + RECORD_PADDING * 2)) };
 };
 
-/** Finite edge candidates, then an unbounded-plane fallback. No trial grid limit
- * can leave an overlap. The root accepts negative positions; content does not. */
+/** After expanding each obstacle by the footprint and clearance, the closest
+ * free point is directly above/below the request or on a vertical boundary. */
 export function nearestRegionSpace(size: Rect, preferred: Point, input: Rect[] | RectangleIndex, root = false): Point {
   const index = input instanceof RectangleIndex ? input : new RectangleIndex(input);
-  const obstacles = index.rects;
-  const clamp = (p: Point) => ({ x: root ? p.x : Math.max(0, p.x), y: root ? p.y : Math.max(0, p.y) });
-  const start = clamp(validPoint(preferred) ? preferred : { x: 0, y: 0 });
-  const free = (p: Point) => !index.collides({ ...size, ...p }, BLOCK_GAP);
-  if (free(start)) return start;
-  const candidates: Point[] = [];
-  for (const r of obstacles) {
-    const left = r.x - size.width - BLOCK_GAP; const right = r.x + r.width + BLOCK_GAP;
-    const top = r.y - size.height - BLOCK_GAP; const bottom = r.y + r.height + BLOCK_GAP;
-    candidates.push({ x: left, y: start.y }, { x: right, y: start.y }, { x: start.x, y: top }, { x: start.x, y: bottom },
-      { x: right, y: r.y }, { x: r.x, y: bottom }, { x: left, y: top }, { x: right, y: bottom });
+  const clamp = (v: number) => root ? v : Math.max(0, v);
+  const start = validPoint(preferred) ? { x: clamp(preferred.x), y: clamp(preferred.y) } : { x: 0, y: 0 };
+  if (!index.collides({ ...size, ...start }, BLOCK_GAP)) return start;
+  const leadingEdge = (origin: number, span: number) => {
+    const edge = origin - span - BLOCK_GAP;
+    // Subtracting then adding a fractional footprint can round into the obstacle.
+    return edge + span + BLOCK_GAP > origin
+      ? edge - Number.EPSILON * Math.max(1, Math.abs(edge), span, Math.abs(origin)) * 2 : edge;
+  };
+  const spans = index.rects.map(r => ({ left: leadingEdge(r.x, size.width), right: r.x + r.width + BLOCK_GAP,
+    top: leadingEdge(r.y, size.height), bottom: r.y + r.height + BLOCK_GAP })).sort((a, b) => a.top - b.top);
+  const xs = new Set([start.x]);
+  for (const span of spans) { xs.add(clamp(span.left)); xs.add(clamp(span.right)); }
+  const byDistance = [...xs].sort((a, b) => Math.abs(a - start.x) - Math.abs(b - start.x) || a - b);
+  let best = start, bestDistance = Infinity;
+  for (const x of byDistance) {
+    const dx2 = (x - start.x) ** 2;
+    if (dx2 > bestDistance) break;
+    // Find the connected interval containing start.y. Touching intervals stay
+    // separate because their shared boundary is a legal, exact-fit position.
+    let top = Infinity, bottom = -Infinity;
+    for (const span of spans) {
+      if (x <= span.left || x >= span.right) continue;
+      if (span.top >= bottom) {
+        if (bottom > start.y || span.top >= start.y) break;
+        top = span.top;
+      }
+      bottom = Math.max(bottom, span.bottom);
+    }
+    let y = start.y;
+    if (top < y && y < bottom) y = (root || top >= 0) && y - top <= bottom - y ? top : bottom;
+    const distance = dx2 + (y - start.y) ** 2;
+    if (distance < bestDistance || (distance === bestDistance && (y < best.y || (y === best.y && x < best.x)))) {
+      best = { x, y }; bestDistance = distance;
+    }
   }
-  // These two candidates guarantee a result even in extremely dense layouts.
-  candidates.push({ x: Math.max(...obstacles.map(r => r.x + r.width)) + BLOCK_GAP, y: start.y },
-    { x: start.x, y: Math.max(...obstacles.map(r => r.y + r.height)) + BLOCK_GAP });
-  const distance = (p: Point) => (p.x - start.x) ** 2 + (p.y - start.y) ** 2;
-  const unique = new Map<string, Point>();
-  candidates.forEach(p => { const q = clamp(p); unique.set(`${q.x}/${q.y}`, q); });
-  return [...unique.values()].sort((a, b) => distance(a) - distance(b) || a.y - b.y || a.x - b.x).find(free)!;
+  return best;
 }
 
 export interface RegionGeometry {
@@ -203,21 +221,23 @@ export function measureNaturalRegions(state: GraphState, canvas?: CanvasRecord):
   return geometry;
 }
 
+export interface PlacementFrame { canvasId: string; ancestors: ReadonlySet<string> }
+
 /** Pure normalization; every structural write and drag preview uses this path.
  * User positions may overlap nodes or containers. New automatic placements avoid
  * occupied space, while unchanged siblings keep their coordinates during a drag.
  * Old 'manual' flags were also produced by automatic operations: migrate them
  * to preferences once, preserving coordinates wherever they are still legal. */
-export function normalizeRegionLayout(state: GraphState, previous?: GraphState, protectedIds?: ReadonlySet<string>): GraphState {
+export function normalizeRegionLayout(state: GraphState, previous?: GraphState, protectedIds?: ReadonlySet<string>, frame?: PlacementFrame): GraphState {
   const preview = Boolean(previous && isRegionPreview(state, previous));
   const fixed = preview ? new Set([...protectedIds ?? [], ...previewProtection.get(state) ?? []]) : protectedIds;
-  const normalized = normalizeRegions(state, previous, previous && state.layoutVersion === REGION_LAYOUT_VERSION ? changedRegions(state, previous) : undefined, preview, fixed);
+  const normalized = normalizeRegions(state, previous, previous && state.layoutVersion === REGION_LAYOUT_VERSION ? changedRegions(state, previous) : undefined, preview, fixed, frame);
   const presented = preview ? normalized : reconcilePresentationLayouts(normalized, previous, fixed);
   if (presented !== normalized) reconcileRegionGeometry(normalized, presented);
   if (preview && previous) { previews.set(presented, previous); if (fixed) previewProtection.set(presented, fixed); }
   return presented;
 }
-function normalizeRegions(state: GraphState, previous?: GraphState, dirty?: DirtyRegions, dragging = false, protectedIds?: ReadonlySet<string>): GraphState {
+function normalizeRegions(state: GraphState, previous?: GraphState, dirty?: DirtyRegions, dragging = false, protectedIds?: ReadonlySet<string>, frame?: PlacementFrame): GraphState {
   const solveTime = Date.now();
   const migrate = state.layoutVersion !== REGION_LAYOUT_VERSION;
   const oldGeometry = previous ? getNaturalGeometry(previous) : undefined;
@@ -247,7 +267,10 @@ function normalizeRegions(state: GraphState, previous?: GraphState, dirty?: Dirt
       return old?.x === p.x && old.y === p.y && old.source === p.source && size?.width === sizes.get(id)!.width && size.height === sizes.get(id)!.height;
     };
     const stability = new Map(ids.map(id => [id, Number(stable(id))]));
-    const order = [...ids].sort((a, b) => Number(pinned(b)) - Number(pinned(a)) || Number(grew(a)) - Number(grew(b)) ||
+    // On a pointed insertion, settle its growing coordinate frame before other
+    // automatic siblings. Manual objects and active editors still take priority.
+    const inFrame = (id: string) => Boolean(frame && (!canvas || canvas.canvasId === frame.canvasId) && frame.ancestors.has(id));
+    const order = [...ids].sort((a, b) => Number(pinned(b)) - Number(pinned(a)) || Number(inFrame(b)) - Number(inFrame(a)) || Number(grew(a)) - Number(grew(b)) ||
       manualProtection(preferred(b), solveTime) - manualProtection(preferred(a), solveTime) || stability.get(b)! - stability.get(a)! ||
       Number(Boolean(state.nodes[b])) - Number(Boolean(state.nodes[a])) || a.localeCompare(b));
     const occupied = new RectangleIndex(); const stableObstacles = new RectangleIndex();
